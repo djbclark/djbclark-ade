@@ -82,15 +82,21 @@ if args[:2] == ["agent", "reload"]:
         else:
             agents[target] = False
         agents_path.write_text(json.dumps(agents), encoding="utf-8")
-    print(json.dumps({"agentId": target, "status": "reloaded", "timelineSize": 1}))
+    if "FAKE_RELOAD_STDOUT" in os.environ:
+        sys.stdout.write(os.environ["FAKE_RELOAD_STDOUT"])
+    else:
+        print(json.dumps({"agentId": target, "status": "reloaded", "timelineSize": 1}))
     sys.exit(0)
 
 if args[:1] == ["send"]:
     if os.environ.get("FAKE_SEND_FAIL"):
         sys.stderr.write("send failed\\n")
         sys.exit(1)
-    print(json.dumps({"agentId": args[-2], "status": "sent", "message": "Message sent"}))
-    sys.exit(0)
+    if "FAKE_SEND_STDOUT" in os.environ:
+        sys.stdout.write(os.environ["FAKE_SEND_STDOUT"])
+    else:
+        print(json.dumps({"agentId": args[-2], "status": "sent", "message": "Message sent"}))
+    sys.exit(int(os.environ.get("FAKE_SEND_RC", "0")))
 
 sys.stderr.write(f"unexpected args: {args}\\n")
 sys.exit(2)
@@ -551,6 +557,226 @@ def test_unusable_inspect_record_fails_closed(tmp_path):
         current_role_fn=lambda _: None,
     )
     assert res2.exit_code == 1 and res2.status == "error"
+
+
+# --- MEDIUM-1: paseo_send_message JSON / exit-code validation --------------------------------------------------------
+
+@pytest.mark.parametrize("rc,payload,want_status", [
+    ("5", json.dumps({"agentId": A, "status": "queued", "message": "Message queued"}), "queued"),
+    ("0", json.dumps({"agentId": A, "status": "queued", "message": "Message queued"}), "queued"),
+    ("0", json.dumps({"agentId": A, "status": "completed", "message": "Done"}), "completed"),
+    ("0", json.dumps({"agentId": A, "status": "sent", "message": "Sent"}), "sent"),
+])
+def test_send_message_accepts_valid_json_receipts_including_rc5_queued(env_world, rc, payload, want_status):
+    env_world.set_agents({A: True})
+    proc = env_world.run(
+        A,
+        "--allow-any",
+        "--message",
+        "resume",
+        "--json",
+        extra_env={"FAKE_SEND_RC": rc, "FAKE_SEND_STDOUT": payload},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    data = json.loads(proc.stdout)
+    assert data["status"] == "revived"
+    assert data["message_sent"] is True
+    assert data["message_status"] == want_status
+    if want_status == "queued":
+        assert "queued" in data["reason"] and "ack" in data["reason"]
+
+
+@pytest.mark.parametrize("rc,payload", [
+    ("0", json.dumps({"agentId": A, "status": "error", "message": "turn failed"})),
+    ("0", json.dumps({"agentId": A, "status": "timeout", "message": "timed out"})),
+    ("0", "not valid json"),
+    ("0", ""),
+    ("0", json.dumps(["not", "a", "dict"])),
+    ("5", json.dumps({"agentId": A, "status": "sent", "message": "unexpected"})),
+    ("5", json.dumps({"agentId": A, "status": "error", "message": "failed"})),
+    ("5", "not valid json"),
+    ("1", json.dumps({"agentId": A, "status": "sent", "message": "nonzero"})),
+])
+def test_send_message_rejects_error_malformed_or_invalid_rc_payloads(env_world, rc, payload):
+    env_world.set_agents({A: True})
+    proc = env_world.run(
+        A,
+        "--allow-any",
+        "--message",
+        "resume",
+        "--json",
+        extra_env={"FAKE_SEND_RC": rc, "FAKE_SEND_STDOUT": payload},
+    )
+    assert proc.returncode == 1
+    data = json.loads(proc.stdout)
+    assert data["status"] == "message_failed"
+    assert data["revived"] is True
+    assert data["live"] is True
+    assert data["message_sent"] is False
+    assert data["message_status"] == ""
+
+
+# --- MEDIUM-2: paseo_reload JSON validation and timeout --------------------------------------------------------------
+
+@pytest.mark.parametrize("payload", [
+    "not json at all",
+    "",
+    json.dumps(["list-not-dict"]),
+    json.dumps({"agentId": A, "status": "error"}),
+    json.dumps({"agentId": B, "status": "reloaded"}),  # mismatched agentId
+])
+def test_reload_rejects_malformed_unexpected_or_mismatched_json(env_world, payload):
+    env_world.set_agents({A: True})
+    proc = env_world.run(
+        A,
+        "--allow-any",
+        "--json",
+        extra_env={"FAKE_RELOAD_STDOUT": payload},
+    )
+    assert proc.returncode == 1
+    data = json.loads(proc.stdout)
+    assert data["status"] == "error"
+    assert data["revived"] is False
+    # Failed fast before post-reload inspect polling.
+    argvs = [c["argv"] for c in env_world.calls()]
+    reload_idx = argvs.index(["agent", "reload", "--json", "--", A])
+    assert ["agent", "inspect", A, "--json"] not in argvs[reload_idx + 1 :]
+
+
+def test_reload_timeout_expired_raises_oserror(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(revive_mod.subprocess, "run", fake_run)
+    reload_fn = revive_mod.paseo_reload("/fake/paseo", timeout=5.0)
+    with pytest.raises(OSError, match="timed out"):
+        reload_fn(A)
+
+
+# --- MEDIUM-3: CoordinationError during decide/_follow fails closed (exit 4, not exit 2) -----------------------------
+
+def test_coordination_error_during_decide_exits_4_with_json(tmp_path, monkeypatch, capsys):
+    coord = guard._coord()
+    state = tmp_path / "self-session"
+    home = tmp_path / "paseo-home"
+    write_link(state, home, A, B, status="acknowledged", acknowledged_at=stamp())
+
+    def flaky_role(target):
+        if target == B:
+            raise coord.CoordinationError("broker unavailable for successor")
+        return None
+
+    monkeypatch.setattr(coord, "current_role", flaky_role)
+
+    # Direct revive() call returns EXIT_REFUSED (4).
+    res = revive_mod.revive(
+        A,
+        allow_any=True,
+        env={},
+        state_dir=state,
+        home=home,
+        log_path=tmp_path / "overrides.jsonl",
+        inspect_fn=lambda i: {"Id": i, "Archived": False if i == B else True},
+        current_role_fn=flaky_role,
+    )
+    assert res.exit_code == 4 and res.status == "refused"
+
+    # CLI main() with --json returns exit 4 and valid JSON on stdout (never EXIT_USAGE=2).
+    fake_paseo = tmp_path / "fake-paseo"
+    fake_paseo.write_text(FAKE_PASEO, encoding="utf-8")
+    fake_paseo.chmod(0o755)
+    agents_file = tmp_path / "agents.json"
+    agents_file.write_text(json.dumps({A: True, B: False}), encoding="utf-8")
+    env = {
+        "HOME": str(tmp_path),
+        "FAKE_AGENTS": str(agents_file),
+        "FAKE_LOG": str(tmp_path / "calls.jsonl"),
+        "ADE_SELF_SESSION_STATE": str(state),
+        "PASEO_HOME": str(home),
+        "ADE_SEND_GUARD_LOG": str(tmp_path / "overrides.jsonl"),
+    }
+    # Propagate FAKE_* into os.environ only for the child fake-paseo subprocess call inside main().
+    for k in ("FAKE_AGENTS", "FAKE_LOG"):
+        monkeypatch.setenv(k, env[k])
+    rc = revive_mod.main([A, "--allow-any", "--json", "--paseo", str(fake_paseo)], env=env)
+    captured = capsys.readouterr()
+    assert rc == 4
+    data = json.loads(captured.out)
+    assert data["status"] == "refused"
+    assert "broker unavailable" in data["reason"]
+
+
+# --- LOW-1: no misleading override hint on cyclic ledger or archived successor ---------------------------------------
+
+def test_non_overridable_refusals_omit_override_hint_without_flags(env_world):
+    # Archived successor without --allow-any
+    write_link(env_world.state, env_world.home, A, B)
+    env_world.set_agents({A: True, B: True})
+    proc = env_world.run(A, "--json")
+    assert proc.returncode == 4
+    data = json.loads(proc.stdout)
+    assert data["status"] == "refused"
+    assert data["successor"] == B
+    assert "Use --allow-any" not in data["reason"]
+    assert guard.ALLOW_ENV not in data["reason"]
+
+    # Cyclic ledger without --allow-any
+    write_link(env_world.state, env_world.home, B, A)
+    proc2 = env_world.run(A, "--json")
+    assert proc2.returncode == 4
+    data2 = json.loads(proc2.stdout)
+    assert data2["status"] == "refused"
+    assert "cyclic" in data2["reason"].lower()
+    assert "Use --allow-any" not in data2["reason"]
+    assert guard.ALLOW_ENV not in data2["reason"]
+
+
+# --- LOW-2: --paseo "", whitespace ADE_REVIVE_PASEO, invalid poll interval, custom env log isolation ----------------
+
+def test_empty_paseo_flag_and_whitespace_env_exit_2(env_world):
+    p1 = env_world.run(A, "--paseo", "", pass_paseo_flag=False)
+    assert p1.returncode == 2 and "--paseo" in p1.stderr
+
+    p2 = env_world.run(A, extra_env={revive_mod.PASEO_ENV: "   "}, pass_paseo_flag=False)
+    assert p2.returncode == 2 and revive_mod.PASEO_ENV in p2.stderr
+
+
+@pytest.mark.parametrize("bad_poll", ["not-a-number", "0", "-0.5", "nan", "inf"])
+def test_invalid_poll_interval_env_exits_2(env_world, bad_poll):
+    env_world.set_agents({A: True})
+    proc = env_world.run(A, "--allow-any", extra_env={revive_mod.POLL_ENV: bad_poll})
+    assert proc.returncode == 2
+
+
+def test_custom_env_without_log_env_does_not_leak_ambient_guard_log(tmp_path, monkeypatch):
+    ambient_log = tmp_path / "ambient.jsonl"
+    monkeypatch.setenv(guard.LOG_ENV, str(ambient_log))
+    custom_home = tmp_path / "isolated-home"
+    custom_home.mkdir()
+
+    states = [True, False]
+    idx = {"n": 0}
+
+    def fake_inspect(ident):
+        st = states[min(idx["n"], len(states) - 1)]
+        idx["n"] += 1
+        return {"Id": ident, "Archived": st}
+
+    res = revive_mod.revive(
+        A,
+        allow_any=True,
+        env={"HOME": str(custom_home)},
+        state_dir=tmp_path / "state",
+        home=tmp_path / "home",
+        inspect_fn=fake_inspect,
+        reload_fn=lambda _: None,
+        current_role_fn=lambda _: None,
+    )
+    assert res.exit_code == 0
+    assert not ambient_log.exists()
+    expected_log = custom_home / guard.DEFAULT_LOG
+    assert expected_log.exists()
+    assert json.loads(expected_log.read_text(encoding="utf-8").strip())["event"] == "revive"
 
 
 def test_unknown_agent_and_reload_or_send_failure_exit_1(env_world):

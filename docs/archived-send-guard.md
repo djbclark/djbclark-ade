@@ -186,10 +186,12 @@ HTTP endpoint, but `paseo agent reload --json -- ID` (`packages/cli/src/commands
 installed `/Applications/Paseo.app/Contents/Resources/app.asar`) sends the daemon RPC `refresh_agent_request`. In
 `packages/server/src/server/session.ts` (`handleRefreshAgentRequest`), the daemon calls `unarchiveAgentState` (clearing
 `archivedAt` via `agentManager.unarchiveSnapshot`) and reloads/resumes the persisted session from disk without sending a
-prompt or starting a paid model turn (the same RPC used by the installed `reopen-archived` plugin). `bin/ade-revive`
-uses `paseo agent reload --json -- ID` to un-archive, polls a fresh `paseo agent inspect ID --json` until `Archived:
-false` (up to `--timeout`, default `15` s) to prove the agent is live, and delivers `--message TEXT` via `paseo send
---json --no-wait -- ID TEXT` only after live proof succeeds.
+prompt or starting a paid model turn (the same RPC used by the installed `reopen-archived` plugin). `bin/ade-revive` uses `paseo agent reload --json -- ID` to un-archive (verifying a valid JSON object with
+`status: "reloaded"` and matching `agentId` if present), polls a fresh `paseo agent inspect ID --json` until
+`Archived: false` (up to `--timeout`, default `15` s) to prove the agent is live, and delivers `--message TEXT` via
+`paseo send --json --no-wait -- ID TEXT` only after live proof succeeds (verifying JSON stdout and accepting only
+exit `0` with `status` in `sent`/`completed`/`queued` or exit `5` with `status: "queued"`, surfacing `message_status`
+in JSON output and noting queued receipts that still await peer ack).
 
 **Safety invariants:**
 

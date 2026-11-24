@@ -71,6 +71,7 @@ class ReviveResult:
     proof: str = ""
     successor: str = ""
     message_sent: bool = False
+    message_status: str = ""
     dry_run: bool = False
 
     def as_dict(self) -> dict[str, Any]:
@@ -83,6 +84,7 @@ class ReviveResult:
             "proof": self.proof,
             "successor": self.successor,
             "message_sent": self.message_sent,
+            "message_status": self.message_status,
             "reason": self.reason,
         }
         if self.dry_run:
@@ -90,10 +92,14 @@ class ReviveResult:
         return out
 
 
+class _UsageError(ValueError):
+    """CLI / argument validation failure (maps to EXIT_USAGE in main)."""
+
+
 def validate_agent_id(raw: str) -> str:
     """Strict full lowercase UUID; rejects prefixes, names, whitespace, and flag-like strings (`--host`, `--home`)."""
     if not isinstance(raw, str) or not raw or raw.startswith("-") or not succ.UUID_RE.fullmatch(raw):
-        raise ValueError(f"invalid agent ID {raw!r}: must be a full lowercase UUID (not a flag, prefix, or name)")
+        raise _UsageError(f"invalid agent ID {raw!r}: must be a full lowercase UUID (not a flag, prefix, or name)")
     return raw
 
 
@@ -116,15 +122,33 @@ def paseo_reload(paseo: str = "paseo", timeout: float = 30.0) -> Callable[[str],
             detail = (proc.stderr or proc.stdout or "").strip()
             detail = f": {detail[:300]}" if detail else ""
             raise OSError(f"paseo agent reload exited {proc.returncode}{detail}")
+        raw_out = (proc.stdout or "").strip()
+        try:
+            data = json.loads(raw_out)
+        except ValueError as exc:
+            detail = f": {raw_out[:300]}" if raw_out else ""
+            raise OSError(f"paseo agent reload returned non-JSON output{detail}") from exc
+        if not isinstance(data, dict):
+            raise OSError("paseo agent reload returned non-object JSON payload")
+        if data.get("status") != "reloaded":
+            raise OSError(f"paseo agent reload returned unexpected status={data.get('status')!r}")
+        if "agentId" in data and data["agentId"] != ident:
+            raise OSError(
+                f"paseo agent reload returned mismatched agentId={data['agentId']!r} (expected {ident!r})"
+            )
 
     return _reload
 
 
-def paseo_send_message(paseo: str = "paseo", timeout: float = 30.0) -> Callable[[str, str], None]:
-    """Deliver a post-revive message via `paseo send --json --no-wait -- ID TEXT` (argv list, never shell=True)."""
+def paseo_send_message(paseo: str = "paseo", timeout: float = 30.0) -> Callable[[str, str], str]:
+    """Deliver a post-revive message via `paseo send --json --no-wait -- ID TEXT` (argv list, never shell=True).
+
+    Accepts only `(rc == 0 and status in ("sent", "completed", "queued"))` or `(rc == 5 and status == "queued")`,
+    returning the parsed delivery status string so callers can distinguish queued (ack still required) from sent.
+    """
     cmd_timeout = max(float(timeout), 30.0)
 
-    def _send(ident: str, text: str) -> None:
+    def _send(ident: str, text: str) -> str:
         try:
             proc = subprocess.run(
                 [paseo, "send", "--json", "--no-wait", "--", ident, text],
@@ -135,19 +159,34 @@ def paseo_send_message(paseo: str = "paseo", timeout: float = 30.0) -> Callable[
             )
         except subprocess.TimeoutExpired as exc:
             raise OSError(f"paseo send timed out after {cmd_timeout:g}s") from exc
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()
-            detail = f": {detail[:300]}" if detail else ""
-            raise OSError(f"paseo send exited {proc.returncode}{detail}")
+        raw_out = (proc.stdout or "").strip()
+        try:
+            data = json.loads(raw_out)
+        except ValueError as exc:
+            detail = (proc.stderr or raw_out or "").strip()[:300]
+            detail = f": {detail}" if detail else ""
+            raise OSError(f"paseo send exited {proc.returncode} with non-JSON output{detail}") from exc
+        if not isinstance(data, dict):
+            raise OSError(f"paseo send exited {proc.returncode} with non-object JSON payload")
+        status = data.get("status")
+        if (proc.returncode == 0 and status in ("sent", "completed", "queued")) or (
+            proc.returncode == 5 and status == "queued"
+        ):
+            return status
+        msg_val = data.get("message")
+        detail = (str(msg_val) if msg_val is not None else (proc.stderr or raw_out or "")).strip()[:300]
+        detail = f": {detail}" if detail else ""
+        raise OSError(f"paseo send exited {proc.returncode} with status={status!r}{detail}")
 
     return _send
 
 
 def _successor_hint(ident: str, state_dir: Path | None, home: Path | None) -> str:
     """Return the completed successor id if `ident` was replaced and the ledger is acyclic, else ''."""
+    coord_err = sg._coord().CoordinationError
     try:
         cur = succ.effective_lead(ident, state_dir, home)
-    except succ.SuccessionError:
+    except (succ.SuccessionError, coord_err):
         return ""
     return cur if cur != ident else ""
 
@@ -177,22 +216,31 @@ def revive(
     """Validate, authorize, log, un-archive, and prove live a non-replaced Paseo agent."""
     ident = validate_agent_id(agent_id)
     if not math.isfinite(timeout) or timeout < 0:
-        raise ValueError(f"invalid --timeout {timeout!r}: must be a finite non-negative number")
+        raise _UsageError(f"invalid --timeout {timeout!r}: must be a finite non-negative number")
     if not math.isfinite(poll_interval) or poll_interval <= 0:
-        raise ValueError(f"invalid poll_interval {poll_interval!r}: must be a finite positive number")
+        raise _UsageError(f"invalid poll_interval {poll_interval!r}: must be a finite positive number")
     if message is not None and not message.strip():
-        raise ValueError("invalid --message: must not be empty")
+        raise _UsageError("invalid --message: must not be empty")
 
     env_map = os.environ if env is None else env
     eff_state = state_dir if state_dir is not None else succ.default_state_dir(env_map)
     eff_home = home if home is not None else succ.default_home(env_map)
-    eff_log = log_path if log_path is not None else (Path(env_map[sg.LOG_ENV]) if env_map.get(sg.LOG_ENV) else None)
+    if log_path is not None:
+        eff_log: Path | None = log_path
+    elif env_map.get(sg.LOG_ENV):
+        eff_log = Path(env_map[sg.LOG_ENV])
+    elif env is not None:
+        base_home = Path(env_map["HOME"]) if env_map.get("HOME") else Path.home()
+        eff_log = base_home / sg.DEFAULT_LOG
+    else:
+        eff_log = None
     sender = (env_map.get(sg.SENDER_ENV) or "").strip()
 
     raw_inspect = inspect_fn if inspect_fn is not None else sg.paseo_inspect(paseo)
     ls_label = ls_label_fn if ls_label_fn is not None else sg.paseo_ls_label(paseo)
     do_reload = reload_fn if reload_fn is not None else paseo_reload(paseo, timeout=timeout)
     do_send = send_fn if send_fn is not None else paseo_send_message(paseo, timeout=timeout)
+    coord_err = sg._coord().CoordinationError
 
     # 1. Enrolled-role authority check (mirrors ade_send_guard.guard; fails closed).
     try:
@@ -247,16 +295,25 @@ def revive(
         )
 
     # 3. Succession & ownership decision via ade_send_guard.decide (NEVER honours ADE_ALLOW_REPLACED_SEND).
-    d = sg.decide(
-        ident,
-        cached_inspect,
-        allow_archived=False,
-        allow_replaced=None,
-        sender=sender or None,
-        ls_label=ls_label,
-        state_dir=eff_state,
-        home=eff_home,
-    )
+    try:
+        d = sg.decide(
+            ident,
+            cached_inspect,
+            allow_archived=False,
+            allow_replaced=None,
+            sender=sender or None,
+            ls_label=ls_label,
+            state_dir=eff_state,
+            home=eff_home,
+        )
+    except (succ.SuccessionError, coord_err) as exc:
+        return ReviveResult(
+            EXIT_REFUSED,
+            ident,
+            "refused",
+            f"enrolled authority or succession ledger unavailable; refusing revive ({exc})",
+            dry_run=dry_run,
+        )
 
     if d.action == sg.REDIRECT:
         return ReviveResult(
@@ -284,29 +341,27 @@ def revive(
         auth = "owner"
         proof = d.proof
     else:
-        # d.action == sg.REFUSE: either cyclic ledger, archived successor, or unauthorized archived agent.
-        env_override = (env_map.get(sg.ALLOW_ENV) or "").strip() == ident
-        flag_override = bool(allow_any)
-        if not (env_override or flag_override):
+        # d.action == sg.REFUSE: distinguish non-overridable (cyclic ledger / archived successor) from
+        # plain unauthorized archived target (zero extra Paseo calls because cached_inspect is memoized).
+        try:
+            d2 = sg.decide(
+                ident,
+                cached_inspect,
+                allow_archived=ident,
+                allow_replaced=None,
+                sender=None,
+                ls_label=None,
+                state_dir=eff_state,
+                home=eff_home,
+            )
+        except (succ.SuccessionError, coord_err) as exc:
             return ReviveResult(
                 EXIT_REFUSED,
                 ident,
                 "refused",
-                f"refused: {d.reason}. Use --allow-any or {sg.ALLOW_ENV}={ident} only when authorized by the operator",
-                successor=_successor_hint(ident, eff_state, eff_home),
+                f"enrolled authority or succession ledger unavailable; refusing revive ({exc})",
                 dry_run=dry_run,
             )
-        # Re-check with allow_archived=ident: decide() STILL refuses cycles, redirects, and archived successors.
-        d2 = sg.decide(
-            ident,
-            cached_inspect,
-            allow_archived=ident,
-            allow_replaced=None,
-            sender=None,
-            ls_label=None,
-            state_dir=eff_state,
-            home=eff_home,
-        )
         if d2.action != sg.PASS:
             succ_id = d2.target if d2.action == sg.REDIRECT else _successor_hint(ident, eff_state, eff_home)
             return ReviveResult(
@@ -315,6 +370,16 @@ def revive(
                 "refused",
                 f"refused: {d2.reason} (overrides never revive a replaced agent, archived successor, or cyclic ledger)",
                 successor=succ_id,
+                dry_run=dry_run,
+            )
+        env_override = (env_map.get(sg.ALLOW_ENV) or "").strip() == ident
+        flag_override = bool(allow_any)
+        if not (env_override or flag_override):
+            return ReviveResult(
+                EXIT_REFUSED,
+                ident,
+                "refused",
+                f"refused: {d.reason}. Use --allow-any or {sg.ALLOW_ENV}={ident} only when authorized by the operator",
                 dry_run=dry_run,
             )
         if env_override:
@@ -394,7 +459,7 @@ def revive(
     # 8. Optional follow-up message after live proof.
     if message is not None:
         try:
-            do_send(ident, message)
+            raw_status = do_send(ident, message)
         except Exception as exc:  # noqa: BLE001
             return ReviveResult(
                 EXIT_ERROR,
@@ -407,16 +472,25 @@ def revive(
                 proof=proof,
                 message_sent=False,
             )
+        msg_status = raw_status if isinstance(raw_status, str) and raw_status else "sent"
+        if msg_status == "queued":
+            detail = (
+                f"revived {ident}, verified live, and message queued "
+                f"(delivery pending peer ack; auth={auth}, proof={proof})"
+            )
+        else:
+            detail = f"revived {ident}, verified live, and message {msg_status} (auth={auth}, proof={proof})"
         return ReviveResult(
             EXIT_OK,
             ident,
             "revived",
-            f"revived {ident}, verified live, and sent message (auth={auth}, proof={proof})",
+            detail,
             revived=True,
             live=True,
             authorization=auth,
             proof=proof,
             message_sent=True,
+            message_status=msg_status,
         )
 
     return ReviveResult(
@@ -474,7 +548,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
 
     paseo_bin = ns.paseo if ns.paseo is not None else (env_map.get(PASEO_ENV) or "paseo")
     if not paseo_bin.strip():
-        print("ade-revive: --paseo must not be empty", file=sys.stderr)
+        print(f"ade-revive: --paseo / {PASEO_ENV} must not be empty", file=sys.stderr)
         return EXIT_USAGE
 
     poll_raw = env_map.get(POLL_ENV)
@@ -498,7 +572,7 @@ def main(argv: list[str] | None = None, env: Mapping[str, str] | None = None) ->
             paseo=paseo_bin,
             env=env_map,
         )
-    except ValueError as exc:
+    except _UsageError as exc:
         print(f"ade-revive: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
