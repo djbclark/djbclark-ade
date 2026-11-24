@@ -87,3 +87,22 @@ def test_ref_lookup_word_is_reserved_in_any_case_and_a_fifo_log_does_not_hang(tm
     e = env_with(d)
     assert run(["ref", "LOOKUP", "1"], e).returncode == 1  # the subcommand, not a bot called LOOKUP
     assert not (d / "GLOBAL.count").exists()
+
+
+def test_ref_skip_id_advances_counter_without_recording_excluded_id(tmp_path):
+    d = tmp_path / "refs"
+    e = env_with(d)
+    r = run(["ref", "--skip-id", "1", "CLAUDE"], e)
+    assert r.returncode == 0 and r.stdout.strip() == "Ref: CLAUDE-2", r.stdout + r.stderr
+    assert (d / "GLOBAL.count").read_text().strip() == "2"
+    assert run(["ref", "lookup", "CLAUDE-1"], e).returncode == 1
+    assert run(["ref", "lookup", "CLAUDE-2"], e).returncode == 0
+    # Multiple/bot-prefixed --skip-id forms skip consecutively without issuing skipped IDs.
+    r2 = run(["ref", "--skip-id", "CLAUDE-3", "--skip-id=4", "CLAUDE"], e)
+    assert r2.returncode == 0 and r2.stdout.strip() == "Ref: CLAUDE-5"
+    assert run(["ref", "lookup", "3"], e).returncode == 1
+    assert run(["ref", "lookup", "4"], e).returncode == 1
+    assert run(["ref", "lookup", "CLAUDE-5"], e).returncode == 0
+    # Rejects malformed --skip-id and --skip-id with lookup.
+    assert run(["ref", "--skip-id", "bad id!", "CLAUDE"], e).returncode != 0
+    assert run(["ref", "--skip-id", "1", "lookup", "2"], e).returncode != 0

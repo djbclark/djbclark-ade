@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Usage: ref [--dir DIR] <BOT>
+"""Usage: ref [--dir DIR] [--skip-id ID]... <BOT>
        ref [--dir DIR] lookup <ID>
 
 Prints the next Ref line, e.g. "Ref: ADE-2s". One GLOBAL counter is shared by
@@ -41,8 +41,8 @@ ET = ZoneInfo("America/New_York")
 DEFAULT_DIR = os.path.expanduser("~/.local/state/djbclark-ade/refs")
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 USAGE = (
-    "usage: ref [--dir DIR] <BOT>      (prints next global base-36 Ref line)\n"
-    "       ref [--dir DIR] lookup <ID>   (ID: CLAUDE-74 or 74; who and when it was issued)"
+    "usage: ref [--dir DIR] [--skip-id ID] <BOT>  (prints next global base-36 Ref line)\n"
+    "       ref [--dir DIR] lookup <ID>           (ID: CLAUDE-74 or 74; who and when it was issued)"
 )
 
 
@@ -52,20 +52,39 @@ def normalize_bot(name: str) -> str:
 
 def parse_args(argv):
     d = os.environ.get("REFS_DIR") or DEFAULT_DIR
+    skip_ids = set()
     args = list(argv[1:])
-    if args and args[0] in ("--dir", "-d"):
-        if len(args) < 2:
-            sys.exit(USAGE)
-        d, args = args[1], args[2:]
-    elif args and args[0].startswith("--dir="):
-        d, args = args[0].split("=", 1)[1], args[1:]
+    while args:
+        if args[0] in ("--dir", "-d"):
+            if len(args) < 2:
+                sys.exit(USAGE)
+            d, args = args[1], args[2:]
+        elif args[0].startswith("--dir="):
+            d, args = args[0].split("=", 1)[1], args[1:]
+        elif args[0] == "--skip-id":
+            if len(args) < 2:
+                sys.exit(USAGE)
+            parsed = split_ref_id(args[1])
+            if parsed is None:
+                sys.exit(f"ref: invalid --skip-id {args[1]!r}")
+            skip_ids.add(parsed[1])
+            args = args[2:]
+        elif args[0].startswith("--skip-id="):
+            val = args[0].split("=", 1)[1]
+            parsed = split_ref_id(val)
+            if parsed is None:
+                sys.exit(f"ref: invalid --skip-id {val!r}")
+            skip_ids.add(parsed[1])
+            args = args[1:]
+        else:
+            break
     if args and args[0].lower() == "lookup":
-        if len(args) != 2 or args[1].startswith("-"):
+        if skip_ids or len(args) != 2 or args[1].startswith("-"):
             sys.exit(USAGE)
-        return d, ("lookup", args[1])
+        return d, ("lookup", args[1]), skip_ids
     if not args or args[0].startswith("-") or len(args) > 1:
         sys.exit(USAGE)
-    return d, normalize_bot(args[0])
+    return d, normalize_bot(args[0]), skip_ids
 
 
 def agent_hint() -> str:
@@ -178,7 +197,7 @@ def lookup(d: str, text: str) -> int:
 
 
 def main() -> None:
-    d, bot = parse_args(sys.argv)
+    d, bot, skip_ids = parse_args(sys.argv)
     if isinstance(bot, tuple):
         sys.exit(lookup(d, bot[1]))
     os.makedirs(d, exist_ok=True)
@@ -193,6 +212,8 @@ def main() -> None:
         except ValueError:
             sys.exit(f"ref: corrupt counter {count_path!r}")
         n += 1
+        while skip_ids and base36(n) in skip_ids:
+            n += 1
         ident = base36(n)
         atomic_write(count_path, str(n) + "\n")
         ts = datetime.now(ET).isoformat(timespec="seconds")

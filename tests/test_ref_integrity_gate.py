@@ -1,7 +1,9 @@
-"""claude/hooks/ref_integrity_gate.py: Stop gate (auto-mint + telemetry) and compaction-proof reminder."""
+"""claude/hooks/ref_integrity_gate.py: Stop gate (auto-mint + content-free telemetry) and compaction-proof reminder."""
+import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -75,12 +77,18 @@ def extract_minted(reason):
     return m.group(1)
 
 
-def test_valid_issued_ref_passes(tmp_path):
+def test_valid_issued_ref_passes_and_logs_content_free_row(tmp_path):
     e = Env(tmp_path)
     ref = e.issue()
     msg = f"{LONG}\n\n{ref}\n\n"
     assert e.run(msg, e.transcript(msg)) is None
-    assert e.decisions() == []
+    decs = e.decisions()
+    assert len(decs) == 1
+    assert decs[0]["outcome"] == "allowed-valid"
+    assert decs[0]["ref_kind"] == "valid"
+    assert decs[0]["reason"]
+    assert "line" not in decs[0]
+    assert "minted_ref" not in decs[0]
 
 
 def test_hand_typed_git_hash_blocks_with_auto_minted_ref(tmp_path):
@@ -93,10 +101,49 @@ def test_hand_typed_git_hash_blocks_with_auto_minted_ref(tmp_path):
     assert e.lookup(minted).returncode == 0
     dec = e.decisions()[0]
     assert dec["outcome"] == "blocked"
+    assert dec["ref_kind"] == "malformed"
     assert dec["session_id"] == "s1"
     assert dec["minted_ref"] == minted
     assert dec["stop_hook_active"] is False
     assert dec["post_len"] == len(f"{LONG}\nRef: youtube-tv-proxy 82118f5".strip())
+    assert "line" not in dec
+    assert "youtube-tv-proxy" not in json.dumps(dec)
+
+
+def test_secret_sentinel_never_persisted_in_reason_or_log_and_modes_are_private(tmp_path):
+    """Rule 3 (MED #1): raw reply text and malformed Ref text are never written to decisions.log
+    or .blocked, and state directory/files enforce 0700/0600 permissions."""
+    e = Env(tmp_path)
+    sentinel_reply = "SECRET_SENTINEL_REPLY_9a8b7c6d5e"
+    sentinel_ref = "SECRET_SENTINEL_REF_1f2e3d4c5b"
+
+    out1 = e.run(f"{LONG}\nexport API_TOKEN={sentinel_reply}", session="sec1")
+    assert blocked(out1)
+    assert sentinel_reply not in out1["reason"]
+
+    out2 = e.run(f"{LONG}\nRef: {sentinel_ref}", session="sec2")
+    assert blocked(out2)
+    assert sentinel_ref not in out2["reason"]
+
+    # Loop-guarded allow also must not persist the secret sentinel.
+    assert e.run(f"{LONG}\nexport API_TOKEN={sentinel_reply}", session="sec3", stop_hook_active=True) is None
+
+    log_path = e.state / "decisions.log"
+    raw_log = log_path.read_text()
+    assert sentinel_reply not in raw_log
+    assert sentinel_ref not in raw_log
+    for rec in e.decisions():
+        assert "line" not in rec
+        assert rec["reason"]
+
+    for marker in (e.state / "sec1.blocked", e.state / "sec2.blocked"):
+        assert marker.is_file()
+        raw_marker = marker.read_text()
+        assert sentinel_reply not in raw_marker and sentinel_ref not in raw_marker
+        assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+
+    assert stat.S_IMODE(e.state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
 
 
 def test_reason_never_echoes_text_from_the_ref_line(tmp_path):
@@ -136,14 +183,15 @@ def test_never_issued_id_blocks_and_mints_fresh_ref(tmp_path):
     assert e.lookup(minted).returncode == 0
 
 
-def test_no_log_at_all_blocks_and_mints_distinct_ref(tmp_path):
-    """When issued.log does not exist yet, check() rejects Ref: CLAUDE-1 BEFORE minting, and the
-    auto-minted Ref avoids colliding with the rejected line."""
+def test_no_log_at_all_blocks_and_mints_distinct_ref_without_issuing_rejected_id(tmp_path):
+    """MED #2: When issued.log does not exist yet, check() rejects Ref: CLAUDE-1 BEFORE minting,
+    and `bin/ref --skip-id 1 CLAUDE` skips 1 under the lock so `ref lookup CLAUDE-1` STILL fails."""
     e = Env(tmp_path)
     out = e.run(f"{LONG}\nRef: CLAUDE-1")
     assert blocked(out) and "never issued" in out["reason"]
     minted = extract_minted(out["reason"])
-    assert minted != "Ref: CLAUDE-1"
+    assert minted == "Ref: CLAUDE-2"
+    assert e.lookup("Ref: CLAUDE-1").returncode == 1
     assert e.lookup(minted).returncode == 0
 
 
@@ -170,6 +218,7 @@ def test_id_used_earlier_in_the_transcript_blocks(tmp_path):
     assert blocked(out) and "already ended an earlier post" in out["reason"]
     minted = extract_minted(out["reason"])
     assert minted != ref
+    assert e.decisions()[-1]["minted_ref"] == minted
 
 
 def test_reuse_is_caught_when_the_transcript_lags_the_hook(tmp_path):
@@ -187,6 +236,35 @@ def test_current_entry_written_twice_is_not_an_earlier_use(tmp_path):
     assert blocked(e.run(msg, e.transcript(("old", f"x\n{ref}"), ("cur", msg), ("cur", msg)), session="s2"))
 
 
+def test_historical_streamed_multi_block_message_grouped_by_message_id(tmp_path):
+    """LOW #3: An earlier streamed message with a Ref at the end of block 1 and more prose in
+    block 2 (ending with another Ref or plain prose) must be evaluated as one grouped post."""
+    e = Env(tmp_path)
+    r1, r2 = e.issue(), e.issue()
+    t = tmp_path / "streamed_history.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "hi"}},
+        # Block 1 of m1 happens to end with r1, but block 2 of m1 continues with more prose and r2.
+        {"type": "assistant", "isSidechain": False, "message": {
+            "id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": f"Quoting example:\n{r1}"}],
+        }},
+        {"type": "assistant", "isSidechain": False, "message": {
+            "id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": f"And here is the real closing.\n{r2}"}],
+        }},
+    ]
+    t.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    # r1 did NOT end m1 as a whole -> using r1 now MUST pass.
+    assert e.run(f"{LONG}\n{r1}", t, session="grp1") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-valid"
+
+    # r2 DID end m1 as a whole -> reusing r2 now MUST block.
+    out = e.run(f"{LONG}\n{r2}", t, session="grp2")
+    assert blocked(out) and "already ended an earlier post" in out["reason"]
+
+
 def test_fallback_reader_ignores_a_final_entry_without_text(tmp_path):
     e = Env(tmp_path)
     t = tmp_path / "notext.jsonl"
@@ -194,6 +272,62 @@ def test_fallback_reader_ignores_a_final_entry_without_text(tmp_path):
     new = {"type": "assistant", "message": {"id": "b", "content": [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]}}
     t.write_text(json.dumps(old) + "\n" + json.dumps(new) + "\n")
     assert e.run(None, t) is None
+    assert e.decisions()[-1]["outcome"] == "allowed-empty"
+    assert not e.refs.exists()
+
+
+def test_fallback_reader_stops_at_task_notification_without_new_reply(tmp_path):
+    """MED #4: A stale long no-Ref reply followed by a <task-notification> (and optional sidechain
+    assistant activity) with no new main-thread assistant reply must NOT block or mint."""
+    e = Env(tmp_path)
+    t = tmp_path / "notif_tail.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "start task"}},
+        {"type": "assistant", "isSidechain": False, "message": {
+            "id": "old_reply", "role": "assistant",
+            "content": [{"type": "text", "text": LONG}],
+        }},
+        {"type": "user", "isSidechain": False, "message": {"role": "user", "content": (
+            "<task-notification><task-id>bg9</task-id><status>completed</status>"
+            "<summary>Background job done</summary></task-notification>"
+        )}},
+        {"type": "assistant", "isSidechain": True, "message": {
+            "id": "sub_1", "role": "assistant",
+            "content": [{"type": "text", "text": LONG}],
+        }},
+        {"type": "system", "subtype": "stop_hook_summary", "isSidechain": False},
+    ]
+    t.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    assert e.run(None, t, session="notif-only") is None
+    rec = e.decisions()[-1]
+    assert rec["outcome"] == "allowed-empty"
+    assert rec["post_len"] == 0
+    assert rec["reason"]
+    assert not e.refs.exists()
+
+
+def test_fallback_reader_stops_at_latest_tool_only_response_after_wakeup(tmp_path):
+    """MED #4: A <task-notification> followed by a tool-only main-thread assistant turn must
+    return empty (allowed-empty), not block against an earlier reply."""
+    e = Env(tmp_path)
+    t = tmp_path / "wakeup_tool_only.jsonl"
+    records = [
+        {"type": "assistant", "isSidechain": False, "message": {
+            "id": "old_reply", "role": "assistant",
+            "content": [{"type": "text", "text": LONG}],
+        }},
+        {"type": "user", "isSidechain": False, "message": {
+            "role": "user", "content": "<task-notification>done</task-notification>",
+        }},
+        {"type": "assistant", "isSidechain": False, "message": {
+            "id": "tool_only", "role": "assistant",
+            "content": [{"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "true"}}],
+        }},
+    ]
+    t.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+    assert e.run(None, t, session="tool-only") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-empty"
+    assert not e.refs.exists()
 
 
 def test_non_regular_log_does_not_hang_and_fails_open(tmp_path):
@@ -201,7 +335,9 @@ def test_non_regular_log_does_not_hang_and_fails_open(tmp_path):
     e.refs.mkdir()
     os.mkfifo(e.refs / "issued.log")
     assert e.run(f"{LONG}\nRef: CLAUDE-1") is None
-    assert e.decisions()[-1]["outcome"] == "allowed-unreadable-log"
+    rec = e.decisions()[-1]
+    assert rec["outcome"] == "allowed-unreadable-log"
+    assert rec["reason"]
 
 
 def test_unreadable_log_fails_open_not_never_issued(tmp_path):
@@ -214,7 +350,9 @@ def test_unreadable_log_fails_open_not_never_issued(tmp_path):
             return
         assert e.run(f"{LONG}\n{ref}") is None
         assert e.run(f"{LONG}\nRef: NOPE-9", session="s2") is None  # cannot judge anything
-        assert e.decisions()[-1]["outcome"] == "allowed-unreadable-log"
+        rec = e.decisions()[-1]
+        assert rec["outcome"] == "allowed-unreadable-log"
+        assert rec["reason"]
     finally:
         log.chmod(0o644)
 
@@ -266,29 +404,37 @@ def test_no_ref_line_long_post_blocks_auto_mints_and_logs(tmp_path):
     assert minted.startswith("Ref: CLAUDE-")
     assert e.lookup(minted).returncode == 0
 
-    # Telemetry row written with full fields.
+    # Telemetry row written with full content-free fields.
     decisions = e.decisions()
     assert len(decisions) == 1
     rec = decisions[0]
     assert rec["outcome"] == "blocked-no-ref"
+    assert rec["ref_kind"] == "none"
     assert rec["session_id"] == "90acbb75-test"
     assert rec["session"] == "90acbb75-test"
     assert rec["minted_ref"] == minted
     assert rec["post_len"] == len(LONG.strip())
     assert rec["stop_hook_active"] is False
     assert minted in rec["reason"]
+    assert "line" not in rec
 
     # .blocked marker exists for this session.
     marker = e.state / "90acbb75-test.blocked"
     assert marker.is_file() and len(marker.read_text().strip().splitlines()) == 1
 
-    # Re-sending the reply with the auto-minted Ref passes cleanly with zero extra Ref mints.
+    # Re-sending the reply with the auto-minted Ref passes cleanly and logs allowed-valid.
     retried = f"{LONG}\n\n{minted}"
     assert e.run(retried, e.transcript(retried), session="90acbb75-test", stop_hook_active=True) is None
-    assert len(e.decisions()) == 1  # valid pass logs nothing extra
+    decisions2 = e.decisions()
+    assert len(decisions2) == 2
+    assert decisions2[1]["outcome"] == "allowed-valid"
+    assert decisions2[1]["reason"]
+    assert "minted_ref" not in decisions2[1]
 
 
-def test_no_ref_line_fallback_when_ref_bin_unavailable_or_failing(tmp_path):
+def test_no_ref_line_fallback_when_ref_bin_unavailable_failing_or_invalid_utf8(tmp_path):
+    """Includes LOW #1: undecodable binary stdout from helper must take the fallback path instead
+    of escaping to the outer fail-open catch."""
     e = Env(tmp_path)
     # Unavailable binary (empty override)
     out = e.run(LONG, session="fb1", env_extra={"REF_GATE_REF_BIN": ""})
@@ -318,6 +464,18 @@ def test_no_ref_line_fallback_when_ref_bin_unavailable_or_failing(tmp_path):
     assert "SYSTEM" not in out3["reason"]
     assert "Run `ref CLAUDE`" in out3["reason"]
 
+    # Invalid UTF-8 stdout bytes (LOW #1) must fall back cleanly, block, and log telemetry.
+    bin_utf8 = tmp_path / "bad_utf8_ref.py"
+    bin_utf8.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'\\xff\\xfe\\xfd\\n')\n")
+    bin_utf8.chmod(0o755)
+    out4 = e.run(LONG, session="fb4", env_extra={"REF_GATE_REF_BIN": str(bin_utf8)})
+    assert blocked(out4)
+    assert "Run `ref CLAUDE`" in out4["reason"]
+    rec4 = e.decisions()[-1]
+    assert rec4["outcome"] == "blocked-no-ref"
+    assert rec4["session_id"] == "fb4"
+    assert "minted_ref" not in rec4
+
 
 def test_bot_inference_env_override_and_sanitization(tmp_path):
     e = Env(tmp_path)
@@ -337,7 +495,7 @@ def test_bot_inference_env_override_and_sanitization(tmp_path):
 
 def test_no_ref_line_respects_stop_hook_active_and_already_blocked(tmp_path):
     e = Env(tmp_path)
-    # stop_hook_active=True never blocks and never mints, but DOES log telemetry.
+    # stop_hook_active=True never blocks and never mints, and logs telemetry with reason.
     assert e.run(LONG, session="sha1", stop_hook_active=True) is None
     assert not e.refs.exists()
     rec = e.decisions()[-1]
@@ -345,6 +503,7 @@ def test_no_ref_line_respects_stop_hook_active_and_already_blocked(tmp_path):
     assert rec["session_id"] == "sha1"
     assert rec["stop_hook_active"] is True
     assert rec["post_len"] == len(LONG.strip())
+    assert rec["reason"]
 
     # Same no-Ref message in same session is blocked at most once and never mints twice.
     out = e.run(LONG, session="dup1")
@@ -352,13 +511,53 @@ def test_no_ref_line_respects_stop_hook_active_and_already_blocked(tmp_path):
     issued_before = (e.refs / "issued.log").read_text()
     assert e.run(LONG, session="dup1") is None
     assert (e.refs / "issued.log").read_text() == issued_before
-    assert e.decisions()[-1]["outcome"] == "allowed-already-blocked"
+    rec2 = e.decisions()[-1]
+    assert rec2["outcome"] == "allowed-already-blocked"
+    assert rec2["reason"]
 
 
-def test_short_post_without_ref_is_silent(tmp_path):
+def test_concurrent_stop_invocations_do_not_double_block_or_double_mint(tmp_path):
+    """LOW #2: Overlapping Stop calls for the same session and message block/mint exactly once."""
+    e = Env(tmp_path)
+    payload = json.dumps({
+        "hook_event_name": "Stop",
+        "session_id": "race-session",
+        "last_assistant_message": LONG,
+    })
+    procs = [
+        subprocess.Popen(
+            [sys.executable, str(HOOK)],
+            env=e.env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(4)
+    ]
+    outs = []
+    for p in procs:
+        stdout, stderr = p.communicate(payload, timeout=30)
+        assert p.returncode == 0, stderr
+        outs.append(json.loads(stdout) if stdout.strip() else None)
+    blocked_outs = [o for o in outs if blocked(o)]
+    assert len(blocked_outs) == 1
+    assert len([o for o in outs if o is None]) == 3
+    issued_lines = (e.refs / "issued.log").read_text().splitlines()
+    assert len(issued_lines) == 1
+    outcomes = sorted(d["outcome"] for d in e.decisions())
+    assert outcomes == ["allowed-already-blocked"] * 3 + ["blocked-no-ref"]
+
+
+def test_short_post_without_ref_is_silent_and_logs_allowed_short(tmp_path):
     e = Env(tmp_path)
     assert e.run("Running the tests now.") is None
-    assert e.decisions() == []
+    decs = e.decisions()
+    assert len(decs) == 1
+    assert decs[0]["outcome"] == "allowed-short"
+    assert decs[0]["ref_kind"] == "none"
+    assert decs[0]["reason"]
+    assert "line" not in decs[0]
     assert not e.refs.exists()
 
 
@@ -383,6 +582,7 @@ def test_stop_hook_active_never_blocks(tmp_path):
     rec = e.decisions()[0]
     assert rec["outcome"] == "allowed-stop-hook-active"
     assert rec["stop_hook_active"] is True
+    assert rec["reason"]
 
 
 def test_same_message_is_blocked_at_most_once(tmp_path):
@@ -391,6 +591,7 @@ def test_same_message_is_blocked_at_most_once(tmp_path):
     assert blocked(e.run(msg))
     assert e.run(msg) is None  # same session, same message: not again
     assert e.decisions()[-1]["outcome"] == "allowed-already-blocked"
+    assert e.decisions()[-1]["reason"]
     assert blocked(e.run(msg, session="s2"))  # a new session blocks it again
     assert blocked(e.run(f"{LONG}\nRef: nope-2"))  # a different message in s1 blocks again
 
@@ -466,6 +667,7 @@ def test_tool_only_and_task_notification_wakeup_transcript_shape(tmp_path):
             "id": "msg_4", "role": "assistant", "content": [{"type": "text", "text": retry_msg}],
         }}) + "\n")
     assert e.run(retry_msg, t, session="wakeup-s1", stop_hook_active=True) is None
+    assert e.decisions()[-1]["outcome"] == "allowed-valid"
 
 
 @pytest.mark.parametrize("source", ["startup", "resume", "clear", "compact", "fork"])
@@ -487,16 +689,19 @@ def test_session_start_respects_bot_override_subagent_and_kill_switch(tmp_path):
     assert e.run(hook_event_name="SessionStart", source="startup", env_extra={"REF_GATE_OFF": "1"}) is None
 
 
-def test_user_prompt_submit_reminds_once_per_compaction_epoch(tmp_path):
+def test_user_prompt_submit_reminds_once_per_compaction_epoch_and_writes_0600(tmp_path):
     e = Env(tmp_path)
     t = tmp_path / "compact.jsonl"
     t.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "start"}}) + "\n")
 
-    # Initial prompt (epoch 0): emits reminder.
+    # Initial prompt (epoch "initial"): emits reminder and persists 0600 state file.
     out1 = e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="hi")
     assert out1 is not None
     assert out1["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "`ref CLAUDE`" in out1["hookSpecificOutput"]["additionalContext"]
+    rem_path = e.state / "ep1.reminded"
+    assert rem_path.is_file() and stat.S_IMODE(rem_path.stat().st_mode) == 0o600
+    assert rem_path.read_text().strip() == "initial"
 
     # Second prompt in same epoch: silent (no spam).
     assert e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="next") is None
@@ -506,32 +711,74 @@ def test_user_prompt_submit_reminds_once_per_compaction_epoch(tmp_path):
         fh.write(json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": True}) + "\n")
     assert e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="still0") is None
 
-    # Main-thread compact_boundary (epoch 1): re-emits reminder once.
+    # Main-thread compact_boundary (with uuid): re-emits reminder once keyed by boundary identity.
     with t.open("a") as fh:
-        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": False}) + "\n")
-    out2 = e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="after-compact")
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary", "uuid": "cb-1", "isSidechain": False}) + "\n")
+    out2 = e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="after-compact-1")
     assert out2 is not None
     assert "`ref CLAUDE`" in out2["hookSpecificOutput"]["additionalContext"]
+    assert rem_path.read_text().strip() == "uuid:cb-1"
 
-    # Subsequent prompt in epoch 1: silent again.
+    # Subsequent prompt in same compaction epoch: silent again.
     assert e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="later") is None
+
+    # Second main-thread compact_boundary (without uuid, offset+digest identity): re-emits once.
+    with t.open("a") as fh:
+        fh.write(json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": False}) + "\n")
+    out3 = e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep1", prompt="after-compact-2")
+    assert out3 is not None
+    assert rem_path.read_text().strip().startswith("off:")
 
     # Sub-agent skipped.
     assert e.run(hook_event_name="UserPromptSubmit", transcript=t, session="ep2", agent_id="sub-1") is None
 
 
-def test_subagents_other_events_garbage_and_kill_switch_pass(tmp_path):
+def test_compact_epoch_identity_does_not_regress_when_older_boundaries_roll_out(tmp_path, monkeypatch):
+    """MED #5: Rolling older compact_boundary records past TRANSCRIPT_TAIL keeps the latest
+    boundary's identity stable (unlike counting boundaries in a sliding tail window)."""
+    spec = importlib.util.spec_from_file_location("ref_gate_under_test", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "TRANSCRIPT_TAIL", 256)
+
+    t = tmp_path / "rolling.jsonl"
+    b1 = json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": False}) + "\n"
+    b2 = json.dumps({"type": "system", "subtype": "compact_boundary", "isSidechain": False}) + "\n"
+    t.write_text(b1 + b2)
+    id_before = mod.compact_epoch_id(str(t))
+    assert id_before.startswith("off:")
+
+    # Append padding so b1 rolls out of the 256-byte tail while b2 stays inside it.
+    with t.open("a") as fh:
+        fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "x" * 100}}) + "\n")
+    id_after = mod.compact_epoch_id(str(t))
+    assert id_after == id_before  # absolute offset + digest of b2 did NOT change
+
+    # Append a third boundary b3 -> strictly new identity even though count in tail may stay 1.
+    with t.open("a") as fh:
+        fh.write(b2)
+    id_next = mod.compact_epoch_id(str(t))
+    assert id_next != id_after
+
+
+def test_subagents_other_events_garbage_and_kill_switch_pass_and_are_excluded_from_log(tmp_path):
     e = Env(tmp_path)
     bad = f"{LONG}\nRef: nope-1"
     assert e.run(bad, agent_id="sub1") is None
     assert e.run(bad, hook_event_name="PreToolUse") is None
-    assert e.run("") is None
     r = subprocess.run([sys.executable, str(HOOK)], env=e.env, input="not json", capture_output=True, text=True)
     assert r.returncode == 0 and r.stdout == ""
     off = dict(e.env, REF_GATE_OFF="1")
     r = subprocess.run([sys.executable, str(HOOK)], env=off, capture_output=True, text=True,
                        input=json.dumps({"hook_event_name": "Stop", "session_id": "k", "last_assistant_message": bad}))
     assert r.returncode == 0 and r.stdout == ""
+    # None of the excluded paths wrote to decisions.log.
+    assert e.decisions() == []
+
+    # Empty top-level Stop IS in-scope and logs allowed-empty.
+    assert e.run("") is None
+    assert e.decisions()[0]["outcome"] == "allowed-empty"
+    assert e.decisions()[0]["reason"]
 
 
 def test_hook_and_ref_lookup_agree(tmp_path):
@@ -544,9 +791,11 @@ def test_hook_and_ref_lookup_agree(tmp_path):
         assert (look.returncode == 0) == (out is None), ref
 
 
-def test_hook_is_registered_for_stop_and_session_start_in_the_settings_template():
+def test_hook_is_registered_for_stop_session_start_and_user_prompt_submit_in_settings_template():
     tmpl = (ROOT / "agents" / "claude" / "settings.json.tmpl").read_text()
     session_start = tmpl[tmpl.index('    "SessionStart": ['):tmpl.index('    "Stop": [')]
     stop = tmpl[tmpl.index('    "Stop": ['):tmpl.index('    "StopFailure": [')]
-    assert "hooks/ref_integrity_gate.py" in session_start and '"timeout": 10' in session_start
-    assert "hooks/ref_integrity_gate.py" in stop and '"timeout": 10' in stop
+    user_prompt = tmpl[tmpl.index('    "UserPromptSubmit": ['):tmpl.index('  "enableWorkflows":')]
+    for label, section in (("SessionStart", session_start), ("Stop", stop), ("UserPromptSubmit", user_prompt)):
+        assert "hooks/ref_integrity_gate.py" in section, label
+        assert '"timeout": 10' in section, label
