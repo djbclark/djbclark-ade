@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- load-watch (bin/load-watch): every 20 s one `ps` and the load average, no model. After 5 minutes
-     of load at or above 4 per core it finds the Paseo agent whose processes used the CPU (by working
+     of load at or above 5.0 per core it finds the Paseo agent whose processes used the CPU (by working
      directory, from `paseo ls`), writes it a brief, sends it one line with `paseo send` and pings Hermes,
      so heavy builds move to CI. Installed by `load-watch install` (bin/ade_sched.py fills __ADE__, __HOME__ and
      __ADMISSION__; a systemd timer on Linux), removed by `load-watch uninstall`. Every sample runs through bin/ade-job-run
