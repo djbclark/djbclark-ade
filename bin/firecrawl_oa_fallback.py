@@ -2022,48 +2022,17 @@ class OaFallback:
             if candidates:
                 if not self._ensure_private_state_dir():
                     return None, None, "state-dir-invalid"
-                free_cands = [c for c in candidates[:MAX_CANDIDATES] if not c.is_content_api]
-                paid_cands = [c for c in candidates[:MAX_CANDIDATES] if c.is_content_api]
                 last_err = "fetch-failed"
-                for cand in free_cands:
+                for cand in candidates[:MAX_CANDIDATES]:
                     if time.monotonic() >= deadline:
                         last_err = "budget-timeout"
                         break
-                    fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
-                    fetched, final_url, content_kind, f_err = self._fetch_candidate(
-                        cand, requested_host, fetch_deadline
-                    )
-                    if fetched is None:
-                        last_err = f_err or "fetch-failed"
-                        continue
-                    reply, c_err = self._convert_and_build_reply(
-                        fetched=fetched,
-                        content_kind=content_kind,
-                        requested_url=url,
-                        final_url=final_url,
-                        cand=cand,
-                        work=work,
-                        resolved_doi=val if kind == "doi" else None,
-                        req_doc=req_doc,
-                        deadline=deadline,
-                        reply_cls=reply_cls,
-                    )
-                    if reply is not None:
-                        slug = _source_slug(cand.host)
-                        return reply, "oa-fallback", f"oa:{slug} {cand.oa_version}"
-                    last_err = c_err or "converter-failed"
-
-                # Try free Springer Nature OA JATS VoR before spending $0.01 on content.openalex.org
-                if kind == "doi" and self._springer_eligible(val) and time.monotonic() < deadline:
-                    springer_tried = True
-                    sp_reply, sp_note = self._try_springer_oa(url, val, work, req_doc, deadline, reply_cls)
-                    if sp_reply is not None:
-                        return sp_reply, "oa-fallback", sp_note
-
-                for cand in paid_cands:
-                    if time.monotonic() >= deadline:
-                        last_err = "budget-timeout"
-                        break
+                    # Try free Springer Nature OA JATS VoR right before spending $0.01 on content.openalex.org
+                    if cand.is_content_api and kind == "doi" and not springer_tried and self._springer_eligible(val):
+                        springer_tried = True
+                        sp_reply, sp_note = self._try_springer_oa(url, val, work, req_doc, deadline, reply_cls)
+                        if sp_reply is not None:
+                            return sp_reply, "oa-fallback", sp_note
                     fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
                     fetched, final_url, content_kind, f_err = self._fetch_candidate(
                         cand, requested_host, fetch_deadline
