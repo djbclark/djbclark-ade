@@ -226,7 +226,8 @@ def test_ask_message_at_the_hard_tier_bare(hook, tmp_path):
     assert "/new is ready" not in out and "never hand the operator a /new" in out
     assert "self-slash" not in out
     assert f"{nudge.AUTO_COMPACT_WALL - nudge.ASK_TOTAL:,} from now" in out
-    assert pings == []
+    # 2026-11-24 (e0d271f5 fix): hard tier (level >= 2) now pages once per climb on every wall.
+    assert len(pings) == 1 and "/self-handoff then /new" in pings[0][1]
 
 
 def test_ask_message_at_ask_total(hook, tmp_path):
@@ -441,7 +442,8 @@ def test_a_boundary_before_the_previous_prompt_is_not_found_again(hook, tmp_path
     state = hook.state()["s-old-boundary"]
     _append(path, _usage(228_000))
     out, _ = hook("s-old-boundary", path)
-    assert out == ""
+    # 2026-11-24: staying at hard tier emits ask_repeat (not a reset + fresh initial ask).
+    assert not _is_ask(out) and "Hard handoff reminder (#1):" in out
     after = hook.state()["s-old-boundary"]
     assert after["level"] == 2 and after["baseline"] == state["baseline"]
 
@@ -645,8 +647,10 @@ def test_floor_resets_after_compact_boundary(hook, tmp_path):
     assert state["baseline"] is None and state["level"] == 0
     _append(path, _usage(104_000))
     out, _ = hook("s-floor", path)
-    assert out == ""
+    # 2026-11-24: compacting after hard tier persists handoff_due across the floor reset.
+    assert "Post-compaction handoff due:" in out and "260,000" in out
     assert hook.state()["s-floor"]["baseline"] == 104_000
+    assert hook.state()["s-floor"]["handoff_due"]["peak"] == 260_000
     _append(path, _usage(104_000 + nudge.EARLY_GROWTH))
     out, _ = hook("s-floor", path)
     assert "Context check" in out
@@ -657,8 +661,9 @@ def test_shrink_between_prompts_is_a_new_floor(hook, tmp_path):
     hook("s-shrink", path)
     _append(path, _usage(110_000))  # < 0.75 x 260k, no boundary record seen
     out, _ = hook("s-shrink", path)
-    assert out == ""
+    assert "Post-compaction handoff due:" in out and "260,000" in out
     assert hook.state()["s-shrink"]["baseline"] == 110_000
+    assert hook.state()["s-shrink"]["handoff_due"]["peak"] == 260_000
 
 
 def test_zero_usage_error_stub_is_not_a_context_reading(hook, tmp_path):

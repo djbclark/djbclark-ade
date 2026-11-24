@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,62 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 STATE_ROOT = Path.home() / ".local" / "state" / "handoffs"
+NUDGE_STATE_PATH = Path.home() / ".claude" / "state" / "context-nudges.json"
+NUDGE_STATE_MAX_BYTES = 1024 * 1024
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _read_pending_hard_handoff(session_id):
+    """Best-effort check whether *session_id* already hit hard tier or carries handoff_due.
+
+    Reads NUDGE_STATE_PATH without following symlinks (where O_NOFOLLOW exists) and caps
+    read size to NUDGE_STATE_MAX_BYTES. Always fails silent so PreCompact never blocks.
+    """
+    if not isinstance(session_id, str) or not session_id or session_id == "unknown":
+        return False, None
+    fd = None
+    try:
+        fd = os.open(NUDGE_STATE_PATH, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > NUDGE_STATE_MAX_BYTES:
+            return False, None
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            raw = stream.read(NUDGE_STATE_MAX_BYTES + 1)
+        if len(raw) > NUDGE_STATE_MAX_BYTES:
+            return False, None
+        state = json.loads(raw.decode("utf-8"))
+        if not isinstance(state, dict):
+            return False, None
+        entry = state.get(session_id)
+        if not isinstance(entry, dict):
+            return False, None
+        level = entry.get("level")
+        has_hard_level = _is_int(level) and level >= 2
+        handoff_due = entry.get("handoff_due")
+        has_handoff_due = isinstance(handoff_due, dict)
+        if not (has_hard_level or has_handoff_due):
+            return False, None
+        candidates = [
+            v for v in (
+                entry.get("peak"),
+                entry.get("last"),
+                handoff_due.get("peak") if has_handoff_due else None,
+            )
+            if _is_int(v) and v >= 0
+        ]
+        return True, (max(candidates) if candidates else 0)
+    except Exception:
+        return False, None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except Exception:
+                pass
 
 
 def _safe_slug(value):
@@ -116,21 +173,31 @@ def hook_main():
     except Exception:
         return
 
+    session_id = data.get("session_id", "unknown")
+    pending_hard, pending_peak = _read_pending_hard_handoff(session_id)
+
     now = datetime.now().astimezone()
     ts_file = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    body = "\n".join([
+    frontmatter = [
         "---",
         "schema_version: 1",
         "compacted: true",
         f"trigger: {data.get('trigger', 'unknown')}",
         f"updated_at: {now.strftime('%Y-%m-%dT%H:%M:%S%z')}",
-        f"session_id: {data.get('session_id', 'unknown')}",
+        f"session_id: {session_id}",
         f"transcript_path: {data.get('transcript_path', '')}",
         f"repo: {repo}",
         f"workspace: {task}",
         f"branch: {branch}",
         f"head_sha: {head_sha}",
-        "---",
+    ]
+    if pending_hard:
+        frontmatter.append("pending_hard_handoff: true")
+        frontmatter.append(f"pending_hard_peak: {pending_peak}")
+    frontmatter.append("---")
+
+    body_lines = [
+        *frontmatter,
         "",
         "## Dirty files at compaction",
         "",
@@ -138,8 +205,15 @@ def hook_main():
         "",
         "Unplanned checkpoint written by precompact_handoff.py. Fold into",
         "SESSION_LOG.md Recent History on next owned write, then delete me.",
-        "",
-    ])
+    ]
+    if pending_hard:
+        body_lines.append("")
+        body_lines.append(
+            f"Hard handoff was already pending before compaction (peak {pending_peak:,} tokens); "
+            "run `/self-handoff` now instead of continuing in compacted context."
+        )
+    body_lines.append("")
+    body = "\n".join(body_lines)
     sidecar = state_dir / f"precompact-{ts_file}.md"
     tmp = None
     try:

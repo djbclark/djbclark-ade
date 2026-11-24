@@ -78,6 +78,17 @@ History:
   floor-clamped tier (ask_total <= ASK_FLOOR) requires at least ASK_MIN_GROWTH (16k, ~2 tool
   rounds) of growth since the baseline before firing hard or boundary nudges; larger windows
   (including the live 300k window) are unchanged.
+- 2026-11-24 (e0d271f5 harness failure): on a 267k wall, once level 2 fired at 217k,
+  REPEAT_EVERY (+100k -> 317k) and PAGE_TOTAL_MIN (400k) / PAGE_GROWTH_MIN (+300k) all sat
+  past the 267k wall, so no further nudge or hermes-ping fired up to 265k, and auto-compaction
+  reset level=0 and paged=False, erasing the missed hard handoff. Now: (1) while still at or
+  above the hard tier (level >= 2 and fired >= 2), emit an escalating hard-handoff reminder
+  (kind="ask_repeat") on UserPromptSubmit and rate-limited every HARD_REPEAT_SECONDS (60 s) on
+  PostToolUse; (2) fire hermes-ping once per climb when level >= 2 fires (keeping PAGE_* as
+  fallback for huge windows); (3) persist `handoff_due` across compaction whenever the session
+  had reached fired >= 2 (or already carried `handoff_due`), emit `post_compact_handoff_due`
+  on post-compaction turns (rate-limited on PostToolUse, emitted on UserPromptSubmit), and send
+  one hermes-ping for that compaction.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
@@ -94,12 +105,18 @@ The hard tier asks at the total ASK_HEADROOM (50k) under the session's auto-comp
 Levels: 1 = early (delegate from now on; no compaction yet);
 2+ = handoff + /new at a finished task, /compact only to continue in-context
 (auto-compaction), or, mid-turn, finish the
-current edit and hand off within a few tool rounds (_midtask_note); again every
-REPEAT_EVERY of further growth. A compaction resets the floor and the level, so
-the hard tier fires again at the ask total (by total, not by growth) after regrowth.
+current edit and hand off within a few tool rounds (_midtask_note); while still
+at or above the hard tier (level >= 2, fired >= 2), repeat an escalating reminder
+(kind="ask_repeat") on UserPromptSubmit and every HARD_REPEAT_SECONDS on PostToolUse
+(plus the full level-climb ask every REPEAT_EVERY of further growth). A hermes-ping
+fires once per climb at level >= 2 (with PAGE_TOTAL_MIN / PAGE_GROWTH_MIN kept as a
+fallback for huge windows). A compaction resets the floor and the level, so the hard
+tier fires again at the ask total on regrowth, and if the session had already reached
+level >= 2 before compacting, persists `handoff_due` across the reset so post-compaction
+turns keep directing `/self-handoff` (kind="post_compact_handoff_due") plus one
+compaction hermes-ping until a fresh session_id starts.
 Separately, once per session at the boundary tier (wall - BOUNDARY_HEADROOM, 187k on a 267k wall):
-prefer handoff + /new over /compact at the next task completion. With the wall at 267k, REPEAT_EVERY
-(level 3+) and the PAGE_* tiers are mostly unreachable before the wall.
+prefer handoff + /new over /compact at the next task completion.
 
 MUST always exit 0 -- never fail or delay a prompt. Python 3 stdlib only.
 Fail-fast: reads only a head window (baseline, once per session) and a tail
@@ -133,6 +150,7 @@ if not LOG_PATH.is_absolute():
     LOG_PATH = Path.home() / ".claude" / "state" / "context-nudge-log.jsonl"
 LOG_MAX_BYTES = 2 * 1024 * 1024
 POST_TOOL_CHECK_SECONDS = 20
+HARD_REPEAT_SECONDS = 60  # rate-limit PostToolUse repeats of hard-tier / post-compact handoff nudges
 # djbclark, 2026-10-23: lead sessions run on Opus 5.5 high, not Fable (a Fable lead burned ~30% of
 # a week's Claude quota); since 2026-11-07 `[lead].fable_lead = true` in config/routing.toml allows a Fable lead.  The quota guard's tight/critical downshift went with the guard (2026-11-07,
 # slim-down E7): pausing at a quota limit is the session-guard and usage-auto-resume plugins' job.
@@ -183,8 +201,10 @@ BOUNDARY_FLOOR = 120_000
 TOOL_ROUND_TOKENS = 8_000    # a tool round costs 3-8k; a big file or log read costs more
 ASK_MIN_GROWTH = 2 * TOOL_ROUND_TOKENS  # 16k (~2 tool rounds) required on floor-clamped tiers
 HANDOFF_RESERVE = 15_000     # what the handoff skill itself needs before the wall
-REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
-PAGE_GROWTH_MIN = 300_000  # Hermes ping (once per climb), whichever comes first; scaled by _tiers
+REPEAT_EVERY = 100_000  # level 3, 4, ...: full level-climb ask again per this much more
+# 2026-11-24: hard tier (level >= 2) now triggers a once-per-climb hermes-ping on every wall;
+# PAGE_GROWTH_MIN / PAGE_TOTAL_MIN remain as the fallback guard for huge windows.
+PAGE_GROWTH_MIN = 300_000
 PAGE_TOTAL_MIN = 400_000
 SHRINK_RATIO = 0.75     # a size below this share of the last one = compacted
 COMPACTED = "compacted"  # _last_context_tokens: boundary newer than any usage
@@ -733,6 +753,91 @@ def _ask_message(total, growth, repeat, successor=None, wall=None):
     )
 
 
+def _hard_repeat_message(total, growth, repeat_num, successor=None, wall=None):
+    wall = AUTO_COMPACT_WALL if wall is None else wall
+    left = max(0, wall - total)
+    urgency = "URGENT — imminent auto-compaction" if left <= HANDOFF_RESERVE else "Hard handoff reminder"
+    return (
+        f"{urgency} (#{repeat_num}): {total:,} / {wall:,} tokens "
+        f"({left:,} left; +{growth:,} since baseline). "
+        "Still at or above the hard handoff tier — stop starting inline work and "
+        f"run `/self-handoff` Step 9 now ({_SELF_HANDOFF}) before auto-compaction hits. "
+        + _midtask_note(total, "let the auto-compaction take it", wall)
+        + _successor_note(successor)
+    )
+
+
+def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None):
+    wall = AUTO_COMPACT_WALL if wall is None else wall
+    pre_peak = handoff_due.get("peak") if isinstance(handoff_due, dict) else None
+    pre_wall = handoff_due.get("wall") if isinstance(handoff_due, dict) else None
+    if not _is_int(pre_wall) or pre_wall <= 0:
+        pre_wall = wall
+    peak_clause = (
+        f"after reaching ~{pre_peak:,} / {pre_wall:,} tokens"
+        if _is_int(pre_peak) and pre_peak > 0
+        else f"after reaching the hard handoff tier (wall {pre_wall:,})"
+    )
+    return (
+        f"Post-compaction handoff due: this session auto-compacted {peak_clause} "
+        f"and is now at {total:,} tokens in degraded compacted context. "
+        "A hard handoff was already missed — do not keep working in this compacted session. "
+        f"Run `/self-handoff` Step 9 now ({_SELF_HANDOFF}) and never hand the operator a /new "
+        "(operator ruling 2026-11-14)."
+        + _successor_note(successor)
+    )
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _rate_limited(last_ts, now, interval):
+    """True when `last_ts` is within `interval` seconds before `now`; wall-clock rollback is never throttled."""
+    return isinstance(last_ts, (int, float)) and not isinstance(last_ts, bool) and 0 <= now - last_ts < interval
+
+
+def _repo_name(data):
+    return os.path.basename((data.get("cwd") or "").rstrip("/")) or "claude"
+
+
+def _ping_compacted_overdue(data, handoff_due, total=None):
+    repo = _repo_name(data)
+    pre_peak = handoff_due.get("peak") if isinstance(handoff_due, dict) else None
+    pre_wall = handoff_due.get("wall") if isinstance(handoff_due, dict) else None
+    peak_str = f"~{pre_peak // 1000}k" if _is_int(pre_peak) and pre_peak > 0 else "hard tier"
+    wall_str = f"/{pre_wall // 1000}k" if _is_int(pre_wall) and pre_wall > 0 else ""
+    now_str = f", now ~{total // 1000}k" if _is_int(total) else ""
+    _send_ping(
+        f"{repo}: Claude Code auto-compacted after missed hard handoff "
+        f"(peak {peak_str}{wall_str}{now_str}); /self-handoff is overdue.",
+        data.get("cwd"),
+    )
+
+
+def _record_compaction_handoff_due(session_state, prev_fired, prev_peak, wall):
+    """Persist `handoff_due` across compaction whenever the session had already hit hard tier."""
+    existing = session_state.get("handoff_due")
+    existing = existing if isinstance(existing, dict) else None
+    if prev_fired >= 2:
+        peak_val = prev_peak
+        if not (_is_int(peak_val) and peak_val > 0) and existing:
+            prev_existing_peak = existing.get("peak")
+            peak_val = prev_existing_peak if _is_int(prev_existing_peak) else 0
+        session_state["handoff_due"] = {
+            "peak": peak_val or 0,
+            "wall": wall,
+            "level": prev_fired,
+            "compacted_at": datetime.now(UTC).isoformat(),
+            "paged": False,
+        }
+        session_state["last_post_compact_nudge"] = None
+        return True
+    if existing is not None:
+        session_state["handoff_due"] = existing
+    return False
+
+
 def _session_successor(transcript_path):
     return _successor_target(_last_assistant_model(transcript_path))
 
@@ -896,12 +1001,12 @@ def _check_state(data, event, session_id, transcript_path):
     if not isinstance(session_state, dict):
         session_state = {}
 
+    now = time.time()
     if event == "PostToolUse":
-        now = time.time()
         last_check = session_state.get("last_check")
         # Wall time persists across hook processes/reboots. A clock rollback
         # must not suppress checks until the old clock catches up.
-        if isinstance(last_check, (int, float)) and 0 <= now - last_check < POST_TOOL_CHECK_SECONDS:
+        if _rate_limited(last_check, now, POST_TOOL_CHECK_SECONDS):
             return
         session_state["last_check"] = now
         state[session_id] = session_state
@@ -916,30 +1021,63 @@ def _check_state(data, event, session_id, transcript_path):
     if total is None:
         return
 
+    prev_fired = session_state.get("level", 0)
+    if not _is_int(prev_fired):
+        prev_fired = 0
+    prev_paged = bool(session_state.get("paged"))
+    # The highest size seen since the last reset: a run of small dips (each < 25% of the
+    # previous prompt) that sums to a real shrink must still read as one.
+    seen = [v for v in (session_state.get("last"), session_state.get("peak")) if _is_int(v)]
+    peak = max(seen) if seen else None
+
     if total == COMPACTED:
         # Compacted, no request since: the next measured size is the new floor.
-        session_state.update(baseline=None, level=0, paged=False, last=None, peak=None)
+        saved_wall = session_state.get("wall")
+        if not (_is_int(saved_wall) and saved_wall > 0):
+            try:
+                saved_wall = compaction_wall(read_settings(), _last_assistant_model(transcript_path))
+            except Exception:
+                saved_wall = AUTO_COMPACT_WALL
+        if peak is not None:
+            prev_fired = min(prev_fired, _level(peak, peak, _tiers(saved_wall)))
+        newly_due = _record_compaction_handoff_due(session_state, prev_fired, peak, saved_wall)
+        session_state.update(
+            baseline=None, level=0, paged=False, last=None, peak=None,
+            last_hard_nudge=None, hard_repeat_count=0,
+        )
+        if newly_due and not prev_paged:
+            _ping_compacted_overdue(data, session_state["handoff_due"])
+            session_state["handoff_due"]["paged"] = True
         state[session_id] = session_state
         _save_state(state)
         return
 
+    # This session's real wall (settings read once, the model from the transcript tail): every
+    # handoff/compact tier below derives from it. Anything unreadable: today's 267k fallback.
+    try:
+        wall = compaction_wall(read_settings(), _last_assistant_model(transcript_path))
+    except Exception:
+        wall = AUTO_COMPACT_WALL
+    session_state["wall"] = wall
+    tiers = _tiers(wall)
+    if peak is not None:
+        prev_fired = min(prev_fired, _level(peak, peak, tiers))
+
     baseline = session_state.get("baseline")
-    # The highest size seen since the last reset: a run of small dips (each < 25% of the
-    # previous prompt) that sums to a real shrink must still read as one.
-    seen = [v for v in (session_state.get("last"), session_state.get("peak")) if isinstance(v, int)]
-    peak = max(seen) if seen else None
     floor = _compaction_floor_since(transcript_path, prev_size, size)
     if floor is not None:
         # An auto-compaction mid-turn: more tool rounds followed it, so no boundary is the
         # newest record now and the regrowth may hide it from the shrink test (round 2, F1).
+        _record_compaction_handoff_due(session_state, prev_fired, peak, wall)
         baseline = floor if floor != COMPACTED else total
-        session_state.update(level=0, paged=False)
+        session_state.update(level=0, paged=False, last_hard_nudge=None, hard_repeat_count=0)
         peak = None
     elif peak is not None and total < peak * SHRINK_RATIO:
+        _record_compaction_handoff_due(session_state, prev_fired, peak, wall)
         baseline = total  # compacted between two prompts: new floor
-        session_state["level"] = 0
+        session_state.update(level=0, paged=False, last_hard_nudge=None, hard_repeat_count=0)
         peak = None
-    if not isinstance(baseline, int):
+    if not _is_int(baseline):
         if "level" in session_state:
             baseline = total  # first size after a compaction
         else:
@@ -949,16 +1087,9 @@ def _check_state(data, event, session_id, transcript_path):
     session_state["peak"] = max(total, peak or 0)
     growth = max(0, total - baseline)
 
-    # This session's real wall (settings read once, the model from the transcript tail): every
-    # handoff/compact tier below derives from it. Anything unreadable: today's 267k fallback.
-    try:
-        wall = compaction_wall(read_settings(), _last_assistant_model(transcript_path))
-    except Exception:
-        wall = AUTO_COMPACT_WALL
-    tiers = _tiers(wall)
     level = _level(total, growth, tiers)
     fired = session_state.get("level", 0)
-    if not isinstance(fired, int):
+    if not _is_int(fired):
         fired = 0
     # Old or corrupt state (a level the session cannot have reached) must not stick (round 2,
     # F4): clamp to what the stored peak computes (peak resets together with the level). The
@@ -968,12 +1099,34 @@ def _check_state(data, event, session_id, transcript_path):
     fired = min(fired, _level(peak_total, peak_total, tiers))
 
     messages = []
+    successor_loaded = False
+    successor = None
+
+    def get_successor():
+        nonlocal successor_loaded, successor
+        if not successor_loaded:
+            successor = _session_successor(transcript_path)
+            successor_loaded = True
+        return successor
+
     if level > fired:
         if level == 1:
             messages.append((_early_message(total, growth), "early"))
         else:
             messages.append((_ask_message(total, growth, repeat=fired >= 2,
-                                         successor=_session_successor(transcript_path), wall=wall), "ask"))
+                                         successor=get_successor(), wall=wall), "ask"))
+            session_state["last_hard_nudge"] = now
+            session_state["hard_repeat_count"] = 0
+    elif level >= 2 and fired >= 2:
+        # Still at or above the hard tier: do not go silent until +100k (2026-11-24).
+        last_hard = session_state.get("last_hard_nudge")
+        if event != "PostToolUse" or not _rate_limited(last_hard, now, HARD_REPEAT_SECONDS):
+            repeat_count = session_state.get("hard_repeat_count", 0)
+            repeat_count = (repeat_count if _is_int(repeat_count) and repeat_count >= 0 else 0) + 1
+            session_state["hard_repeat_count"] = repeat_count
+            session_state["last_hard_nudge"] = now
+            messages.append((_hard_repeat_message(total, growth, repeat_count,
+                                                 successor=get_successor(), wall=wall), "ask_repeat"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
     session_state["level"] = max(level, fired)
@@ -982,8 +1135,20 @@ def _check_state(data, event, session_id, transcript_path):
     if (total >= tiers.boundary_total and _handoff_growth_ok(growth, tiers)
             and not session_state.get("boundary")):
         session_state["boundary"] = True
-        messages.append((_boundary_message(total, successor=_session_successor(transcript_path), wall=wall),
+        messages.append((_boundary_message(total, successor=get_successor(), wall=wall),
                          "boundary"))
+
+    # Post-compaction handoff_due: if auto-compaction happened after reaching hard tier,
+    # keep reminding the agent to run /self-handoff even while context is back below hard tier.
+    handoff_due = session_state.get("handoff_due")
+    handoff_due = handoff_due if isinstance(handoff_due, dict) else None
+    if handoff_due is not None and level < 2:
+        last_post = session_state.get("last_post_compact_nudge")
+        if event != "PostToolUse" or not _rate_limited(last_post, now, HARD_REPEAT_SECONDS):
+            session_state["last_post_compact_nudge"] = now
+            messages.append((_post_compact_handoff_message(total, handoff_due,
+                                                          successor=get_successor(), wall=wall),
+                             "post_compact_handoff_due"))
 
     if messages:
         message = "\n".join(text for text, _ in messages)
@@ -999,18 +1164,25 @@ def _check_state(data, event, session_id, transcript_path):
                 # PR 108 embeds the mid-task note in every hard-tier message.
                 _log_nudge(session_id, event, level, total, growth, "midtask")
 
-    if growth >= tiers.page_growth or total >= tiers.page_total:
+    pinged_this_call = False
+    if level >= 2 or growth >= tiers.page_growth or total >= tiers.page_total:
         if not session_state.get("paged"):
             session_state["paged"] = True
-            repo = os.path.basename((data.get("cwd") or "").rstrip("/")) or "claude"
+            pinged_this_call = True
+            repo = _repo_name(data)
             _send_ping(
-                f"{repo}: Claude Code context at ~{total // 1000}k "
-                f"(+{growth // 1000}k since start or last compact); agent will "
+                f"{repo}: Claude Code context at ~{total // 1000}k/{wall // 1000}k "
+                f"(+{growth // 1000}k since start or last compact, hard handoff tier); agent will "
                 "/self-handoff then /new, or /compact, at its next boundary.",
                 data.get("cwd"),
             )
-    elif level < 2:
+    elif session_state["level"] < 2:
         session_state["paged"] = False  # compacted: page again on regrowth
+
+    if handoff_due is not None and not handoff_due.get("paged") and not pinged_this_call:
+        handoff_due["paged"] = True
+        session_state["handoff_due"] = handoff_due
+        _ping_compacted_overdue(data, handoff_due, total=total)
 
     state[session_id] = session_state
     _save_state(state)
