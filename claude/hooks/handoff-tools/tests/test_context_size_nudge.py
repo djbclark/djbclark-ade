@@ -926,3 +926,19 @@ def test_an_unreadable_settings_helper_falls_back_to_the_267k_wall(hook, tmp_pat
     monkeypatch.setattr(nudge, "read_settings", boom)
     out, _ = hook("s-boom", _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL))
     assert "At the next task completion" in out and "267,000" in out
+
+
+@pytest.mark.parametrize("window", [114_000, 150_000, 163_000])
+def test_q98_small_window_successor_above_80k_does_not_re_handoff_until_growth(hook, tmp_path, settings_file, window):
+    """Queue #98 (PR 862 L2): on 114k-163k windows (wall 81k-130k), ask_total clamps to 80k; a
+    successor starting above 80k stays quiet until it grows by ASK_MIN_GROWTH, then fires."""
+    _write_settings(settings_file, autoCompactWindow=window)
+    path = _transcript(tmp_path, 85_000, name=f"succ-{window}.jsonl")
+    out, pings = hook(f"s-q98-{window}", path)
+    assert out == "" and pings == []
+    _append(path, _usage(85_000 + nudge.ASK_MIN_GROWTH - 1))
+    out, _ = hook(f"s-q98-{window}", path)
+    assert out == ""
+    _append(path, _usage(85_000 + nudge.ASK_MIN_GROWTH))
+    out, _ = hook(f"s-q98-{window}", path)
+    assert "Context is large" in out and "At the next task completion" in out

@@ -327,3 +327,36 @@ def test_reads_stdin_names_the_stdin_routes_only(guard):
     assert not guard.reads_stdin(["pr", "list", "--"])
     assert not guard.reads_stdin(["pr", "create", "--body-file", "b.md"])
     assert not guard.reads_stdin(["pr", "create", "--body", "a - b"])
+
+
+# ---- queue #117 (2026-11-24): real OS argv never expands shell substitutions -----------------------------------
+
+
+def test_q117_shim_argv_never_expands_backticks_or_command_substitutions(world):
+    """Real OS argv has already been expanded by the caller's shell: prose naming a doc file in
+    backticks or `$(...)` must pass, while `--body-file`, stdin and literal markers stay refused."""
+    docs = world["work"] / "docs"
+    docs.mkdir()
+    shutil.copy(ROOT / "docs" / "code-review.md", docs / "code-review.md")
+    (world["work"] / "live.md").write_text("prose\n\n%s\n" % APPROVE)
+    (world["work"] / "report.md").write_text("# report\n\n%s\n" % FENCED)
+
+    for body in (
+        "see `docs/code-review.md` rule 1",
+        "see $(cat live.md) and `live.md` and `grep adversary-verdict report.md`",
+        "prose with literal <<EOF\n$(cat live.md)\nEOF\n",
+    ):
+        r = run(world, "pr", "create", "--title", "t", "--body", body)
+        assert r.returncode == 0, (body, r.stderr)
+    assert len(calls(world)) == 3
+
+    # Direct `--body-file` on a file holding a live marker and literal live APPROVE in argv stay refused.
+    assert run(world, "pr", "create", "--title", "t", "--body-file", "live.md").returncode == 4
+    assert run(world, "pr", "create", "--title", "t", "-F", "live.md").returncode == 4
+    assert run(world, "pr", "create", "--title", "t", "--body", APPROVE).returncode == 4
+    assert run(world, "pr", "create", "--title", "t", "--body-file", "-", stdin=APPROVE).returncode == 4
+    assert len(calls(world)) == 3
+
+    # Direct `--body-file` on a doc whose example markers are properly fenced/inline still passes.
+    assert run(world, "pr", "create", "--title", "t", "--body-file", "docs/code-review.md").returncode == 0
+    assert len(calls(world)) == 4

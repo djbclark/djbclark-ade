@@ -23,7 +23,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_reclaim_cannot_publish_legacy_record_over_enrolled_workspace(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); workspace = root / "workspace"; workspace.mkdir()
+            root = Path(tmp).resolve(); workspace = root / "workspace"; workspace.mkdir()
             cfg = {"generation":"g", "claims":{"original":{"role_id":"r","resources":[str(workspace)]}},
                    "identity":{"host":"h","server":"s"}}
             current = {"record":{"owner":{"host":"h","server":"s","agent":"a"},"bindings":[str(workspace)]}}
@@ -41,6 +41,23 @@ class AdapterTests(unittest.TestCase):
                         self.assertFalse(ade_claims.claim_file("replacement").exists())
                         self.assertEqual(original.read_bytes(),saved)
                         self.assertEqual([c["id"] for c in ade_claims.list_claims("active")],["original"])
+
+    def test_authorize_claim_requires_canonical_binding_resources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve(); workspace = root / "workspace"; workspace.mkdir()
+            alias = root / "alias"; alias.symlink_to(workspace, target_is_directory=True)
+            claim = {"id": "bound", "path": str(alias), "owner": {"agent": "a"}}
+            canonical_cfg = {"generation": "g", "claims": {"bound": {"role_id": "r", "resources": [str(workspace)]}},
+                             "identity": {"host": "h", "server": "s"}}
+            canonical_current = {"record": {"owner": {"host": "h", "server": "s", "agent": "a"}, "bindings": [str(workspace)]}}
+            with patch.object(coord, "config", return_value=canonical_cfg), patch.object(coord, "snapshot", return_value=canonical_current):
+                self.assertEqual(coord.authorize_claim(claim), {"role_id": "r", "generation": "g"})
+            symlink_cfg = {"generation": "g", "claims": {"bound": {"role_id": "r", "resources": [str(alias)]}},
+                           "identity": {"host": "h", "server": "s"}}
+            symlink_current = {"record": {"owner": {"host": "h", "server": "s", "agent": "a"}, "bindings": [str(alias)]}}
+            with patch.object(coord, "config", return_value=symlink_cfg), patch.object(coord, "snapshot", return_value=symlink_current):
+                with self.assertRaisesRegex(coord.CoordinationError, "CLAIM_RESOURCES_NOT_BOUND"):
+                    coord.authorize_claim(claim)
 
     def test_legacy_claim_cannot_overlap_enrolled_resource_scope(self):
         with tempfile.TemporaryDirectory() as tmp:

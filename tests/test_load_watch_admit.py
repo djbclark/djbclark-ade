@@ -15,16 +15,17 @@ LW = Path(__file__).resolve().parent.parent / "bin" / "load-watch"
 CORES = os.cpu_count() or 1
 
 
+def clean_lw_env(**env):
+    """Copy os.environ with EVERY LW_* variable removed, then apply `env`."""
+    e = {k: v for k, v in os.environ.items() if not k.startswith("LW_")}
+    e.update(env)
+    return e
+
+
 def admit(tmp_path, *args, load1=None, **env):
-    e = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
-             LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0",  # 0: the hysteresis has its own tests
-             LW_MIN_FREE_MB="1000")  # the default floor scales with the host's RAM since 2026-11-14 (tests/test_load_watch_pr2.py): pin it here
-    for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS", "LW_MIN_FREE_MB",
-              "LW_MAX_COMPRESSOR_S", "LW_MAX_COMPRESSOR_HARD_S", "LW_CHURN_THRASH_PER_CORE", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS",
-              "LW_FAKE_SWAPINS", "LW_MAX_SWAPINS_S", "LW_SWAPINS_CORROBORATED_S", "LW_STARVE_SOFT_S", "LW_STARVE_MIN_GAP_S",
-              "LW_ADMIT_PER_CORE", "LW_LOAD_PER_CORE"):
-        if k != "LW_MIN_FREE_MB":
-            e.pop(k, None)
+    e = clean_lw_env(LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
+                     LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_BOOST_CALM_S="0", LW_RESERVE_S="0",  # 0: the hysteresis has its own tests
+                     LW_MIN_FREE_MB="1000")  # the default floor scales with the host's RAM since 2026-11-14 (tests/test_load_watch_pr2.py): pin it here
     if load1 is not None:
         e["LW_FAKE_LOAD1"] = str(load1)
     e.update(env)
@@ -32,14 +33,11 @@ def admit(tmp_path, *args, load1=None, **env):
                           timeout=30)
 
 
-LIMIT_ENV = ("LW_MAX_COMPRESSOR_S", "LW_MIN_FREE_MB", "LW_MAX_PAGEINS_S", "LW_MAX_AGENTS", "LW_BOOST_CALM_S", "LW_RESERVE_S",
-             "LW_ADMIT_PER_CORE", "LW_LOAD_PER_CORE")
-
-
-def load_module():
-    """The module with the limit variables unset at import, when it reads them (adversary A10: a host that sets one
-    must not fail the tests)."""
-    saved = {k: os.environ.pop(k) for k in LIMIT_ENV if k in os.environ}
+def load_module(**env):
+    """The module with every LW_* variable unset at import, when it reads them (adversary A10: a host that sets one
+    must not fail the tests). Optional keyword args set explicit LW_* overrides for the import."""
+    saved = {k: os.environ.pop(k) for k in [k for k in os.environ if k.startswith("LW_")]}
+    os.environ.update(env)
     try:
         loader = importlib.machinery.SourceFileLoader("load_watch", str(LW))
         spec = importlib.util.spec_from_loader("load_watch", loader)
@@ -47,6 +45,8 @@ def load_module():
         mod = importlib.util.module_from_spec(spec)
         loader.exec_module(mod)
     finally:
+        for k in [k for k in os.environ if k.startswith("LW_")]:
+            os.environ.pop(k, None)
         os.environ.update(saved)
     return mod
 
@@ -149,10 +149,12 @@ def test_admit_usage_errors_exit_2(tmp_path):
 
 
 def test_admit_prints_one_progress_line_per_waited_minute(tmp_path, monkeypatch, capsys):
+    for k in [k for k in os.environ if k.startswith("LW_")]:
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LW_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LW_FAKE_LOAD1", str(CORES * 9))
     monkeypatch.setenv("LW_ADMIT_POLL_S", "15")
-    lw = load_module()
+    lw = load_module(LW_STATE_DIR=str(tmp_path / "state"))
     clock = [0.0]
     monkeypatch.setattr(lw.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(lw.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
@@ -195,10 +197,12 @@ def test_admit_rejects_bad_hook_values(tmp_path):
 
 
 def test_admit_never_busy_loops(tmp_path, monkeypatch):
+    for k in [k for k in os.environ if k.startswith("LW_")]:
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LW_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LW_FAKE_LOAD1", str(CORES * 9))
     monkeypatch.setenv("LW_ADMIT_POLL_S", "0")
-    lw = load_module()
+    lw = load_module(LW_STATE_DIR=str(tmp_path / "state"))
     clock, sleeps = [0.0], []
     monkeypatch.setattr(lw.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(lw.time, "sleep", lambda s: (sleeps.append(s), clock.__setitem__(0, clock[0] + s)))
@@ -452,9 +456,11 @@ def test_a_corrupt_calm_file_is_no_history(tmp_path):
 
 
 def test_sampler_feeds_the_calm_clock(tmp_path, monkeypatch):
+    for k in [k for k in os.environ if k.startswith("LW_")]:
+        monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LW_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("LW_FAKE_COMPRESSOR", "0")  # tests: no vm_stat
-    lw = load_module()
+    lw = load_module(LW_STATE_DIR=str(tmp_path))
     st = {}
     lw.sample_calm(st, 1000.0, 5000, False)
     lw.sample_calm(st, 1020.0, 5000, False)
@@ -674,7 +680,7 @@ def test_linux_proc_equivalents(monkeypatch):
 def real_admit(lw, monkeypatch, capsys, snaps, agents, tmp_path, cap=20):
     """cmd_admit on the real (non-faked) path: vm_snapshot returns (or, for an Exception item, raises) `snaps` in order,
     count_agents says `agents` (an Exception instance is raised). `cap` is the --max-agents the caller passed (0: not passed)."""
-    for k in ("LW_FAKE_LOAD1", "LW_FAKE_CHURN", "LW_FAKE_FREE_MB", "LW_FAKE_PAGEINS", "LW_FAKE_AGENTS"):
+    for k in [k for k in os.environ if k.startswith("LW_")]:
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("LW_STATE_DIR", str(tmp_path))
     lw.STATE_DIR = tmp_path
@@ -802,8 +808,8 @@ def test_calm_note_serialises_on_a_lock(tmp_path, monkeypatch):
 
 def test_concurrent_admissions_cannot_all_pass_under_the_cap(tmp_path):
     """Codex P2 on PR 210: with 19 of 20 agents alive, simultaneous dispatchers must not all be admitted."""
-    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
-               LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_RESERVE_S="90", LW_FAKE_LOAD1="0.1", LW_FAKE_AGENTS="19")
+    env = clean_lw_env(LW_STATE_DIR=str(tmp_path / "state"), LW_REGISTRY=str(tmp_path / "ci-only.tsv"),
+                       LW_ADMIT_POLL_S="1", LW_ADMIT_STAGGER_S="0,0", LW_RESERVE_S="90", LW_FAKE_LOAD1="0.1", LW_FAKE_AGENTS="19")
     procs = [subprocess.Popen([sys.executable, str(LW), "admit", "--wait", "0", "--max-agents", "--json"], env=env,
                               stdout=subprocess.PIPE, text=True) for _ in range(6)]
     outs = [(p.communicate(timeout=30)[0], p.returncode) for p in procs]
@@ -832,7 +838,7 @@ def test_reservations_count_with_live_agents_expire_release_and_can_be_skipped(t
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 75
     # releasing one (its agent is spawned) shortens it to a grace period; once that is over it no longer counts
     lwr = subprocess.run([sys.executable, str(LW), "release", rows[0]["id"]], capture_output=True, text=True,
-                         env=dict(os.environ, LW_STATE_DIR=str(tmp_path / "state")))
+                         env=clean_lw_env(LW_STATE_DIR=str(tmp_path / "state")))
     assert lwr.returncode == 0 and "released" in lwr.stdout, lwr
     held = {x["id"]: x["until"] for x in res_rows(tmp_path)}
     assert held[rows[0]["id"]] < time.time() + 31 and len(held) == 2
@@ -841,7 +847,7 @@ def test_reservations_count_with_live_agents_expire_release_and_can_be_skipped(t
     assert admit(tmp_path, "--wait", "0", "--max-agents", "14", load1=0.1, **res).returncode == 0
     assert len(res_rows(tmp_path)) == 1
     unknown = subprocess.run([sys.executable, str(LW), "release", "nope"], capture_output=True, text=True,
-                             env=dict(os.environ, LW_STATE_DIR=str(tmp_path / "state")))
+                             env=clean_lw_env(LW_STATE_DIR=str(tmp_path / "state")))
     assert unknown.returncode == 66 and "no reservation nope" in unknown.stdout   # EX_NOINPUT: no such reservation (1 is a lock or write failure)
     # --no-reserve is a pure check: it records nothing; LW_RESERVE_S=0 turns reservations off
     before = f.read_text()
@@ -929,7 +935,7 @@ def test_renew_extends_a_live_reservation_and_never_resurrects_or_shortens(tmp_p
     now = time.time()
     f.write_text(json.dumps({"r": [{"id": "soon", "until": now + 30}, {"id": "far", "until": now + 5000},
                                    {"id": "dead", "until": now - 5}]}))
-    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"), LW_RESERVE_S="1200")
+    env = clean_lw_env(LW_STATE_DIR=str(tmp_path / "state"), LW_RESERVE_S="1200")
 
     def renew(rid):
         return subprocess.run([sys.executable, str(LW), "renew", rid], capture_output=True, text=True, env=env)
@@ -951,7 +957,7 @@ def test_the_text_line_carries_the_reservation_id_so_it_can_be_released(tmp_path
     assert r.returncode == 0, r
     rid = re.search(r"reservation=(\S+)", r.stdout).group(1)
     assert rid in [x["id"] for x in res_rows(tmp_path)]
-    env = dict(os.environ, LW_STATE_DIR=str(tmp_path / "state"))
+    env = clean_lw_env(LW_STATE_DIR=str(tmp_path / "state"))
     assert subprocess.run([sys.executable, str(LW), "release", rid], capture_output=True, text=True, env=env).returncode == 0
     # no reservation text for a pure check, for a refusal, or without a cap
     assert "reservation=" not in admit(tmp_path, "--wait", "0", "--max-agents", "14", "--no-reserve", load1=0.1, **res).stdout
@@ -995,3 +1001,35 @@ def test_concurrent_hot_and_calm_writers_never_leave_a_matured_run_after_a_hot_r
     s = json.loads((tmp_path / "calm.json").read_text())
     # the hot writers' last reading (t=1039) is the newest and only hot writers go that far: no calm one may survive it
     assert s["last_t"] == 1039.0 and s["calm_since"] is None, s
+
+
+def test_admit_and_load_module_scrub_every_lw_env_var(tmp_path, monkeypatch):
+    """Queue #99: both admit() and load_module() scrub every LW_* env var so host overrides cannot taint tests."""
+    stray = {
+        "LW_ADMIT_PER_CORE": "0.01",
+        "LW_LOAD_PER_CORE": "0.01",
+        "LW_MAX_PAGEINS_CORROBORATED_S": "1",
+        "LW_STARVE_REFUSED_SINCE_MAX_S": "1",
+        "LW_REFUSED_SINCE": "not-a-timestamp",
+        "LW_ADMIT_LOG": "1",
+        "LW_GUI_HOG": "1",
+        "LW_SUSTAIN_S": "1",
+        "LW_MIN_CORES": "99",
+        "LW_FAKE_SWAPINS": "9999",
+    }
+    for k, v in stray.items():
+        monkeypatch.setenv(k, v)
+    lw = load_module()
+    assert lw.LOAD_PER_CORE == 5.0 and lw.ADMIT_PER_CORE == 5.0
+    assert lw.SUSTAIN_S == 300.0 and lw.MIN_CORES == 1.5
+    assert lw.ADMIT_PAGEINS_CORROBORATED_S == 1000
+    assert lw.STARVE_REFUSED_SINCE_MAX_S == 3600.0
+    # Idle CPU + churn > 30000 corroborates pageins against 1000/s (not the stray LW_MAX_PAGEINS_CORROBORATED_S=1).
+    r = admit(tmp_path, "--wait", "0", "--json", load1=0.1, LW_FAKE_CHURN="30001", LW_FAKE_PAGEINS="500")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    rec = json.loads(r.stdout)
+    assert rec["status"] == "ok" and rec["max_per_core"] == 5.0
+    # Load 4.5/core passes under default 5.0 (not the stray LW_ADMIT_PER_CORE=0.01 / LW_LOAD_PER_CORE=0.01).
+    r2 = admit(tmp_path, "--wait", "0", "--json", load1=CORES * 4.5)
+    assert r2.returncode == 0, (r2.stdout, r2.stderr)
+    assert json.loads(r2.stdout)["max_per_core"] == 5.0

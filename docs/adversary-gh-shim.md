@@ -13,9 +13,10 @@ A. `libexec/agent-bin/gh` (POSIX `sh`, marker `# ade-gh-shim:`) and its helper `
 
 B. The helper sees the real argv, the real cwd, the real operand files and the real stdin. It finds the write with the hook's own
 `gh_invocation`/`is_write` (`pr`/`issue` `create`, `new`, `edit`, `comment`, `review`, `close`, `reopen`; `api` with a body flag) and judges it with
-the hook's own `judge`, on `shlex.join(["gh", *argv])`: a command text the helper builds from the real argv, so no shell syntax is left to lex.
+the hook's own `judge(..., argv=words, stdin_path=...)`: directly on the already-expanded process words (2026-11-24, queue #117), so no shell
+re-quoting or command-substitution expansion runs on prose containing backticks or `$(...)`.
 One module, no copy: a change to the marker rules in the hook is a change to the shim. A stdin the argv reads (`--body-file -`, `-F-`, `--input -`,
-`-F body=@-`) is spooled whole (no size cap: the real `gh` submits exactly the bytes the caller sent) into a private temp file, judged as `< FILE`
+`-F body=@-`) is spooled whole (no size cap: the real `gh` submits exactly the bytes the caller sent) into a private temp file, judged via `stdin_path`
 (the gate reads no file over `MAX_FILE`, 256 KiB: a stdin larger than that is judged on its first 256 KiB, and still reaches `gh` whole), and handed to the real `gh` as its fd 0.
 
 C. A refusal is exit 4 and one line on stderr; nothing runs. Everything else is `os.execv(real_gh, [real_gh, *argv])`: same argv, stdin,
