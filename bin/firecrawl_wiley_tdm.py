@@ -66,6 +66,7 @@ _MB = _load_sibling("firecrawl_mit_bridge", "firecrawl_mit_bridge.py")
 _OA = _load_sibling("firecrawl_oa_fallback", "firecrawl_oa_fallback.py")
 
 parse_url = _MB.parse_url
+valid_host = _MB.valid_host
 redact_url = _MB.redact_url
 scrubbed_env = _MB.scrubbed_env
 run_bounded = _MB.run_bounded
@@ -165,9 +166,13 @@ def _is_loopback_ip(host: str) -> bool:
         return False
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
+def _recv_exact(sock: socket.socket, n: int, deadline: float) -> bytes:
     buf = bytearray()
     while len(buf) < n:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("socks5: handshake timeout")
+        sock.settimeout(left)
         chunk = sock.recv(n - len(buf))
         if not chunk:
             raise OSError("socks5: unexpected EOF")
@@ -183,38 +188,55 @@ def socks5_connect(
     timeout: float,
 ) -> socket.socket:
     """Open a TCP socket to dest_host:dest_port via loopback SOCKS5 (ATYP=0x03 remote DNS)."""
-    if not _is_loopback_ip(socks_host):
+    socks_host_clean = (socks_host or "").strip()
+    if not _is_loopback_ip(socks_host_clean):
         raise ValueError("socks5: proxy host must be a loopback IP literal")
-    if not (1 <= int(socks_port) <= 65535):
+    if isinstance(socks_port, bool) or not (1 <= int(socks_port) <= 65535):
         raise ValueError("socks5: invalid proxy port")
-    host_b = dest_host.encode("ascii")
+    if isinstance(dest_port, bool) or not (1 <= int(dest_port) <= 65535):
+        raise ValueError("socks5: invalid target port")
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("socks5: invalid timeout")
+    if not isinstance(dest_host, str) or dest_host != dest_host.strip():
+        raise ValueError("socks5: invalid target hostname")
+    dest_clean = dest_host.lower()
+    if not valid_host(dest_clean):
+        raise ValueError("socks5: invalid target hostname")
+    host_b = dest_clean.encode("ascii")
     if not host_b or len(host_b) > 255:
         raise ValueError("socks5: invalid target hostname")
-    if not (1 <= int(dest_port) <= 65535):
-        raise ValueError("socks5: invalid target port")
 
-    sock = socket.create_connection((socks_host, int(socks_port)), timeout=max(0.5, timeout))
+    eff_timeout = max(0.5, float(timeout))
+    deadline = time.monotonic() + eff_timeout
+    sock = socket.create_connection((socks_host_clean, int(socks_port)), timeout=eff_timeout)
     try:
-        sock.settimeout(max(0.5, timeout))
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            raise TimeoutError("socks5: handshake timeout")
+        sock.settimeout(rem)
         # RFC 1928 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
         sock.sendall(b"\x05\x01\x00")
-        greeting = _recv_exact(sock, 2)
+        greeting = _recv_exact(sock, 2, deadline)
         if greeting != b"\x05\x00":
             raise OSError(f"socks5: unsupported auth reply {greeting!r}")
         # CONNECT request with ATYP=0x03 (domain name resolved remotely on MIT host)
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            raise TimeoutError("socks5: handshake timeout")
+        sock.settimeout(rem)
         req = b"\x05\x01\x00\x03" + bytes([len(host_b)]) + host_b + struct.pack("!H", int(dest_port))
         sock.sendall(req)
-        hdr = _recv_exact(sock, 4)
+        hdr = _recv_exact(sock, 4, deadline)
         if hdr[0] != 5 or hdr[1] != 0 or hdr[2] != 0:
             raise OSError(f"socks5: connect failed rep=0x{hdr[1]:02x}")
         atyp = hdr[3]
         if atyp == 1:
-            _recv_exact(sock, 4 + 2)
+            _recv_exact(sock, 4 + 2, deadline)
         elif atyp == 4:
-            _recv_exact(sock, 16 + 2)
+            _recv_exact(sock, 16 + 2, deadline)
         elif atyp == 3:
-            alen = _recv_exact(sock, 1)[0]
-            _recv_exact(sock, alen + 2)
+            alen = _recv_exact(sock, 1, deadline)[0]
+            _recv_exact(sock, alen + 2, deadline)
         else:
             raise OSError(f"socks5: unknown atyp=0x{atyp:02x}")
         return sock
@@ -279,8 +301,8 @@ class WileyRateLimiter:
         self._timestamps: deque[float] = deque()
 
     def try_acquire(self) -> bool:
-        now = self._clock()
         with self._lock:
+            now = self._clock()
             cutoff = now - RATE_WINDOW_S
             while self._timestamps and self._timestamps[0] <= cutoff:
                 self._timestamps.popleft()
@@ -549,6 +571,12 @@ class WileyTdm:
         token = self.key_state.get() if self.key_state is not None else None
         if not token:
             return None, None, "" if self.config.mode == "auto" else "no-token"
+        if (
+            not self.config.pdftotext_bin
+            or not os.path.isfile(self.config.pdftotext_bin)
+            or not os.access(self.config.pdftotext_bin, os.X_OK)
+        ):
+            return None, None, "pdftotext-missing"
         if self._in_cooldown():
             return None, None, "cooldown"
         if not self._sem.acquire(blocking=False):
@@ -601,9 +629,14 @@ class WileyTdm:
         if scheme != "https" or port != 443:
             return 0, {}, None, "scheme-or-port"
         parts = urllib.parse.urlsplit(url)
-        target = parts.path or "/"
+        raw_path = parts.path or "/"
+        target = urllib.parse.quote(raw_path, safe="/:@!$&'()*+,;=-._~%")
         if parts.query:
-            target = f"{target}?{parts.query}"
+            target = f"{target}?{urllib.parse.quote(parts.query, safe='/:@!$&\'()*+,;=-._~%?')}"
+        try:
+            target.encode("ascii")
+        except UnicodeEncodeError:
+            return 0, {}, None, "invalid-url"
         rem = deadline - time.monotonic()
         if rem <= 0.1:
             return 0, {}, None, "timeout"
@@ -638,6 +671,7 @@ class WileyTdm:
     def _download_pdf(self, doi: str, token: str, deadline: float) -> tuple[bytes | None, str]:
         encoded_doi = urllib.parse.quote(doi, safe="")
         cur_url = f"https://{WILEY_API_HOST}{WILEY_API_PREFIX}{encoded_doi}"
+        left_wiley_api = False
 
         for hop in range(MAX_REDIRECTS + 1):
             parsed = parse_url(cur_url)
@@ -661,6 +695,8 @@ class WileyTdm:
                     deadline=deadline,
                 )
             elif host == WILEY_API_HOST:
+                if left_wiley_api:
+                    return None, "redirect-back-to-api"
                 # Redirect stayed on api.wiley.com: strip token unconditionally, stay on SOCKS5
                 status, resp_hdrs, data, err = self._socks_request(
                     cur_url,
@@ -669,6 +705,7 @@ class WileyTdm:
                     deadline=deadline,
                 )
             else:
+                left_wiley_api = True
                 # Presigned redirect off api.wiley.com: token stripped, global-IP SSRF pinned
                 status, resp_hdrs, data, err = _OA._pinned_https_request(
                     cur_url,
@@ -680,7 +717,7 @@ class WileyTdm:
                 )
 
             if err:
-                if err in ("socks-error", "network-error", "timeout"):
+                if err in ("socks-error", "fetch-error", "fetch-timeout", "network-error", "timeout"):
                     self._set_cooldown(WILEY_5XX_COOLDOWN_S)
                 return None, err
 
@@ -692,9 +729,10 @@ class WileyTdm:
                 continue
 
             if status == 401:
-                if self.key_state is not None:
+                if is_wiley_api and self.key_state is not None:
                     self.key_state.disable_for(WILEY_401_COOLDOWN_S)
-                return None, "unauthorized"
+                    return None, "unauthorized"
+                return None, "redirect-unauthorized"
             if status == 403:
                 self._set_cooldown(WILEY_403_COOLDOWN_S)
                 return None, "access-denied"

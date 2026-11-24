@@ -628,8 +628,9 @@ class Router:
         if oa_fallback is not None:
             oa_fallback.log = log
             oa_fallback._reply_cls = Reply
-            if getattr(oa_fallback, "client", None) is not None:
-                oa_fallback.client.log = log
+            for sub in ("client", "core_client", "springer_client"):
+                if getattr(oa_fallback, sub, None) is not None:
+                    getattr(oa_fallback, sub).log = log
         self.wiley_tdm = wiley_tdm
         if wiley_tdm is not None:
             wiley_tdm.log = log
@@ -717,7 +718,7 @@ class Router:
             return reply, backend
         if backend == "wiley-tdm" and not (self.wiley_tdm and self.wiley_tdm.allow_cloud_llm):
             data["warning"] = (
-                data.get("warning", "")
+                (data.get("warning") or "")
                 + " External LLM extraction (query/json) is disabled for wiley-tdm by policy "
                 + "(set FIRECRAWL_ROUTER_WILEY_ALLOW_CLOUD_LLM=on only if permitted by your Wiley TDM agreement)."
             ).strip()
@@ -801,6 +802,10 @@ class Router:
             )
             if w_reply is not None and w_backend:
                 notes = []
+                if was_enrolled and b_note and b_note != "primary-ok":
+                    notes.append(f"mit-bridge skipped:{b_note}")
+                elif bridge_log_note:
+                    notes.append(bridge_log_note)
                 if oa_log_note:
                     notes.append(oa_log_note)
                 if w_note:

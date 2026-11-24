@@ -51,6 +51,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 
 def _load_mit_bridge_helpers():
@@ -1136,15 +1137,6 @@ class OpenAlexClient:
 # ---- Springer Nature Free OA JATS & CORE API v3 Clients --------------------
 
 
-_JATS_DOI_RE = re.compile(
-    r'<article-id\s+pub-id-type=["\']doi["\'][^>]{0,80}>([^<]{1,220})</article-id>',
-    re.IGNORECASE,
-)
-_JATS_TITLE_RE = re.compile(
-    r"<article-title\b[^>]{0,80}>(.*?)</article-title>",
-    re.IGNORECASE | re.DOTALL,
-)
-_XML_TAG_RE = re.compile(r"<[^>]{1,200}>")
 _CORE_PUBLIC_STUB = "not available for public api users"
 
 
@@ -1153,50 +1145,85 @@ def is_springer_doi(doi: str) -> bool:
     return any(d.startswith(p) for p in SPRINGER_DOI_PREFIXES)
 
 
-def extract_jats_article(xml_bytes: bytes, expected_doi: str) -> tuple[bytes | None, str, str]:
-    """Safely extract <article>...</article> from Springer OA JATS response (O(n), XXE-safe).
+def _xml_localname(tag: str) -> str:
+    if not isinstance(tag, str):
+        return ""
+    if "}" in tag:
+        return tag.rsplit("}", 1)[1].lower()
+    return tag.lower()
 
-    Returns (article_xml, title, error_tag).
+
+def _find_child_local(elem: ET.Element, name: str) -> ET.Element | None:
+    for child in elem:
+        if _xml_localname(child.tag) == name:
+            return child
+    return None
+
+
+def extract_jats_article(xml_bytes: bytes, expected_doi: str) -> tuple[bytes | None, str, str]:
+    """Safely extract verified <article>...</article> from Springer OA JATS response.
+
+    Rejects NUL bytes, <!DOCTYPE, and <!ENTITY before parsing with stdlib ElementTree
+    (no XXE or entity expansion), verifies DOI strictly under
+    ./front/article-meta/article-id[@pub-id-type='doi'], and serializes only that
+    <article> element for pandoc.
     """
     if not xml_bytes:
         return None, "", "springer-empty"
-    if b"<!entity" in xml_bytes.lower():
+    if b"\x00" in xml_bytes:
         return None, "", "springer-unsafe-xml"
-    # Linear O(n) scan for <article ...> ... </article> (avoids regex backtracking).
-    start = -1
-    pos = 0
     lower = xml_bytes.lower()
-    while True:
-        idx = lower.find(b"<article", pos)
-        if idx < 0:
-            break
-        nxt = idx + len(b"<article")
-        if nxt < len(lower) and lower[nxt:nxt + 1] in (b">", b" ", b"\t", b"\r", b"\n"):
-            start = idx
-            break
-        pos = idx + 8
-    if start < 0:
-        return None, "", "springer-no-article"
-    end_tag = b"</article>"
-    end = lower.find(end_tag, start)
-    if end < 0:
-        return None, "", "springer-truncated-xml"
-    article = xml_bytes[start : end + len(end_tag)]
+    if b"<!entity" in lower or b"<!doctype" in lower:
+        return None, "", "springer-unsafe-xml"
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None, "", "springer-bad-xml"
 
-    head_text = article[:32768].decode("utf-8", "replace")
-    doi_m = _JATS_DOI_RE.search(head_text)
-    if not doi_m:
+    art_el: ET.Element | None = None
+    if _xml_localname(root.tag) == "article":
+        art_el = root
+    else:
+        for elem in root.iter():
+            if _xml_localname(elem.tag) == "article":
+                art_el = elem
+                break
+    if art_el is None:
+        return None, "", "springer-no-article"
+
+    front = _find_child_local(art_el, "front")
+    meta = _find_child_local(front, "article-meta") if front is not None else None
+    if meta is None:
         return None, "", "springer-doi-missing"
-    got_doi = normalize_doi(doi_m.group(1).strip())
-    if not got_doi or got_doi.lower() != expected_doi.lower():
+
+    found_dois: list[str] = []
+    for child in meta:
+        if _xml_localname(child.tag) != "article-id":
+            continue
+        pub_type = ""
+        for k, v in child.attrib.items():
+            if _xml_localname(k) == "pub-id-type":
+                pub_type = (v or "").strip().lower()
+                break
+        if pub_type == "doi":
+            raw_doi = "".join(child.itertext()).strip()
+            norm = normalize_doi(raw_doi)
+            if norm:
+                found_dois.append(norm)
+
+    if not found_dois:
+        return None, "", "springer-doi-missing"
+    if not any(d.lower() == expected_doi.lower() for d in found_dois):
         return None, "", "springer-doi-mismatch"
 
     title = ""
-    title_m = _JATS_TITLE_RE.search(head_text)
-    if title_m:
-        raw_t = _XML_TAG_RE.sub(" ", title_m.group(1))
-        title = _sanitize_text(raw_t)
-    return article, title, ""
+    title_group = _find_child_local(meta, "title-group")
+    title_el = _find_child_local(title_group, "article-title") if title_group is not None else None
+    if title_el is not None:
+        title = _sanitize_text("".join(title_el.itertext()))
+
+    article_bytes = ET.tostring(art_el, encoding="utf-8")
+    return article_bytes, title, ""
 
 
 class SpringerOaClient:
@@ -1253,7 +1280,7 @@ class SpringerOaClient:
             resolver=self._resolver,
         )
         if err:
-            if err in ("network-error", "timeout"):
+            if err in ("fetch-error", "fetch-timeout", "network-error", "timeout"):
                 self._trip_circuit(SPRINGER_CIRCUIT_S)
             return None, "", f"springer-{err}"
         if status in (401, 403):
@@ -1329,7 +1356,7 @@ class CoreOaClient:
             resolver=self._resolver,
         )
         if err:
-            if err in ("network-error", "timeout"):
+            if err in ("fetch-error", "fetch-timeout", "network-error", "timeout"):
                 self._trip_circuit(CORE_CIRCUIT_S)
             return None, f"core-{err}"
         if status in (401, 403):
@@ -2090,11 +2117,11 @@ class OaFallback:
         deadline: float,
         reply_cls,
     ) -> tuple[object | None, str]:
+        if not self.config.pandoc_bin or not os.path.isfile(self.config.pandoc_bin) or not os.access(self.config.pandoc_bin, os.X_OK):
+            return None, "pandoc-missing"
         article_xml, jats_title, s_err = self.springer_client.fetch_jats(doi, deadline)
         if article_xml is None:
             return None, s_err
-        if not self.config.pandoc_bin or not os.path.isfile(self.config.pandoc_bin) or not os.access(self.config.pandoc_bin, os.X_OK):
-            return None, "pandoc-missing"
         if not self._ensure_private_state_dir():
             return None, "state-dir-invalid"
         run_dir = None
@@ -2191,19 +2218,22 @@ class OaFallback:
                 scheme, host, port = parsed
                 if scheme != "https" or port != 443:
                     continue
-                if host in ("core.ac.uk", "www.core.ac.uk", CORE_API_HOST):
+                if host == "core.ac.uk" or host.endswith(".core.ac.uk") or host == OPENALEX_CONTENT_HOST:
                     continue
                 if host in BLOCKED_REDIRECTOR_HOSTS or _is_excluded_publisher_host(host, requested_host):
                     continue
                 if host in cooldown_hosts:
                     continue
-                if self.config.mode == "allowlist" and not _trusted_host_path_ok(host, raw_u):
+                if not _trusted_host_path_ok(host, raw_u):
+                    continue
+                if self.config.mode == "allowlist" and host not in TRUSTED_OA_HOSTS:
                     continue
                 tried += 1
+                url_path = (urllib.parse.urlsplit(raw_u).path or "").lower()
                 cand = OaCandidate(
                     url=raw_u,
                     host=host,
-                    is_direct_pdf=raw_u.lower().endswith(".pdf"),
+                    is_direct_pdf=url_path.endswith(".pdf"),
                     oa_version="unknown",
                     oa_license=_sanitize_license(item.get("license")),
                     oa_source="CORE Open Access Repository",
@@ -2231,9 +2261,7 @@ class OaFallback:
                 if reply is not None:
                     return reply, f"oa:core-{_source_slug(cand.host)} unknown"
 
-        # Path B: Inline CORE fullText (requires registered key; skipped under peer-reviewed-only policy)
-        if self.config.version_policy == "peer-reviewed":
-            return None, "core-version-unknown"
+        # Path B: Inline CORE fullText (requires registered key)
         raw_ft = item.get("fullText")
         if not isinstance(raw_ft, str):
             return None, "core-no-fulltext"
