@@ -8,6 +8,7 @@ days (fixed in d618809). Making a file executable never breaks a caller that run
 non-`tests/` shebang files have no mode exemptions; only nested `tests/` paths are skipped."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import unittest
@@ -17,6 +18,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class ShebangModesTest(unittest.TestCase):
+    def test_agent_sweep_can_be_execed_by_ade_job_run(self) -> None:
+        self.assertTrue(os.access(ROOT / "bin" / "ade-agent-sweep", os.X_OK))
+
     def test_tracked_files_with_a_shebang_are_executable(self) -> None:
         if shutil.which("git") is None or not (ROOT / ".git").exists():
             self.skipTest("not a git checkout")

@@ -482,6 +482,7 @@ def test_plist_template_and_inventory_row():
     r = rows[0]
     assert (r["kind"], r["owner"], r["class"], r["chosen"]) == ("ade-sched", "djbclark-ade", "optional", True)
     assert r["label"] == d["Label"] and r["plist"] == "config/launchd/com.djbclark.ade-progress.plist"
+    assert r["platforms"] == ["linux"]
 
 
 def test_inventory_row_doctor_expectations():
@@ -494,15 +495,21 @@ def test_inventory_row_doctor_expectations():
     none = S.LiveScan("launchd", (), ())
 
     def status(r, scan):
-        return [(x.status, x.fail) for x in S.diff_jobs([r], [], scan) if x.name == "ade-progress"]
+        return [(x.status, x.fail) for x in S.diff_jobs([r], [], scan, platform_name="linux") if x.name == "ade-progress"]
 
     unchosen = dict(row, chosen=False)
     assert status(unchosen, live) == [("unchosen", False)] and status(unchosen, none) == [("unchosen", False)]
     chosen = dict(row, chosen=True)
     assert status(chosen, live) == [("ok", False)]
     assert status(chosen, none) == [("missing", True)]
+    assert not S.diff_jobs([chosen], [], none, platform_name="darwin")
+    [drift] = S.diff_jobs([chosen], [], live, platform_name="darwin")
+    assert (drift.name, drift.status, drift.fail) == ("ade-progress", "present", True)
+    assert "com.djbclark.ade-progress is live on a disallowed platform (report only)" in drift.detail
+    unprobeable = S.LiveScan("launchd", live.jobs, ("backend scan: failed",))
+    assert not any(item.fail for item in S.diff_jobs([chosen], [], unprobeable, platform_name="darwin"))
     # installed but unchosen: still quiet, and the detail says the label is live
-    detail = [x.detail for x in S.diff_jobs([unchosen], [], live) if x.name == "ade-progress"]
+    detail = [x.detail for x in S.diff_jobs([unchosen], [], live, platform_name="linux") if x.name == "ade-progress"]
     assert len(detail) == 1 and "live (installed but unchosen)" in detail[0]
 
 

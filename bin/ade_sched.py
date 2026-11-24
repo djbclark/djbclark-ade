@@ -2021,10 +2021,11 @@ def diff_jobs(
     live: LiveScan | Mapping[str, Any] | set[str] | None,
     *,
     unload: bool = False,
+    platform_name: str | None = None,
 ) -> list[DriftRow]:
     """Compare inventory to live state. Never unloads (unload=True is refused as report-only).
 
-    ADE-owned expected jobs: missing/present → fail doctor when probeable.
+    ADE-owned expected jobs on this platform: missing/present → fail doctor when probeable.
     Retired labels that are still live → fail (report only; removal is a later update step).
     Foreign / unknown owners → report, never unload.
     """
@@ -2077,6 +2078,15 @@ def diff_jobs(
         label = row.get("label")
         if isinstance(label, str) and label:
             inventory_labels.add(label)
+        if not _platform_ok(row, platform_name=platform_name):
+            probeable = paseo_probeable if kind == "paseo" else sched_probeable
+            if owner == OWNER_ADE and probeable and isinstance(label, str) and label in ids:
+                rows.append(DriftRow(
+                    name, "present", owner,
+                    f"label {label} is live on a disallowed platform (report only)",
+                    fail=True,
+                ))
+            continue
         if not _job_expected(row):
             rows.append(DriftRow(
                 name, "unchosen", owner,

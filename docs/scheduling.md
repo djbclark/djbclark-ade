@@ -56,20 +56,57 @@ Checked-in ADE jobs under `config/launchd/` include `com.djbclark.deadline-sweep
 `launchd/com.djbclark.load-watch.plist` is also inventoried (S4b).
 ```
 
-`config/launchd/com.djbclark.ade-supervisor-scan.plist` (2026-11-18) is the supervisor Pi-stuck scan: every 300 s it
-runs `bin/ade-pi-stuck` (read-only) and sends at most one `paseo send` per run, naming every new finding (a stuck
-agent, an agent in `error` on any provider (a Codex or Claude one is a notice only, with no Pi alternative), a thin account, a blind scan), deduped in its state dir, so one agent notices once rather than 288 times a day. **The lead is a file, not a template placeholder**, so the job renders
-for `ade-sched diff`/`reconcile` and a lead handoff cannot leave notices aimed at an archived session (a delivery to one
-would un-archive it): one Paseo agent id, first line of `~/.local/state/djbclark-ade/supervisor/lead`, or
-`ADE_SUPERVISOR_LEAD` when run by hand. Write that file first — the plist logs there and `RunAtLoad` fires at once —
-then install; `paseo ls -g --json` names the current lead:
+### Five-minute agent sweep on macOS
+
+[`launchd/com.djbclark.ade-agent-sweep.plist`](../launchd/com.djbclark.ade-agent-sweep.plist)
+uses `ade-job-run` and `StartInterval=300` to run [`bin/ade-agent-sweep`](../bin/ade-agent-sweep).
+Each tick runs `ade-supervisor-scan`, `ade-progress scan --yes`, and
+`ade-subagent-stalls --notify` in that order. Each step gets up to 180 seconds.
+A failed, unstartable, or timed-out step is logged, and the sweep continues. A nonzero
+child exit makes the sweep exit 1, including the stalls scanner's exit 1 when stalls exist.
+Each monitor keeps its existing state. The sweep defaults `ADE_PASEO_CACHE_TTL` to `10` for
+advisory snapshots and honors a caller override. Progress and the notification guards
+read fresh daemon state. The macOS inventory expects the sweep. Linux keeps the
+standalone progress timer, and `fleet-watch` and `load-watch` keep their own schedules.
+
+For inspection, run `bin/ade-agent-sweep --dry-run --json` from the checkout. Repeat
+`--only` with step names such as `ade-supervisor-scan` and `ade-progress` to select steps.
+The runner keeps its usual order. In JSON mode, the summary goes to stdout and child
+output goes to stderr.
+
+The supervisor sends at most one message per run with new findings. Store its current lead
+ID on the first line of `~/.local/state/djbclark-ade/supervisor/lead`. Manual invocations can
+also use `ADE_SUPERVISOR_LEAD`. The supervisor follows a completed self-handoff and updates the
+lead file. The sweep's launchd logs are `~/.local/state/djbclark-ade/agent-sweep/sweep.out` and
+`sweep.err`; supervisor detail still goes to `supervisor/supervisor.log` under the same state root.
+
+#### macOS cutover
+
+After separate approval for live apply, run the following from the updated canonical
+checkout (`~/src/djbclark-ade`) as the logged-in user. Where the deployed `fleet-watch`
+still calls `ade-subagent-stalls --notify`, have the ops owner remove that one call in a
+separately approved ops rollout before loading the sweep. Keep `fleet-watch` on its own
+schedule and preserve the shared notification ledger. Confirm that the existing supervisor
+lead file names the current lead before installing, because `RunAtLoad` may fire immediately.
+Render the new job first, then unload both standalone jobs before installing the sweep or
+running bulk `ade-sched reconcile --yes` or `ade-install apply --yes`.
 
 ```sh
-mkdir -p ~/.local/state/djbclark-ade/supervisor        # first: the plist logs there and RunAtLoad fires at once
-printf '%s\n' <lead-paseo-agent-id> > ~/.local/state/djbclark-ade/supervisor/lead
-bin/ade-sched install config/launchd/com.djbclark.ade-supervisor-scan.plist --ade ~/src/djbclark-ade \
-  --set __STATE__=$HOME/.local/state/djbclark-ade/supervisor
+bin/ade-sched --backend launchd --set "__STATE__=$HOME/.local/state/djbclark-ade/agent-sweep" \
+  render launchd/com.djbclark.ade-agent-sweep.plist
+
+bin/ade-sched --backend launchd uninstall com.djbclark.ade-supervisor-scan &&
+bin/ade-sched --backend launchd uninstall com.djbclark.ade-progress &&
+bin/ade-sched --backend launchd reconcile --yes --name ade-agent-sweep
 ```
+
+If an uninstall reports a busy admission lock, let the in-flight scan finish and retry the
+uninstall before continuing. For a pre-wrapper job, follow the [wrapper migration](#wrapper-routed-jobs-w21c-2026-11-13)
+procedure first. After installation, check `launchctl print "gui/$(id -u)/com.djbclark.ade-agent-sweep"`
+and confirm both old labels are absent from the same launchd domain. The first interval tick
+will run within five minutes if the install lock caused the load-time run to skip. Roll back by
+uninstalling `com.djbclark.ade-agent-sweep` before reinstalling the two standalone templates.
+Keep their state directories during either cutover. Apply this migration through `ade-sched`.
 
 **Re-handoff plan and `ADE_SUPERVISOR_REHANDOFF` (Carried 70, 2026-11-19).** For each stuck agent the scan also works out
 the re-handoff it *would* do (who, the exhausted account, the healthy alternative `ade-pi-stuck` offered, or
@@ -119,7 +156,7 @@ A `--lead` that is later replaced by an acknowledged self-handoff needs no reins
 also automatically rewrites and reloads a legacy `~/Library/LaunchAgents/com.djbclark.ade-net-resume.plist` that
 pins `--lead <predecessor>` (leaving `--lead-file` plists and other chains untouched). Alternatively, `bin/ade-net-resume`
 accepts `--lead-file PATH` (mutually exclusive with `--lead`, e.g. `~/.local/state/djbclark-ade/supervisor/lead`,
-matching `com.djbclark.ade-supervisor-scan`), re-reading the file each tick and still following completed handoff
+the same file the agent sweep supervisor uses), re-reading the file each tick and still following completed handoff
 chains with zero plist churn. A lead retired without a completed handoff (or lead-file update) logs one
 `skip-lead-retired` row and exits 0 on every run until the lead file is updated or the job is reinstalled with a live lead.
 
@@ -333,24 +370,13 @@ Progress-panel item, sends one `hermes-ping` and wakes the agent via `paseo send
 built-in (heartbeat, schedule) fits without a model turn per firing. It adds no job or installer
 yet; it never restarts a closed or errored session.
 
-Slice 1 (2026-11-12) ships [`bin/ade-progress`](../bin/ade-progress) (`declare`, `retire`, `scan`, `inbox`, `ack`;
-state-changing commands default to `--dry-run`) and the template
-`config/launchd/com.djbclark.ade-progress.plist` (`scan --yes` every 300 s). Slice 1b (2026-11-12) added the
-`config/ade.toml` row `ade-progress` (`kind = "ade-sched"`, `class = "optional"`); the operator chose it on 2026-11-13, so
-the row has `chosen = true` and `just doctor` fails with `missing` until the job is installed. Merging loads nothing. To install it, from the
-canonical checkout (a job installed from a linked worktree is refused):
-
-```
-bin/ade-sched render config/launchd/com.djbclark.ade-progress.plist     # review first
-bin/ade-sched install config/launchd/com.djbclark.ade-progress.plist --ade ~/src/djbclark-ade
-bin/ade-sched status com.djbclark.ade-progress
-```
-
-or in one step, `bin/ade-sched reconcile --yes --name ade-progress`, which installs it and records ledger ownership (the
-manual install is adopted by the next `reconcile --yes`). The log is `~/.local/state/djbclark-ade/progress/scan.log`;
-a full `reconcile --yes` or `ade-install apply --yes` (any host whose platform is mac or linux) installs it too;
-`bin/ade-sched uninstall com.djbclark.ade-progress` removes the job; setting `chosen = false` quiets doctor, and unloads it at the next
-`reconcile --yes` when the ledger owns it (see Inventory and drift).
+[`bin/ade-progress`](../bin/ade-progress) provides `declare`, `retire`, `scan`, `inbox`
+and `ack`. State-changing commands default to `--dry-run`. On macOS, the
+[five-minute agent sweep](#five-minute-agent-sweep-on-macos) runs `scan --yes`.
+On Linux, `config/launchd/com.djbclark.ade-progress.plist` remains the source for the
+standalone five-minute timer. The Linux inventory row is chosen. Install or adopt it
+with `bin/ade-sched reconcile --yes --name ade-progress` from the canonical checkout.
+The standalone log is `~/.local/state/djbclark-ade/progress/scan.log`.
 
 Judgment jobs live in `paseo schedule`, not ade-sched. Inventory rows (`kind = "paseo"`) record the
 intended name, cron, `--mode`, and (for hard `context-budget`) provider/cwd/prompt for reconcile.
@@ -666,7 +692,7 @@ The updater's own service (`com.djbclark.ade-update-check`) running keeps its ex
 
 ### Wrapper-routed jobs (W21c, 2026-11-13)
 
-Every ADE launchd job in `config/launchd/com.djbclark.*.plist`, and (W21d, 2026-11-13) `launchd/com.djbclark.load-watch.plist`, now starts through `bin/ade-job-run --lock-dir __ADMISSION__ LABEL -- COMMAND...`
+ADE launchd jobs in `config/launchd/com.djbclark.*.plist` and `launchd/com.djbclark.*.plist` start through `bin/ade-job-run --lock-dir __ADMISSION__ LABEL -- COMMAND...`
 (`__ADMISSION__` is filled with the ONE canonical lock directory, `<real home>/.local/state/djbclark-ade/admission` from `pwd.getpwuid(os.getuid()).pw_dir` and never from `$HOME`, `XDG_STATE_HOME` or `ADE_JOBS_STATE_DIR` (`canonical_admission_dir`; tests inject it by monkeypatching that function); it is an argv value of the loaded job; `dev.herdr.server`, a KeepAlive server with a hard-coded path, is not migrated; see `--restart-service` below). Each run takes a **shared**,
 non-blocking `flock` on `<lock dir>/LABEL.lock` and keeps it for the whole run (the lock descriptor is
 inherited by the exec'd command, so it lives as long as the command; a child started with `close_fds=True` does not inherit it). If it cannot, because

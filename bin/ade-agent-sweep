@@ -1,0 +1,95 @@
+#!/usr/bin/env -S python3 -I
+"""Run the ADE agent monitors in order with independent failure handling."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+BIN = Path(__file__).resolve().parent
+STEPS = {
+    "ade-supervisor-scan": (),
+    "ade-progress": ("scan", "--yes"),
+    "ade-subagent-stalls": ("--notify",),
+}
+CACHE_TTL = "ADE_PASEO_CACHE_TTL"
+STEP_TIMEOUT = 180
+
+
+def stop_on_term(signum, _frame):
+    # Let the current step's cleanup run if launchd stops the sweep.
+    raise SystemExit(128 + signum)
+
+
+def run_step(command: list[str], env: dict[str, str], json_output: bool) -> int:
+    child = subprocess.Popen(
+        command, env=env, stdin=subprocess.DEVNULL,
+        stdout=sys.stderr if json_output else None,
+        start_new_session=True,
+    )
+    try:
+        return child.wait(timeout=STEP_TIMEOUT)
+    finally:
+        if child.returncode is None:
+            # A shell monitor can have subprocesses of its own.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="print the plan without running commands")
+    parser.add_argument("--only", choices=STEPS, action="append",
+                        help="select a step by executable name (repeatable, runs in sweep order)")
+    parser.add_argument("--json", action="store_true", help="emit one JSON summary on stdout")
+    args = parser.parse_args(argv)
+
+    env = os.environ.copy()
+    ttl = env.setdefault(CACHE_TTL, "10")
+    results = []
+    failed = False
+    for name, flags in STEPS.items():
+        if args.only and name not in args.only:
+            continue
+        command = [str(BIN / name), *flags]
+        result = {"step": name, "argv": command, "status": "planned", "returncode": None}
+        results.append(result)
+        if args.dry_run:
+            if not args.json:
+                print(f"{CACHE_TTL}={shlex.quote(ttl)} {shlex.join(command)}")
+            continue
+
+        step_env = env.copy()
+        if name == "ade-supervisor-scan":
+            step_env.setdefault("RELAY_SENDER_NAME", name)
+        print(f"ade-agent-sweep: running {name}", file=sys.stderr, flush=True)
+        try:
+            rc = run_step(command, step_env, args.json)
+        except subprocess.TimeoutExpired:
+            result.update(status="timeout", error=f"timed out after {STEP_TIMEOUT}s")
+        except Exception as exc:
+            result.update(status="error", error=f"{type(exc).__name__}: {exc}")
+        else:
+            result.update(status="ok" if rc == 0 else "failed", returncode=rc)
+            if rc != 0:
+                result["error"] = f"exit status {rc}"
+        if "error" in result:
+            failed = True
+            print(f"ade-agent-sweep: {name}: {result['error']}", file=sys.stderr)
+
+    if args.json:
+        print(json.dumps({"dry_run": args.dry_run, "paseo_cache_ttl": ttl, "steps": results}))
+    return int(failed)
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, stop_on_term)
+    sys.exit(main())
