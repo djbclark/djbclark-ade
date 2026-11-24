@@ -40,9 +40,13 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    acknowledgements that end a turn. Exceptions: a tapback/emoji-only post; a
    short progress note under 200 chars with no question/decision when a later
    post in the same turn carries a Ref.
-2. Get a fresh Ref per post by running `ref <BOT>` (or
-   `ref-append <BOT> FILE`) and paste the output verbatim. Never invent, reuse
-   or edit an id; re-posting an old message also needs a fresh Ref.
+2. Get a fresh Ref per post by running `ref <BOT>` (one positional `<BOT>`
+   argument only, e.g. `~/src/djbclark-ade/bin/ref ANTIGRAVITY`, or
+   `ref-append <BOT> FILE`) and paste the output verbatim. Never pass a second
+   argument, never append or substitute a Paseo UUID / agent ID after
+   `Ref: <BOT>-`, and never invent, reuse or edit an id (`bin/ref` records
+   your `PASEO_AGENT_ID` automatically as the agent hint in `issued.log`);
+   re-posting an old message also needs a fresh Ref.
 3. The id comes from one global counter shared by every bot, base 36 (0-9 a-z),
    never reset, file locked with `flock`. Every issued id is logged in
    `issued.log` (id, bot, time, agent hint); the bot prefix is normalized
@@ -111,6 +115,7 @@ their prefix from the lead's prefix or a per-slice override):
 | Bot | Prefix |
 |---|---|
 | ADE lead (b0b47ad8) | ADE |
+| Antigravity TUI | ANTIGRAVITY |
 | Pi TUI | PI |
 | Codex TUI | CODEX |
 | Claude TUI | CLAUDE |
