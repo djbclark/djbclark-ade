@@ -2079,6 +2079,13 @@ def diff_jobs(
         if isinstance(label, str) and label:
             inventory_labels.add(label)
         if not _platform_ok(row, platform_name=platform_name):
+            probeable = paseo_probeable if kind == "paseo" else sched_probeable
+            if owner == OWNER_ADE and probeable and isinstance(label, str) and label in ids:
+                rows.append(DriftRow(
+                    name, "present", owner,
+                    f"label {label} is live on a disallowed platform (report only)",
+                    fail=True,
+                ))
             continue
         if not _job_expected(row):
             rows.append(DriftRow(

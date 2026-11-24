@@ -502,7 +502,12 @@ def test_inventory_row_doctor_expectations():
     chosen = dict(row, chosen=True)
     assert status(chosen, live) == [("ok", False)]
     assert status(chosen, none) == [("missing", True)]
-    assert not S.diff_jobs([chosen], [], live, platform_name="darwin")
+    assert not S.diff_jobs([chosen], [], none, platform_name="darwin")
+    [drift] = S.diff_jobs([chosen], [], live, platform_name="darwin")
+    assert (drift.name, drift.status, drift.fail) == ("ade-progress", "present", True)
+    assert "com.djbclark.ade-progress is live on a disallowed platform (report only)" in drift.detail
+    unprobeable = S.LiveScan("launchd", live.jobs, ("backend scan: failed",))
+    assert not any(item.fail for item in S.diff_jobs([chosen], [], unprobeable, platform_name="darwin"))
     # installed but unchosen: still quiet, and the detail says the label is live
     detail = [x.detail for x in S.diff_jobs([unchosen], [], live, platform_name="linux") if x.name == "ade-progress"]
     assert len(detail) == 1 and "live (installed but unchosen)" in detail[0]
