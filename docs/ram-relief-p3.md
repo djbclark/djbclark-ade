@@ -103,7 +103,7 @@ The permission sweeper proposal awaits approval. The operator approved building 
 2. **Five-minute agent health sweep (`StartInterval=300`, operator-approved 2026-11-24):**
    - [`bin/ade-agent-sweep`](../bin/ade-agent-sweep) runs `ade-supervisor-scan`, `ade-progress scan --yes`, and `ade-subagent-stalls --notify` sequentially. A nonzero exit, launch error, or timeout is logged and the later steps still run. Each monitor keeps its own state.
    - [`launchd/com.djbclark.ade-agent-sweep.plist`](../launchd/com.djbclark.ade-agent-sweep.plist) runs the sweep under one `ade-job-run` admission lock. The default `ADE_PASEO_CACHE_TTL=10` lets advisory consumers such as `ade-pi-stuck` reuse matching snapshots. Progress scans and send guards use uncached listings and live inspections.
-   - Keep `fleet-watch` and the 20-second `load-watch` separate. See the [macOS cutover](scheduling.md#macos-cutover) for draining the old LaunchAgents before starting the sweep.
+   - Keep `fleet-watch` and the 20-second `load-watch` separate. The [macOS cutover](scheduling.md#macos-cutover) drains the old LaunchAgents and retires the existing detector hook in `fleet-watch` before starting the sweep.
 
 ---
 

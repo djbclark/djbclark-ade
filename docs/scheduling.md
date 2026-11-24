@@ -75,7 +75,7 @@ The runner keeps its usual order. In JSON mode, the summary goes to stdout and c
 output goes to stderr.
 
 The supervisor sends at most one message per run with new findings. Store its current lead
-ID on the first line of `~/.local/state/djbclark-ade/supervisor/lead`; manual invocations can
+ID on the first line of `~/.local/state/djbclark-ade/supervisor/lead`. Manual invocations can
 also use `ADE_SUPERVISOR_LEAD`. The supervisor follows a completed self-handoff and updates the
 lead file. The sweep's launchd logs are `~/.local/state/djbclark-ade/agent-sweep/sweep.out` and
 `sweep.err`; supervisor detail still goes to `supervisor/supervisor.log` under the same state root.
@@ -83,10 +83,13 @@ lead file. The sweep's launchd logs are `~/.local/state/djbclark-ade/agent-sweep
 #### macOS cutover
 
 After separate approval for live apply, run the following from the updated canonical
-checkout (`~/src/djbclark-ade`) as the logged-in user. Confirm that the existing supervisor
+checkout (`~/src/djbclark-ade`) as the logged-in user. Where the deployed `fleet-watch`
+still calls `ade-subagent-stalls --notify`, have the ops owner remove that one call in a
+separately approved ops rollout before loading the sweep. Keep `fleet-watch` on its own
+schedule and preserve the shared notification ledger. Confirm that the existing supervisor
 lead file names the current lead before installing, because `RunAtLoad` may fire immediately.
 Render the new job first, then unload both standalone jobs before installing the sweep or
-running a bulk `reconcile --yes`.
+running bulk `ade-sched reconcile --yes` or `ade-install apply --yes`.
 
 ```sh
 bin/ade-sched --backend launchd --set "__STATE__=$HOME/.local/state/djbclark-ade/agent-sweep" \
@@ -103,8 +106,7 @@ procedure first. After installation, check `launchctl print "gui/$(id -u)/com.dj
 and confirm both old labels are absent from the same launchd domain. The first interval tick
 will run within five minutes if the install lock caused the load-time run to skip. Roll back by
 uninstalling `com.djbclark.ade-agent-sweep` before reinstalling the two standalone templates.
-Keep their state directories during either cutover. `ade-update` does not apply this scheduler
-migration.
+Keep their state directories during either cutover. Apply this migration through `ade-sched`.
 
 **Re-handoff plan and `ADE_SUPERVISOR_REHANDOFF` (Carried 70, 2026-11-19).** For each stuck agent the scan also works out
 the re-handoff it *would* do (who, the exhausted account, the healthy alternative `ade-pi-stuck` offered, or

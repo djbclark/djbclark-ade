@@ -99,9 +99,10 @@ the run that switches the watcher on (otherwise the first run pings every orphan
 
 On macOS, [`bin/ade-agent-sweep`](../bin/ade-agent-sweep) runs `ade-subagent-stalls --notify`
 as its third step through [`com.djbclark.ade-agent-sweep.plist`](../launchd/com.djbclark.ade-agent-sweep.plist).
-See the [macOS cutover](scheduling.md#macos-cutover) for installation. Keep the notification
-ledger at its existing path. To record already-known stalls without sending notices at
-cutover, optionally run:
+See the [macOS cutover](scheduling.md#macos-cutover) for installation. If the deployed
+`fleet-watch` still calls `ade-subagent-stalls --notify`, remove that call through the
+separate ops rollout before enabling the sweep. Both entry points use the same notification
+ledger. To record already-known stalls without sending notices at cutover, optionally run:
 
 ```sh
 ~/src/djbclark-ade/bin/ade-subagent-stalls --notify --baseline
