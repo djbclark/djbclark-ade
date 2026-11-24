@@ -730,6 +730,7 @@ def _extract_html_title(html_text: str) -> str:
 class MitBridgeConfig:
     mode: str = "off"  # "off" | "pdf" | "all"
     snapshot_path: str = ""
+    allowlist: frozenset[str] | None = None
     fetch_bin: str = DEFAULT_FETCH_BIN
     browser_bin: str = DEFAULT_BROWSER_BIN
     python_bin: str = sys.executable
@@ -806,9 +807,29 @@ def build_mit_bridge(env: dict[str, str], log=sys.stderr) -> MitBridge | None:
     except ValueError:
         cooldown_s = DEFAULT_COOLDOWN_S
 
+    raw_allowlist = (env.get("FIRECRAWL_ROUTER_MIT_ALLOWLIST") or "").strip()
+    allowlist: frozenset[str] | None = None
+    if raw_allowlist:
+        parsed_allow: set[str] = set()
+        for raw_tok in raw_allowlist.split(","):
+            tok = raw_tok.strip()
+            if not tok or valid_host(tok) != tok:
+                print(
+                    f"firecrawl-router: invalid FIRECRAWL_ROUTER_MIT_ALLOWLIST host {tok!r}; failing closed",
+                    file=log,
+                    flush=True,
+                )
+                return None
+            parsed_allow.add(tok)
+        if not parsed_allow:
+            print("firecrawl-router: empty FIRECRAWL_ROUTER_MIT_ALLOWLIST; failing closed", file=log, flush=True)
+            return None
+        allowlist = frozenset(parsed_allow)
+
     cfg = MitBridgeConfig(
         mode=raw_mode,
         snapshot_path=snapshot_path,
+        allowlist=allowlist,
         fetch_bin=(env.get("FIRECRAWL_ROUTER_MIT_FETCH_BIN") or DEFAULT_FETCH_BIN).strip(),
         browser_bin=(env.get("FIRECRAWL_ROUTER_MIT_BROWSER_BIN") or DEFAULT_BROWSER_BIN).strip(),
         python_bin=(env.get("FIRECRAWL_ROUTER_MIT_PYTHON") or sys.executable).strip(),
@@ -943,8 +964,13 @@ class MitBridge:
             return None
         return doc, url, parsed
 
+    def _effective_domains(self, domains: frozenset[str]) -> frozenset[str]:
+        if self.config.allowlist is not None:
+            return domains & self.config.allowlist
+        return domains
+
     def is_enrolled_request(self, method: str, path: str, body: bytes | None) -> bool:
-        """True if this is a POST /v{1,2}/scrape for an exact enrolled host in a valid snapshot."""
+        """True if this is a POST /v{1,2}/scrape for an exact enrolled (and allowlisted) host in a valid snapshot."""
         if not self.enabled:
             return False
         parsed_req = self._parse_scrape_request(method, path, body)
@@ -952,7 +978,7 @@ class MitBridge:
             return False
         _, _, (_, host, _) = parsed_req
         domains, _ = self.snapshot.load()
-        return domains is not None and host in domains
+        return domains is not None and host in self._effective_domains(domains)
 
     # -- main bridge entry point (fail-closed)
 
@@ -996,7 +1022,7 @@ class MitBridge:
         domains, snap_err = self.snapshot.load()
         if domains is None:
             return None, None, snap_err, False
-        if host not in domains:
+        if host not in self._effective_domains(domains):
             return None, None, "", False
 
         pdf_target = is_pdf_target(url, req_doc)
