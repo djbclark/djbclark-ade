@@ -765,8 +765,8 @@ test("hook.mjs loads when import.meta is empty, as in Paseo's CJS bundle (esbuil
 const OLD = "11111111-aaaa-bbbb-cccc-000000000001";
 const NEW = "22222222-aaaa-bbbb-cccc-000000000002";
 
-/** A harness whose claim is owned by OLD and whose `paseo agent inspect OLD` answers `inspect(...)`. */
-function rebindHarness({ modeText = "enforce", rowsFor, inspect, rebindStatus = 0 } = {}) {
+/** A harness whose claim is owned by OLD and whose SDK lookup answers `inspect(...)`. */
+function rebindHarness({ modeText = "enforce", rowsFor, inspect, signal, sdk = true, rebindStatus = 0 } = {}) {
   const h = harness({ modeText });
   const rows = rowsFor
     ? rowsFor(h.cwd)
@@ -777,10 +777,6 @@ function rebindHarness({ modeText = "enforce", rowsFor, inspect, rebindStatus = 
       h.calls.push({ cmd, args });
       return { status: 0, stdout: JSON.stringify(rows), stderr: "" };
     }
-    if (cmd === "paseo") {
-      h.calls.push({ cmd, args });
-      return inspect(args);
-    }
     if (cmd === "python3" && args[1] === "rebind-owner") {
       h.calls.push({ cmd, args });
       return { status: rebindStatus, stdout: "", stderr: rebindStatus ? "refused" : "" };
@@ -788,16 +784,23 @@ function rebindHarness({ modeText = "enforce", rowsFor, inspect, rebindStatus = 
     return base(cmd, args, opts);
   };
   registerAgentClaimOwnerHook(h.server, h.deps);
-  const create = () => h.hooks.get("agent.create.after")({ agent: { id: NEW, cwd: h.cwd } });
+  const inspected = [];
+  const context = sdk ? { signal, paseo: { agents: { ref: (id) => ({
+    refresh: async () => {
+      inspected.push(id);
+      return inspect();
+    },
+  }) } } } : undefined;
+  const create = () => h.hooks.get("agent.create.after")({ agent: { id: NEW, cwd: h.cwd } }, context);
   const rebinds = () => h.calls.filter((c) => c.cmd === "python3" && c.args[1] === "rebind-owner");
   const binds = () => h.calls.filter((c) => c.cmd === "python3" && c.args[1] === "bind-owner");
-  const inspects = () => h.calls.filter((c) => c.cmd === "paseo");
+  const inspects = () => inspected;
   return { h, create, rebinds, binds, inspects };
 }
 
-const archived = (id = OLD) => ({ status: 0, stdout: JSON.stringify({ Id: id, Archived: true }), stderr: "" });
-const live = (id = OLD) => ({ status: 0, stdout: JSON.stringify({ Id: id, Archived: false }), stderr: "" });
-const notFound = () => ({ status: 1, stdout: JSON.stringify({ error: { code: "AGENT_NOT_FOUND", message: "Agent not found" } }), stderr: "" });
+const archived = (id = OLD) => ({ agent: { id, archivedAt: "2026-11-24T00:00:00Z" } });
+const live = (id = OLD) => ({ agent: { id, archivedAt: null } });
+const notFound = () => null;
 
 test("Q4: a live owner is never rebound away", async () => {
   const t = rebindHarness({ inspect: () => live() });
@@ -813,7 +816,11 @@ test("Q4: a live owner is never rebound away", async () => {
 test("Q4: an archived owner is rebound to the new agent, with one log line", async () => {
   const t = rebindHarness({ inspect: () => archived() });
   await t.create();
-  assert.deepEqual(t.inspects()[0].args, ["agent", "inspect", "--json", "--", OLD]);
+  assert.deepEqual(t.inspects(), [OLD]);
+  assert.ok(t.h.calls.every(({ cmd, args }) =>
+    (cmd === "git" && ["rev-parse", "config"].includes(args[2]))
+    || (cmd === "python3" && ["list", "rebind-owner"].includes(args[1]))),
+  "only existing registry and git calls; no Paseo CLI subprocess");
   assert.equal(t.rebinds().length, 1);
   assert.deepEqual(t.rebinds()[0].args.slice(1), ["rebind-owner", "--id", "wt-test-1", "--from-agent", OLD, "--owner-agent", NEW, "--owner-state", "archived"]);
   assert.equal(t.binds().length, 0, "the plain bind-owner path is not also run");
@@ -829,7 +836,7 @@ test("Q4: an archived owner is rebound to the new agent, with one log line", asy
   assert.ok(t.h.lines[0].includes(OLD) && t.h.lines[0].includes(NEW) && t.h.lines[0].includes("wt-test-1"));
 });
 
-test("Q4: an owner the daemon no longer knows (AGENT_NOT_FOUND) is rebound", async () => {
+test("Q4: an owner the SDK reports missing is rebound", async () => {
   const t = rebindHarness({ inspect: () => notFound() });
   await t.create();
   assert.equal(t.rebinds().length, 1);
@@ -860,13 +867,14 @@ test("Q4: a released claim is untouched (no active claim: no inspect, no rebind)
 
 test("Q4: an owner lookup failure fails closed (no rebind)", async () => {
   const failures = {
-    "inspect exits non-zero with no JSON": () => ({ status: 1, stdout: "", stderr: "daemon down" }),
-    "inspect exits 0 with garbage": () => ({ status: 0, stdout: "not json", stderr: "" }),
-    "spawn error": () => ({ status: null, error: new Error("ENOENT"), stdout: "", stderr: "" }),
-    "timeout (null status)": () => ({ status: null, signal: "SIGTERM", stdout: "", stderr: "" }),
+    "daemon error": () => { throw new Error("daemon down"); },
+    "denied": () => { throw new Error("unauthorized"); },
+    "timeout": () => { throw new Error("timed out"); },
     "another agent answered (prefix match)": () => archived("99999999-0000-0000-0000-000000000009"),
-    "Archived missing": () => ({ status: 0, stdout: JSON.stringify({ Id: OLD }), stderr: "" }),
-    "other error code": () => ({ status: 1, stdout: JSON.stringify({ error: { code: "AMBIGUOUS" } }), stderr: "" }),
+    "missing archive flag": () => ({ agent: { id: OLD } }),
+    "invalid archive flag": () => ({ agent: { id: OLD, archivedAt: false } }),
+    "missing result": () => undefined,
+    "malformed result": () => ({ agent: null }),
   };
   for (const [name, inspect] of Object.entries(failures)) {
     const t = rebindHarness({ inspect });
@@ -879,6 +887,23 @@ test("Q4: an owner lookup failure fails closed (no rebind)", async () => {
   }
 });
 
+test("Q4: a missing SDK or a cancelled hook fails closed", async () => {
+  const missing = rebindHarness({ sdk: false });
+  await missing.create();
+  assert.equal(missing.h.mutating().length, 0);
+  assert.match(missing.h.jsonl()[0].error, /no rebind/);
+
+  const controller = new AbortController();
+  const cancelled = rebindHarness({ signal: controller.signal, inspect: () => {
+    controller.abort();
+    return archived();
+  } });
+  await cancelled.create();
+  assert.deepEqual(cancelled.inspects(), [OLD]);
+  assert.equal(cancelled.h.mutating().length, 0);
+  assert.match(cancelled.h.jsonl()[0].error, /no rebind/);
+});
+
 test("Q4: a failed rebind-owner (claim changed owner meanwhile) is logged, never thrown", async () => {
   const t = rebindHarness({ inspect: () => archived(), rebindStatus: 2 });
   await t.create();
@@ -886,7 +911,7 @@ test("Q4: a failed rebind-owner (claim changed owner meanwhile) is logged, never
   assert.match(String(t.h.jsonl()[0].error), /rebind-owner failed \(exit 2\)/);
 });
 
-test("Q4: a harness-label owner with a session key is never rebound, even on AGENT_NOT_FOUND (adversary H1)", async () => {
+test("Q4: a harness-label owner with a session key is never rebound, even for a missing agent (adversary H1)", async () => {
   for (const owner of [
     { agent: "codex", record: "codex", session: "s1" },
     { agent: "codex", session: "s1" },
@@ -919,7 +944,7 @@ test("classifyOwnerAgent and buildAdeClaimsRebindOwnerArgv", () => {
   assert.equal(classifyOwnerAgent("a", archived("a")), "archived");
   assert.equal(classifyOwnerAgent("a", live("a")), "live");
   assert.equal(classifyOwnerAgent("a", notFound()), "gone");
-  assert.equal(classifyOwnerAgent("a", { status: 0, stdout: "[]", stderr: "" }), "unknown");
+  assert.equal(classifyOwnerAgent("a", {}), "unknown");
   assert.equal(classifyOwnerAgent("a", undefined), "unknown");
   assert.deepEqual(
     buildAdeClaimsRebindOwnerArgv({ adeClaimsScript: "/x/ade_claims.py", claimId: "wt-1", fromAgent: "a", ownerAgent: "b", ownerState: "gone" }).argv,

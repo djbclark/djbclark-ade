@@ -602,42 +602,20 @@ export function mergeOpenBeforeEnv(env, opts = {}) {
 }
 
 /**
- * Q4 (2026-11-20): is the claim's owner agent archived or gone? Reads ONE `paseo agent inspect <id> --json`
- * result (exit status, stdout, stderr of the spawn). Only two outcomes prove the owner dead:
- *   - exit 0 and a JSON object whose `Id` is exactly the owner and `Archived === true`  -> "archived"
- *   - non-zero exit and a JSON `error.code === "AGENT_NOT_FOUND"` (stdout or stderr)   -> "gone"
- * `Archived === false` is "live". Everything else (spawn error, timeout, non-JSON, a different `Id` from a prefix
- * match, a missing `Archived`, any other error code) is "unknown": the caller fails closed and rebinds nothing.
+ * The SDK returns null for a missing agent and rejects a failed lookup.
+ * A snapshot proves state only for the exact owner ID, never a prefix match.
  *
  * @param {string} ownerId
- * @param {{ status?: number | null, stdout?: string | null, stderr?: string | null, error?: unknown }} run
+ * @param {{ agent?: { id?: unknown, archivedAt?: unknown } } | null | undefined} result
  * @returns {"live" | "archived" | "gone" | "unknown"}
  */
-export function classifyOwnerAgent(ownerId, run) {
-  if (!run || run.error || typeof run.status !== "number") return "unknown";
-  /** @type {unknown} */
-  let body;
-  for (const text of [run.stdout, run.stderr]) {
-    if (typeof text !== "string" || !text.trim()) continue;
-    try {
-      body = JSON.parse(text);
-      break;
-    } catch {
-      // try the other channel
-    }
-  }
-  if (!body || typeof body !== "object" || Array.isArray(body)) return "unknown";
-  const rec = /** @type {Record<string, unknown>} */ (body);
-  if (run.status === 0) {
-    if (rec.Id !== ownerId) return "unknown";
-    if (rec.Archived === true) return "archived";
-    if (rec.Archived === false) return "live";
-    return "unknown";
-  }
-  const err = rec.error;
-  if (err && typeof err === "object" && /** @type {Record<string, unknown>} */ (err).code === "AGENT_NOT_FOUND") {
-    return "gone";
-  }
+export function classifyOwnerAgent(ownerId, result) {
+  if (result === null) return "gone";
+  const agent = result?.agent;
+  if (agent?.id !== ownerId) return "unknown";
+  const at = agent.archivedAt;
+  if (at === null) return "live";
+  if (typeof at === "string" && at.trim()) return "archived";
   return "unknown";
 }
 

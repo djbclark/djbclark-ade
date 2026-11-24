@@ -393,7 +393,7 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
  * Q4 (operator ruling 2026-11-20): an active claim whose owner agent is archived (or gone) passes to the next
  * agent created in its workspace, so a reused workspace whose every agent was archived does not leave the new agent
  * without a write identity (agent.open.before ran before the rebind, so a Claude-provider agent has no ADE_CLAIM_ID on its first launch; ade_claims.is_mine accepts its PASEO_AGENT_ID as owner.record of this claim shape instead, M1). Fails closed: the owner must be PROVEN archived or gone by one
- * `paseo agent inspect` (`classifyOwnerAgent`); a live owner, a failed lookup and any odd answer leave the claim
+ * SDK lookup (`classifyOwnerAgent`); a live owner, a failed lookup and any odd answer leave the claim
  * alone. The swap is `ade_claims.py rebind-owner`, a compare-and-swap on the exact owner that was inspected, on an
  * ACTIVE claim only (a released or expired claim is never revived). No handoff record is read, so nothing stale
  * can be replayed (queue Carried 58 a). One log line per call: observe logs the planned argv, enforce the argv and
@@ -402,10 +402,11 @@ export function registerAgentClaimEnvHook(server, deps = {}) {
  * @param {ReturnType<typeof hookContext>} ctx
  * @param {{ mode: string, reason?: string }} m
  * @param {string} hook
+ * @param {import("@getpaseo/plugin/server").PluginHookContext | undefined} context
  * @param {{ claim: { id: string, owner?: Record<string, unknown> }, parsed: { id: string, cwd: string },
  *           script: string, ids: Record<string, unknown> }} a
  */
-async function rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids }) {
+async function rebindArchivedOwner(ctx, m, hook, context, { claim, parsed, script, ids }) {
   const owner = claim.owner && typeof claim.owner === "object" ? claim.owner : {};
   const oldOwner = typeof owner.agent === "string" ? owner.agent.trim() : "";
   const baseIds = { ...ids, claim: claim.id, workspace: parsed.cwd };
@@ -418,16 +419,22 @@ async function rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids })
     record(ctx, m, hook, { action: "none", why: "claim owned by another agent" }, baseIds);
     return;
   }
-  const paseo = typeof ctx.env.PASEO_CLI === "string" && ctx.env.PASEO_CLI.startsWith("/") ? ctx.env.PASEO_CLI : "paseo";
-  const inspect = ctx.spawn(paseo, ["agent", "inspect", "--json", "--", oldOwner], { encoding: "utf8", timeout: 10_000 });
-  const state = classifyOwnerAgent(oldOwner, inspect);
+  let state = "unknown";
+  try {
+    if (!context?.signal?.aborted) {
+      const result = await context?.paseo?.agents.ref(oldOwner).refresh();
+      if (!context?.signal?.aborted) state = classifyOwnerAgent(oldOwner, result);
+    }
+  } catch {
+    // SDK errors (including denied and ambiguous lookups) prove nothing about the owner.
+  }
   if (state === "live") {
     record(ctx, m, hook, { action: "none", why: "claim owned by another agent" }, baseIds);
     return;
   }
   if (state === "unknown") {
     record(ctx, m, hook, { action: "none", why: "owner state unknown, not rebinding" }, baseIds,
-      `owner lookup failed for ${oldOwner} (exit ${inspect?.status ?? "none"}): no rebind`);
+      `owner lookup failed for ${oldOwner}: no rebind`);
     return;
   }
   let built;
@@ -472,7 +479,7 @@ async function rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids })
 export function registerAgentClaimOwnerHook(server, deps = {}) {
   const ctx = hookContext(deps);
   const hook = "agent.create.after";
-  return server.addHook(hook, async ({ agent }) => {
+  return server.addHook(hook, async ({ agent }, context) => {
     const m = callMode(ctx);
     /** @type {Record<string, unknown>} */
     let ids = {};
@@ -505,7 +512,7 @@ export function registerAgentClaimOwnerHook(server, deps = {}) {
     }
     if (!claimAllowsAgent(claim, parsed.id)) {
       // Another agent owns it: never overwrite a live owner; an archived or gone owner is rebound (Q4).
-      await rebindArchivedOwner(ctx, m, hook, { claim, parsed, script, ids });
+      await rebindArchivedOwner(ctx, m, hook, context, { claim, parsed, script, ids });
       return;
     }
     const { python, argv } = buildAdeClaimsBindOwnerArgv({

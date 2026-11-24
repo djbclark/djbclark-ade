@@ -448,6 +448,23 @@ class FakeUnixPaseoDaemon:
                         },
                     },
                 )
+            elif mtype == "workspace.pin.set.request":
+                wid = inner["workspaceId"]
+                accepted = any(w.get("id") == wid for w in self.workspaces)
+                self._ws_send_json(
+                    conn,
+                    {
+                        "type": "session",
+                        "message": {
+                            "type": "workspace.pin.set.response",
+                            "payload": {
+                                "requestId": rid, "workspaceId": wid, "accepted": accepted,
+                                "pinnedAt": "2026-11-24T00:00:00Z" if accepted and inner["pinned"] else None,
+                                "error": None if accepted else "Workspace not found",
+                            },
+                        },
+                    },
+                )
             elif mtype == "agent_permission_response":
                 aid = str(inner.get("agentId") or "")
                 response = inner.get("response") or {}
@@ -1283,3 +1300,41 @@ def test_low1_2_3_worktree_label_sse_case_oversize_update_confirm_and_archive_gu
         assert daemon.archived_ids == []
         client.archive_agent(running_id, force=True)
         assert daemon.archived_ids == [running_id]
+
+
+def test_workspace_pin_ws_requests(tmp_path):
+    stamp = "2026-11-24T00:00:00Z"
+    workspace = {"id": "wks_1", "title": "LEAD ade", "pinnedAt": stamp}
+    with FakeUnixPaseoDaemon(tmp_path / "paseo.sock", workspaces=[workspace]) as daemon:
+        client = pc.PaseoClient(url=daemon.url)
+        assert client.list_workspaces(include_pin_state=True) == [workspace]
+        assert client.set_workspace_pinned("wks_1") == stamp
+        assert client.set_workspace_pinned("wks_1", False) is None
+        with pytest.raises(pc.DaemonError, match="Workspace not found"):
+            client.set_workspace_pinned("missing")
+
+    assert daemon.ws_requests[0]["type"] == "fetch_workspaces_request"
+    for frame, workspace_id, pinned in zip(
+        daemon.ws_requests[1:], ("wks_1", "wks_1", "missing"), (True, False, True), strict=True
+    ):
+        assert frame == {
+            "type": "workspace.pin.set.request",
+            "requestId": frame["requestId"],
+            "workspaceId": workspace_id,
+            "pinned": pinned,
+        }
+        assert frame["requestId"]
+
+
+@pytest.mark.parametrize("reply, message", [
+    ({"accepted": False}, "rejected"),
+    ({"accepted": 1}, "rejected"),
+    ({"accepted": True, "workspaceId": "other", "pinnedAt": "stamp"}, "invalid"),
+    ({"accepted": True, "workspaceId": "wks_1"}, "invalid"),
+    ({"accepted": True, "workspaceId": "wks_1", "pinnedAt": None}, "invalid"),
+])
+def test_workspace_pin_rejects_invalid_ack(monkeypatch, reply, message):
+    ws = pc.WsClient("ws://127.0.0.1:7263/ws")
+    monkeypatch.setattr(ws, "rpc", lambda *args, **kwargs: (reply, []))
+    with pytest.raises(pc.DaemonError, match=message):
+        ws.set_workspace_pinned("wks_1")
