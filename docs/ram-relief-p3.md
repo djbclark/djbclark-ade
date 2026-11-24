@@ -132,8 +132,14 @@ Currently `fleet-watch` (`StartInterval=300`, 12 runs/h) runs `phantom_watch`, w
 
 ### 4.2 `djbclark-ade/plugins/ade-claim/server/hook.mjs`
 
-Line 422 calls `ctx.spawn(paseo, ["agent", "inspect", "--json", "--", oldOwner])` only on a claim collision (not a periodic poll). In a follow-up PR, replace that spawn with an in-process Paseo plugin SDK lookup or loopback `fetch("http://127.0.0.1:7263/mcp/agents", { method: "POST", ... })` calling `get_agent_status`, removing the last `paseo` CLI subprocess from enabled ADE plugins.
+Converted. On a claim collision, the hook reads the previous owner through the Paseo plugin
+SDK's `context.paseo.agents.ref(ownerId).refresh()`. An exact-ID archived snapshot or the SDK's
+explicit missing-agent result permits the existing compare-and-swap rebind. Failed, ambiguous or
+cancelled lookups leave the claim in place. Observe mode still only logs the plan.
 
-### 4.3 `bin/ade-pin-workspaces` (`ade-pin-workspaces.mjs`)
+### 4.3 `bin/ade-pin-workspaces`
 
-Runs 4 times/h via `ade-pin-sweep` using Paseo's bundled Electron Node (`ELECTRON_RUN_AS_NODE=1`) to call `fetchWorkspaces` and `workspace.pin.set` over WS. Because `ade_paseo_client.WsClient` already speaks Paseo's loopback `/ws` protocol, a small follow-up can add `set_workspace_pinned(workspace_id, pinned=True)` to `WsClient` and eliminate the 4/h Electron Node spawns too.
+Converted. The default sweep uses the stdlib `PaseoClient` to read full WebSocket workspace
+descriptors (including pin and archiving state) and send the native `workspace.pin.set.request`
+RPC. This removes the four scheduled Electron Node launches per hour. The legacy Electron
+launcher remains available through explicit `ADE_PASEO_TRANSPORT=cli`.

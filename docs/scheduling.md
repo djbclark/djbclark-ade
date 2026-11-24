@@ -86,9 +86,9 @@ completed-handoff predecessors that Paseo un-archived on a late message, verifyi
 `Status in ("idle", "closed")`, `PendingPermissions == []`, a `--min-idle` 120 s quiet grace, exclude list and
 standing load watcher fail-closed, with a non-blocking flock and JSONL audit log in `~/.local/state/ade/`), then
 `bin/ade-pin-interactive` (the `ade.interactive=1` label tag, skipping archived, `RETIRED `, and completed-handoff
-agents) and `bin/ade-pin-workspaces pin` (the native sidebar pin, driving the UI's `workspace.pin.set` RPC through the
-bundled CLI client, skipping worker boxes and `RETIRED ` windows). All three are idempotent and zero-token; the native
-pin step is macOS only. Install the same way:
+agents) and `bin/ade-pin-workspaces pin` (the native sidebar pin, using the UI's `workspace.pin.set.request` RPC through the
+stdlib daemon client and skipping worker boxes and `RETIRED ` windows). All three are idempotent and zero-token.
+Install the same way:
 
 ```sh
 bin/ade-sched install config/launchd/com.djbclark.ade-pin-sweep.plist --ade ~/src/djbclark-ade \

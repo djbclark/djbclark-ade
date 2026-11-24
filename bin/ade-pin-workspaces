@@ -1,23 +1,17 @@
 #!/usr/bin/env -S python3 -I
-"""ade-pin-workspaces: pin the workspace of every non-worker (human-interaction) agent.
+"""Pin active non-worker Paseo windows in the sidebar.
 
   ade-pin-workspaces pin [--check]
 
-Pins each non-worker agent's workspace through the daemon's own `workspace.pin.set_request` — the
-same call the Paseo UI's sidebar pin makes, and which the `paseo` CLI has no command for
-(docs/upstream-issues.md draft 23). A non-worker agent is one that is live, not background, and not
-a worker (title `worker …` or `Herald summary`): leads and operator-started agents. `--check` prints
-what would be pinned and pins nothing. Idempotent.
+Skips background, archiving, archived, WORKER/WORKERS and RETIRED windows.
+Already pinned windows are left alone. --check reports targets without writing.
 
-Companion to `bin/ade-pin-interactive` (the `ade.interactive=1` label tag): the label is the durable
-query signal; this tool applies the native sidebar pin so those agents sort to the top.
+The default uses the stdlib Paseo WebSocket client. Set ADE_PASEO_TRANSPORT=cli
+to use the legacy bundled Electron client (PASEO_SET_MODEL_HELPER and
+PASEO_SET_MODEL_CLI_DIST). ADE_PASEO_URL takes precedence. PASEO_HOST
+can select a loopback or Unix socket endpoint when PASEO_HOME is unset.
 
-Exit codes: 0 pinned (or none needed), 1 error, 2 usage, 69 macOS only: the Paseo Helper binary
-(the app bundle, or PASEO_SET_MODEL_HELPER) does not exist.
-
-Runs in Paseo's bundled Electron node through bin/ade-pin-workspaces.mjs (argv list, no shell),
-the same mechanism as bin/paseo-set-model. Env: PASEO_SET_MODEL_HELPER (default the Paseo Helper
-binary in /Applications/Paseo.app), PASEO_SET_MODEL_CLI_DIST (default the bundled @getpaseo/cli dist).
+Exit 0 on success, 1 on error, 2 on usage error, 69 if the legacy helper is missing.
 """
 from __future__ import annotations
 
@@ -26,6 +20,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Isolated Python does not put the executable's directory on sys.path. Resolve
+# the real directory so the installed symlink uses the same trusted client.
+sys.path.append(str(Path(__file__).resolve().parent))
+import ade_paseo_client as pc
 
 APP = "/Applications/Paseo.app/Contents"
 DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
@@ -38,13 +37,7 @@ def usage() -> int:
     return 2
 
 
-def main(argv: list[str]) -> int:
-    if not argv or argv[0] in ("-h", "--help"):
-        print(__doc__)
-        return 0
-    if argv[0] != "pin" or any(a != "--check" for a in argv[1:]):
-        return usage()
-    args = ["pin", *[a for a in argv[1:] if a == "--check"]]
+def pin_legacy(args: list[str]) -> int:
     helper = os.environ.get("PASEO_SET_MODEL_HELPER") or DEFAULT_HELPER
     resolved = shutil.which(helper)
     if resolved is not None:
@@ -62,6 +55,76 @@ def main(argv: list[str]) -> int:
                               env=env, check=False).returncode
     except OSError as e:
         print(f"ade-pin-workspaces: cannot run {helper}: {e}", file=sys.stderr)
+        return 1
+
+
+def effective_name(workspace: dict) -> str:
+    title = workspace.get("title")
+    return title if isinstance(title, str) else workspace.get("name") or ""
+
+
+def pin_workspaces(client: pc.PaseoClient, *, check: bool) -> int:
+    targets = [
+        workspace
+        for workspace in client.list_workspaces(include_pin_state=True)
+        if not (workspace.get("background") or workspace.get("archivingAt") or workspace.get("archivedAt"))
+        and not effective_name(workspace).startswith(("WORKER ", "WORKERS ", "RETIRED "))
+    ]
+    todo = [workspace for workspace in targets if not workspace.get("pinnedAt")]
+    if check:
+        for workspace in targets:
+            status = "already-pinned" if workspace.get("pinnedAt") else "would-pin"
+            print(f"{status} {workspace['id']}  {effective_name(workspace)[:50]}")
+        print(f"{len(todo)}/{len(targets)} window(s) to pin")
+        return 0
+
+    pinned = 0
+    for workspace in todo:
+        workspace_id = workspace["id"]
+        try:
+            client.set_workspace_pinned(workspace_id)
+        except pc.DaemonError as exc:
+            print(f"pin failed {workspace_id}: {exc}", file=sys.stderr)
+            continue
+        print(f"pinned {workspace_id}  {effective_name(workspace)[:50]}")
+        pinned += 1
+    print(f"pinned {pinned}/{len(todo)} window(s)")
+    return 0 if pinned == len(todo) else 1
+
+
+def daemon_client() -> pc.PaseoClient:
+    host = os.environ.get("PASEO_HOST")
+    if (os.environ.get("ADE_PASEO_URL") or "").strip() or not host:
+        return pc.PaseoClient()
+    if os.environ.get("PASEO_HOME"):
+        raise pc.DaemonError("PASEO_HOME and PASEO_HOST are both set. Choose one or set ADE_PASEO_URL.")
+    host = host.strip()
+    if host.startswith("/"):
+        host = f"unix://{host}"
+    elif "://" not in host:
+        host = f"http://{host}"
+    try:
+        pc.parse_daemon_url(host)
+    except (pc.DaemonError, ValueError):
+        raise pc.DaemonError(
+            "PASEO_HOST must specify a local endpoint with a port or Unix socket. "
+            "Use ADE_PASEO_TRANSPORT=cli for other Paseo targets."
+        ) from None
+    return pc.PaseoClient(url=host)
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv[0] != "pin" or any(arg != "--check" for arg in argv[1:]):
+        return usage()
+    if pc.transport_mode() == "cli":
+        return pin_legacy(argv)
+    try:
+        return pin_workspaces(daemon_client(), check="--check" in argv[1:])
+    except (pc.DaemonError, KeyError) as exc:
+        print(f"ade-pin-workspaces: {exc}", file=sys.stderr)
         return 1
 
 
