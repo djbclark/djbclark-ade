@@ -136,6 +136,18 @@ fi
 only="${SKILL_EVERYWHERE_ONLY:-}"
 no_copy=0; [[ -z ${SKILL_EVERYWHERE_NO_COPY:-} ]] || no_copy=1
 wanted() { [[ -z $only || ",$only," == *",$1,"* ]]; }
+# Client binary lookup. Tests set SKILL_EVERYWHERE_BIN_DIR to an isolated dir of stub binaries
+# instead of rewriting PATH (docs/code-review.md rule 2: never strip/reorder PATH in tests).
+# When SKILL_EVERYWHERE_BIN_DIR is set (even empty), it is authoritative and never falls back to PATH.
+resolve_cli() {
+  if [[ -n ${SKILL_EVERYWHERE_BIN_DIR+x} ]]; then
+    [[ -n $SKILL_EVERYWHERE_BIN_DIR && -f $SKILL_EVERYWHERE_BIN_DIR/$1 && -x $SKILL_EVERYWHERE_BIN_DIR/$1 ]] || return 1
+    printf '%s\n' "$SKILL_EVERYWHERE_BIN_DIR/$1"
+    return 0
+  fi
+  command -v "$1"
+}
+has_cli() { resolve_cli "$1" >/dev/null 2>&1; }
 # would <msg> | <cmd...>: print in dry-run mode, else run the command.
 act() { local msg=$1; shift; if ((dry)); then printf '  %-13s would %s\n' "$bin" "$msg"; else "$@"; fi; }
 
@@ -294,7 +306,7 @@ for name in "$@"; do
       ((no_copy)) || copy_target "${dir#copy }"  # SKILL_EVERYWHERE_NO_COPY=1: link targets only
       continue
     fi
-    if ! command -v "$bin" >/dev/null; then printf '  %-13s not installed\n' "$bin"; continue; fi
+    if ! has_cli "$bin"; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
     if [[ -n ${gone_srcs[*]:-} && -L $link ]]; then  # --remove of a gone skill: whichever root this link names
@@ -365,7 +377,7 @@ paseo_step() {
     [[ -z $bin ]] && continue
     wanted "$bin" || continue
     [[ $dir == copy\ * || $dir == via* || $dir == x* ]] && continue
-    command -v "$bin" >/dev/null || { ((!show)) || printf '  %-13s not installed\n' "$bin"; continue; }
+    has_cli "$bin" || { ((!show)) || printf '  %-13s not installed\n' "$bin"; continue; }
     dir="${dir/#\~/$HOME}"; link="$dir/paseo"
     if [[ $bin == hermes ]]; then
       if [[ -L $link && "$(greadlink "$link")" == "$paseo_src" && -e $link ]]; then state=linked
@@ -436,7 +448,7 @@ retired_step() {
     local tbin=$1 tdir=$2 tname=$3
     local l="$tdir/$tname" tgt m=0 s
     [[ -L $l ]] || return 0
-    tgt="$(greadlink -- "$l")"
+    tgt="$(greadlink -- "$l" 2>/dev/null)" || return 0
     for s in "$ade_root/$tname" "$priv_root/$tname" "$site_root/$tname" "$chrome_root/$tname"; do
       [[ $tgt == "$s" ]] && { m=1; break; }
     done
@@ -465,7 +477,7 @@ retired_step() {
         ((no_copy)) && continue
         dir="${dir#copy }"; dir="${dir/#\~/$HOME}"
         dest="$dir/ade-$rname"
-        if [[ -d $dest && ! -L $dest && -f $dest/.skill-everywhere ]]; then
+        if [[ -d $dest && ! -L $dest && -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
           if [[ $mode == check ]]; then
             printf 'warning: retired skill copy still present: %s (run skill-everywhere --all to remove)\n' "$dest" >&2
             rc=1
@@ -496,7 +508,7 @@ retired_step
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 
-if wanted hermes && command -v hermes >/dev/null \
+if wanted hermes && has_cli hermes \
    && ! ggrep -qF skill-everywhere/skills ~/.hermes/config.yaml 2>/dev/null; then
   echo "warning: hermes no longer lists ~/.local/share/skill-everywhere/skills in" \
        "skills.external_dirs; ask Hermes to re-add it" >&2
@@ -510,11 +522,11 @@ fi
 # The nudge makes a plugin command dispatch immediately instead of waiting
 # for a manual gateway restart from Terminal. Idempotent and cheap. Does nothing
 # when the gateway is not running or predates the verb.
-if [[ $mode == link ]] && ((!dry)) && wanted hermes && command -v hermes >/dev/null; then
+if [[ $mode == link ]] && ((!dry)) && wanted hermes && has_cli hermes; then
   # The interpreter: the shebang when it is a python, else the python a wrapper execs. `hermes` became a
   # /bin/sh wrapper around a /bin/sh closure launcher (2026-10-20), and taking its shebang ran this
   # snippet under sh: `import os, sys` invoked ImageMagick's `import`. Never run it under a non-python.
-  hpy="" hfile="$(command -v hermes)"
+  hpy="" hfile="$(resolve_cli hermes)"
   for _ in 1 2 3; do
     shebang="$(ghead -1 "$hfile")"; shebang="${shebang#\#!}"; shebang="${shebang%% *}"
     if [[ $(basename "$shebang") == python* && -x $shebang ]]; then hpy=$shebang; break; fi

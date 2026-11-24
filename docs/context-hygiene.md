@@ -30,7 +30,7 @@ Continuous protection against unplanned interruption is the separate, planned
    compact (2026-11-21: a lead handed itself off at ~150k with 117k of room left). Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
-2. A top-level session runs the `handoff` skill; Step 9 defaults to
+2. A top-level session runs the `self-handoff` skill; Step 9 defaults to
    `ade-self-session handoff` with a durable checkpoint. The agent launches and
    verifies its own successor via [self-session](self-session.md), including the
    agent-run fallback when supported; operator typing is never the fallback. A dispatched slice may hand off its own task with a durable checkpoint and
@@ -62,7 +62,7 @@ compact tier derives from that wall:
 | Tier | Where | On a 267k wall | On a 967k wall (`[1m]`, no window) |
 |---|---|---|---|
 | early (delegate; never compact) | +32k growth from the floor | unchanged | unchanged |
-| boundary (once per session id: "at the next task completion, if work remains, run handoff Step 9 yourself") | wall - 80k (`BOUNDARY_HEADROOM`), never below 120k, never above the hard tier | 187k (was a fixed 120k) | 887k |
+| boundary (once per session id: "at the next task completion, if work remains, run self-handoff Step 9 yourself") | wall - 80k (`BOUNDARY_HEADROOM`), never below 120k, never above the hard tier | 187k (was a fixed 120k) | 887k |
 | hard / ask | wall - 50k (`ASK_HEADROOM`), by total only; again every 100k | 217k | 917k |
 | Hermes page | max(400k, hard tier) total, or +page-growth | 400k / +300k | 917k / +817k |
 

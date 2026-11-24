@@ -4,4 +4,4 @@
 
 ### Changed
 
-- Retired `skills/old-handoff-use-paseo-handoff/` and `skills/old-hand-use-paseo-handoff/`, added automatic retired-symlink and Grok Bot managed-copy cleanup (including `~/.gemini/skills`) to `bin/skill-everywhere`, repointed `skills/handoff/SKILL.md` and `skills/hand/SKILL.md` as thin portable deprecation aliases to `/paseo-handoff`, and updated `skills/loose/SKILL.md`, `AGENTS.md`, `README.md`, and active docs/tests to reference `/self-handoff` (#968).
+- Retired `skills/old-handoff-use-paseo-handoff/` and `skills/old-hand-use-paseo-handoff/`, added automatic retired-symlink and symlink-safe Grok Bot managed-copy cleanup (including `~/.gemini/skills`) plus `SKILL_EVERYWHERE_BIN_DIR` test-override support to `bin/skill-everywhere`, repointed `skills/handoff/SKILL.md` and `skills/hand/SKILL.md` as thin portable deprecation aliases to `/paseo-handoff`, and updated `claude/hooks/context_size_nudge.py`, `skills/loose/SKILL.md`, `AGENTS.md`, `README.md`, and active docs/tests to reference `/self-handoff` (#968).

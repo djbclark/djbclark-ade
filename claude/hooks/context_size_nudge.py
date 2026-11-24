@@ -20,7 +20,7 @@ History:
 - 2026-08-23: reworded to "never suggest a wrap-up" (continuous operation).
 - 2026-10-05: fail-fast tail read + 2 s internal deadline (load 223 killed it).
 - 2026-10-08 (operator ruling, supersedes 2026-08-23): prompt earlier and
-  harder, and DO recommend /compact, or /handoff then /new. The old single
+  harder, and DO recommend /compact, or /self-handoff (formerly /handoff) then /new. The old single
   150k nudge fired too late. Separable work goes to /fan-out by default so it
   never lands in this context. memory/feedback_context_prompts_early.md.
 - 2026-10-10: stop the compaction loop. Measured over 85 compactions in two
@@ -39,7 +39,7 @@ History:
   its ~33k buffer, so ~267k), ASK_TOTAL follows it, PAGE_TOTAL 500k -> 400k.
   A fresh session (/new) re-writes ~46k; a compaction re-writes ~72k plus a
   summariser call and leaves ~104k behind, so at a finished task the first
-  choice is now the `handoff` skill + /new, and /compact only when the work
+  choice is now the `self-handoff` skill (formerly `handoff`) + /new, and /compact only when the work
   must continue in-context. A once-per-session note at BOUNDARY_TOTAL says so
   early. Never compact at <=200k (simulated +0.9% at 200k, +17.1% at 150k).
 - 2026-10-28 (context audit, 38 sessions peaking 200-270k, 72 auto compactions at ~267k):
@@ -673,7 +673,7 @@ def _boundary_message(total, successor=None, wall=None):
         f"{wall:,}. This is context pressure near the real limit, not a reason of its own to hand "
         "off: below this tier a finished task alone is no reason to hand off or compact. "
         "At the next task completion, if the following "
-        f"work is not a direct continuation and work remains, run handoff Step 9 yourself "
+        f"work is not a direct continuation and work remains, run self-handoff Step 9 yourself "
         f"({_SELF_HANDOFF}) instead of /compact, and never hand the operator a /new "
         "(operator ruling 2026-11-14: when handing off, do it yourself): a fresh session "
         "re-writes ~46k, a compaction re-writes ~72k plus a summariser call and leaves ~104k "
@@ -723,8 +723,8 @@ def _ask_message(total, growth, repeat, successor=None, wall=None):
         f"less its {AUTO_COMPACT_BUFFER:,} buffer; the PreCompact hook writes the Tier 1 checkpoint "
         "first). Until then start no new heavy work inline: send it through "
         "/fan-out or a minimum-spec sub-agent. When the current task is "
-        "finished and more work remains, same topic or not, run handoff Step 9 yourself "
-        f"(the `handoff` skill's Tier 2 document, then {_SELF_HANDOFF}) and never "
+        "finished and more work remains, same topic or not, run self-handoff Step 9 yourself "
+        f"(the `self-handoff` skill's Tier 2 document, then {_SELF_HANDOFF}) and never "
         "hand the operator a /new (operator ruling 2026-11-14); a fresh session "
         "re-writes ~46k. Keep going in-context only when the work must "
         "continue. "
@@ -1006,7 +1006,7 @@ def _check_state(data, event, session_id, transcript_path):
             _send_ping(
                 f"{repo}: Claude Code context at ~{total // 1000}k "
                 f"(+{growth // 1000}k since start or last compact); agent will "
-                "/handoff then /new, or /compact, at its next boundary.",
+                "/self-handoff then /new, or /compact, at its next boundary.",
                 data.get("cwd"),
             )
     elif level < 2:

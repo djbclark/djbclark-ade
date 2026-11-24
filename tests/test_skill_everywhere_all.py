@@ -31,7 +31,7 @@ def catalog(tmp_path):
                SKILL_EVERYWHERE_PRIVATE=str(private), SKILL_EVERYWHERE_SITE=str(site),
                SKILL_EVERYWHERE_CHROME=str(chrome),
                SKILL_EVERYWHERE_ONLY="codex",
-               PATH=str(bindir) + os.pathsep + os.environ["PATH"])
+               SKILL_EVERYWHERE_BIN_DIR=str(bindir))
     env.pop("ENV", None)
     paseo_skill(home)  # a live client always has the Paseo-synced copy
     return home, public, private, env
@@ -360,11 +360,11 @@ def test_canonical_checkout_wins_when_it_exists(tmp_path):
 # --- Paseo's skill in Hermes (2026-11-21) and foreign dirs of third-party skills ---------------------------------
 
 def hermes_env(catalog, tmp_path, installed=True):
-    """Target only Hermes; a fake `hermes` binary makes it installed (a minimal PATH hides the real one)."""
+    """Target only Hermes; SKILL_EVERYWHERE_BIN_DIR isolates client binary lookup without rewriting PATH."""
     env = catalog[3]
     bindir = tmp_path / "bin"
     env["SKILL_EVERYWHERE_ONLY"] = "hermes"
-    env["PATH"] = os.pathsep.join([str(bindir), "/usr/bin", "/bin"])
+    env["SKILL_EVERYWHERE_BIN_DIR"] = str(bindir)
     if installed:
         fake = bindir / "hermes"
         fake.write_text("#!/bin/sh\nexit 0\n")
@@ -554,7 +554,7 @@ def test_retired_handoff_skills_cleaned_across_targets_and_gemini(catalog, tmp_p
         fake.write_text("#!/bin/sh\nexit 0\n")
         fake.chmod(0o755)
     env["SKILL_EVERYWHERE_ONLY"] = ""
-    env["PATH"] = os.pathsep.join([str(bindir), "/usr/bin", "/bin"])
+    env["SKILL_EVERYWHERE_BIN_DIR"] = str(bindir)
     # Paseo skill must exist for claude and hermes too so --check --all can go green after cleanup.
     for pdir in (home / ".claude" / "skills" / "paseo",):
         pdir.mkdir(parents=True)
@@ -588,6 +588,19 @@ def test_retired_handoff_skills_cleaned_across_targets_and_gemini(catalog, tmp_p
     foreign_grok.mkdir()
     (foreign_grok / "SKILL.md").write_text("foreign copy")
 
+    # paseo-only invocation must NOT touch retired links (F5).
+    paseo_only = run(catalog, "paseo")
+    assert paseo_only.returncode == 0, paseo_only.stdout + paseo_only.stderr
+    assert "== retired skills" not in paseo_only.stdout
+    assert (claude_dir / "old-handoff-use-paseo-handoff").is_symlink()
+    assert (gemini_dir / "old-handoff-use-paseo-handoff").is_symlink()
+
+    # Named --check (used by bin/ade-update) must NOT emit retired-link warnings or set exit 1 (F5).
+    named_chk = run(catalog, "--check", "self-handoff")
+    assert named_chk.returncode == 0, named_chk.stdout + named_chk.stderr
+    assert "retired skill" not in named_chk.stderr
+    assert named_chk.stdout.rstrip().endswith("== end")
+
     # --dry-run --all previews removal without deleting anything.
     dry = run(catalog, "--dry-run", "--all")
     assert dry.returncode == 0, dry.stdout + dry.stderr
@@ -620,6 +633,33 @@ def test_retired_handoff_skills_cleaned_across_targets_and_gemini(catalog, tmp_p
     assert chk_after.returncode == 0, chk_after.stdout + chk_after.stderr
     rerun = run(catalog, "--all")
     assert rerun.returncode == 0 and "== retired skills" not in rerun.stdout
+
+
+def test_retired_grokbot_symlinked_marker_is_never_removed(catalog, tmp_path):
+    """F2: a real dir whose .skill-everywhere is a symlink to a regular file is ignored and never rm -rf'd."""
+    home, public, _, env = catalog
+    env["SKILL_EVERYWHERE_ONLY"] = "grokbot"
+    grok_dir = home / "agent-data" / "workflows"
+    grok_dir.mkdir(parents=True)
+    skill(public, "steps")
+    assert run(catalog, "steps").returncode == 0
+
+    real_file = tmp_path / "regular-sentinel.txt"
+    real_file.write_text("not a marker\n")
+    tricked = grok_dir / "ade-old-handoff-use-paseo-handoff"
+    tricked.mkdir()
+    (tricked / ".skill-everywhere").symlink_to(real_file)
+    (tricked / "keep.txt").write_text("preserve me")
+
+    chk = run(catalog, "--check", "--all")
+    assert chk.returncode == 0, chk.stdout + chk.stderr
+    assert "retired skill copy" not in chk.stderr
+
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "== retired skills" not in applied.stdout
+    assert tricked.is_dir() and (tricked / "keep.txt").read_text() == "preserve me"
+    assert real_file.read_text() == "not a marker\n"
 
 
 def test_retired_cleanup_leaves_foreign_links_real_dirs_and_live_root_skills(catalog, tmp_path):

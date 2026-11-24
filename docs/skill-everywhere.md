@@ -109,11 +109,14 @@ after the directory is gone: it removes only links whose target is exactly
 `<root>/<name>` for one of the four roots. Skills added to `retired_skills` in
 `bin/skill-everywhere` (since 2026-11-24: `old-handoff-use-paseo-handoff`,
 `old-hand-use-paseo-handoff`) are also cleaned automatically on link-mode runs
-(across every active target dir, Grok Bot managed copies, and legacy
+(across every active target dir, Grok Bot managed copies with a regular-file
+non-symlink `.skill-everywhere` marker, and legacy
 `~/.gemini/skills` when not excluded by `SKILL_EVERYWHERE_ONLY`), leaving
 foreign links and real directories untouched and skipping any name that still
 ships a `SKILL.md` in a root; `--check --all` warns on stderr and exits 1 while
-any retired symlink or managed copy remains.
+any retired symlink or managed copy remains. Set `SKILL_EVERYWHERE_BIN_DIR` in
+isolated tests to override client binary availability checks without mutating
+`PATH`.
 
 ## 2. Where each TUI looks (verified 2026-10-03)
 

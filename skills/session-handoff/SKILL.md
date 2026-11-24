@@ -152,9 +152,9 @@ treat every owner as possibly live (step 4).
    to fit `writer` (`claude*` to claude, `omp*` to omp, `codex` to codex, otherwise any); a row of
    another agent is not the owner and is read as no match.
 3. **Live** means the row's `status` is not `closed` and `paseo agent inspect ID --json` does not read
-   `Archived: true` (every other status is live). `finished` is only a transcript hint (the last prompt was `/handoff` or
-   a quit) and is NEVER evidence that the session stopped: a session executing `/handoff` still writes and
-   commits, so a `working` row with `finished: /handoff` stays live (a stale hermes row with `finished:
+   `Archived: true` (every other status is live). `finished` is only a transcript hint (the last prompt was `/self-handoff`,
+   historical `/handoff`, or a quit) and is NEVER evidence that the session stopped: a session executing `/self-handoff`
+   (or `/handoff`) still writes and commits, so a `working` row with `finished: /self-handoff` (or `finished: /handoff`) stays live (a stale hermes row with `finished:
    done` costs one question, the safe direction). **You** are the owner only when the row is YOUR caller row: the
    row whose `id` is your own `$PASEO_AGENT_ID`, and only when that variable is your own, not inherited from a
    parent (a session with no Paseo id of its own has no caller row: you are not the owner, and if you cannot
