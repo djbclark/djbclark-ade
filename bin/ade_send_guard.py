@@ -309,6 +309,30 @@ def log_resume(d: Decision, sender: str = "", log_path: Path | None = None, sour
     _append_line({"override": "owner", "sender": sender or "", "target": d.target, "proof": d.proof, "source": source}, log_path)
 
 
+def log_revive(
+    target: str,
+    *,
+    sender: str = "",
+    proof: str = "",
+    reason: str = "",
+    log_path: Path | None = None,
+    source: str = "ade-revive",
+) -> None:
+    """Append one JSON line for a supported `ade-revive` un-archive (queue #97, 2026-11-24; no message text).
+    Fields: ts (UTC), event="revive", target, sender, proof, reason, source, pid, ppid, argv0. Never raises, never blocks."""
+    _append_line(
+        {
+            "event": "revive",
+            "target": target,
+            "sender": sender or "",
+            "proof": proof or "",
+            "reason": reason or "",
+            "source": source,
+        },
+        log_path,
+    )
+
+
 def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = None, source: str = "send", **kw) -> Decision:
     """`decide` over the real paseo CLI, honouring ADE_ALLOW_ARCHIVED_SEND, ADE_ALLOW_REPLACED_SEND and the sender's ownership
     (PASEO_AGENT_ID); a use of the replaced override and every resume of the sender's own archived worker is logged
