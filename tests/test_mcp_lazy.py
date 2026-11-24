@@ -108,6 +108,7 @@ def main():
             {"name": "noisy", "description": "Write non-JSON line to stdout before replying", "inputSchema": {"type": "object"}},
             {"name": "json_noise", "description": "Write valid JSON without JSON-RPC envelope", "inputSchema": {"type": "object"}},
             {"name": "nan_result", "description": "Write non-finite NaN in JSON-RPC result", "inputSchema": {"type": "object"}},
+            {"name": "deep_json", "description": "Write deeply nested JSON triggering RecursionError", "inputSchema": {"type": "object"}},
             {"name": "oversized", "description": "Write oversized NDJSON frame", "inputSchema": {"type": "object"}},
             {"name": "ask_client", "description": "Send a server-to-client request", "inputSchema": {"type": "object"}},
         ]
@@ -253,6 +254,14 @@ def main():
                 }, framing)
             elif name == "nan_result":
                 raw_line = ('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"value":NaN}}\n').encode("utf-8")
+                sys.stdout.buffer.write(raw_line)
+                sys.stdout.buffer.flush()
+            elif name == "deep_json":
+                depth = 2000
+                raw_line = (
+                    '{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":'
+                    + ("[" * depth) + "0" + ("]" * depth) + "}\n"
+                ).encode("utf-8")
                 sys.stdout.buffer.write(raw_line)
                 sys.stdout.buffer.flush()
             elif name == "crash":
@@ -1700,3 +1709,228 @@ def test_cache_store_step_by_step_dir_fd_ancestry_validation(tmp_path: Path):
     store_dotdot = mod.CacheStore(tmp_path / "deep_a" / ".." / "deep_a", "dot-srv")
     assert store_dotdot.save(payload) is False
     assert store_dotdot.load() is None
+
+
+# --- Round 4 Adversary Regression Tests ---
+
+
+def test_cancellation_at_pending_transition_never_overtakes_request(fixture_env):
+    """Round 4 HIGH #1: holding child._wlock across pending insert + write prevents cancel overtaking request."""
+    import threading
+
+    mod = _load_mcp_lazy_module()
+    written_frames: list[dict[str, Any]] = []
+
+    class FakeChild:
+        def __init__(self) -> None:
+            self._wlock = threading.Lock()
+            self.ready = True
+            self.reaped = False
+            self.pid = 999999
+            self.write_entered = threading.Event()
+            self.write_release = threading.Event()
+
+        def write_unlocked(self, payload: bytes, timeout=None) -> bool:
+            self.write_entered.set()
+            self.write_release.wait(timeout=5.0)
+            written_frames.append(json.loads(payload.decode("utf-8")))
+            return True
+
+        def write(self, payload: bytes, timeout=None) -> bool:
+            with self._wlock:
+                written_frames.append(json.loads(payload.decode("utf-8")))
+                return True
+
+    # Part A: Cancel arrives while worker is paused inside _before_pending_write (before pending_client insert).
+    entered_a = threading.Event()
+    release_a = threading.Event()
+
+    class BarrierProxyA(mod.LazyProxy):
+        def _before_pending_write(self, child, req_key):
+            entered_a.set()
+            release_a.wait(timeout=5.0)
+
+    proxy_a = BarrierProxyA("t", [sys.executable, str(fixture_env["server"])], 60.0, fixture_env["cache_dir"])
+    fake_a = FakeChild()
+    fake_a.write_release.set()
+    proxy_a.child = fake_a
+    msg_a = {"jsonrpc": "2.0", "id": 600, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
+    proxy_a.queued_requests.add(mod.id_key(600))
+    t_a = threading.Thread(target=proxy_a._forward_request, args=(msg_a, "tools/call", 600, msg_a["params"]))
+    t_a.start()
+    assert entered_a.wait(timeout=5.0)
+    # Control thread cancels id=600 at the exact pending-transition barrier.
+    proxy_a._dispatch_inbound({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 600}})
+    release_a.set()
+    t_a.join(timeout=5.0)
+    assert written_frames == [], f"cancelled unwritten request reached wire: {written_frames}"
+
+    # Part B: Cancel arrives AFTER pending_client insert while worker is still inside child.write_unlocked.
+    # Because worker holds child._wlock, the cancellation MUST wait and appear AFTER tools/call on the wire.
+    proxy_b = mod.LazyProxy("t", [sys.executable, str(fixture_env["server"])], 60.0, fixture_env["cache_dir"])
+    fake_b = FakeChild()
+    proxy_b.child = fake_b
+    msg_b = {"jsonrpc": "2.0", "id": 601, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
+    proxy_b.queued_requests.add(mod.id_key(601))
+    t_b = threading.Thread(target=proxy_b._forward_request, args=(msg_b, "tools/call", 601, msg_b["params"]))
+    t_b.start()
+    assert fake_b.write_entered.wait(timeout=5.0)
+
+    # Now pending_client already holds 601 while worker holds fake_b._wlock mid-write.
+    t_cancel = threading.Thread(
+        target=proxy_b._dispatch_inbound,
+        args=({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 601}},),
+    )
+    t_cancel.start()
+    time.sleep(0.08)
+    assert t_cancel.is_alive(), "cancel write must block on child._wlock until request finishes writing"
+    fake_b.write_release.set()
+    t_b.join(timeout=5.0)
+    t_cancel.join(timeout=5.0)
+    assert [f.get("method") for f in written_frames] == ["tools/call", "notifications/cancelled"]
+
+
+def test_stalled_spawn_killed_when_shutdown_times_out(fixture_env):
+    """Round 4 HIGH #2: even if spawn stalls past shutdown_timeout, shutdown kills the registered ChildProcess."""
+    import threading
+
+    mod = _load_mcp_lazy_module()
+    spawned_ev = threading.Event()
+    never_release = threading.Event()
+    spawned_pids: list[int] = []
+
+    class StalledSpawnProxy(mod.LazyProxy):
+        def _after_child_popen(self, child):
+            spawned_pids.append(child.pid)
+            spawned_ev.set()
+            never_release.wait(timeout=10.0)
+
+    proxy = StalledSpawnProxy(
+        server_id="stalled-spawn",
+        child_argv=[sys.executable, str(fixture_env["server"])],
+        idle_seconds=60.0,
+        cache_dir=fixture_env["cache_dir"],
+        shutdown_timeout=0.25,
+    )
+    t_spawn = threading.Thread(target=proxy._spawn_child_raw, daemon=True)
+    t_spawn.start()
+    assert spawned_ev.wait(timeout=5.0)
+    child_pid = spawned_pids[0]
+    assert _pid_alive(child_pid)
+
+    # Shutdown times out after 0.25s while t_spawn is still stalled; child MUST still be killed!
+    t0 = time.monotonic()
+    proxy.shutdown()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 3.0
+    assert not _pid_alive(child_pid), f"stalled unpublished child pid={child_pid} survived shutdown timeout"
+    never_release.set()
+    t_spawn.join(timeout=2.0)
+
+
+def test_deeply_nested_json_recursion_error_handled_cleanly(fixture_env):
+    """Round 4 HIGH #3: RecursionError on child stdout, client stdin, and cache load never strands or crashes."""
+    # 1. Corrupt deeply-nested cache file -> ignored and rebuilt cleanly without crashing.
+    cache_dir: Path = fixture_env["cache_dir"]
+    cache_dir.mkdir(parents=True, mode=0o700)
+    cache_file = cache_dir / "fixture-srv.json"
+    deep_blob = ("[" * 2000) + "0" + ("]" * 2000)
+    cache_file.write_text(deep_blob, encoding="utf-8")
+    cache_file.chmod(0o600)
+
+    c0 = fixture_env["start"]()
+    try:
+        init_r, _ = c0.handshake()
+        assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
+    finally:
+        assert c0.close()[0] == 0
+
+    # 2. Child stdout returning deeply nested JSON -> retires child, resolves id=500 with -32603, next call works.
+    fixture_env["pid_log"].unlink(missing_ok=True)
+    client = fixture_env["start"]()
+    try:
+        client.handshake()
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 500,
+            "method": "tools/call",
+            "params": {"name": "deep_json", "arguments": {}},
+        })
+        err_r = client.recv(timeout=5.0)
+        assert err_r["id"] == 500 and err_r["error"]["code"] == -32603
+
+        # Next call respawns cleanly and succeeds.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "after-deep-json"}},
+        })
+        ok_r = client.recv(timeout=5.0)
+        assert ok_r["id"] == 501 and "msg=after-deep-json" in ok_r["result"]["content"][0]["text"]
+
+        # 3. Client stdin sending deeply nested JSON -> returns -32700 Parse error, proxy stays alive.
+        assert client.proc.stdin is not None
+        client.proc.stdin.write((deep_blob + "\n").encode("utf-8"))
+        client.proc.stdin.flush()
+        parse_err = client.recv(timeout=5.0)
+        assert parse_err["error"]["code"] == -32700
+
+        client.send({"jsonrpc": "2.0", "id": 502, "method": "ping", "params": {}})
+        assert client.recv(timeout=5.0)["result"] == {}
+    finally:
+        assert client.close()[0] == 0
+
+
+def test_cold_warmup_timeout_without_client_initialized_keeps_gate_closed(fixture_env):
+    """Round 4 MEDIUM #1: if client never sends notifications/initialized, timeout keeps gate closed and retires child."""
+    client = fixture_env["start"](extra_env={
+        "MCP_LAZY_INIT_READY_TIMEOUT": "0.3",
+        "FIXTURE_ASK_ROOTS_ON_INITIALIZED": "1",
+    })
+    try:
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "silent-client", "version": "1"},
+            },
+        })
+        init_r = client.recv(timeout=5.0)
+        assert init_r["id"] == 1 and "result" in init_r
+
+        # Intentionally do NOT send notifications/initialized; wait past the 0.3s readiness timeout.
+        assert client.proc.stdout is not None
+        ready, _, _ = select.select([client.proc.stdout.fileno()], [], [], 0.65)
+        assert not ready, "proxy must NOT open upstream gate or synthesize initialized on readiness timeout"
+
+        pids = fixture_env["read_pids"]()
+        assert len(pids) == 1
+        assert _wait_pid_dead(pids[0], timeout=3.0), "warm-up child must be retired on readiness timeout"
+        assert not (fixture_env["cache_dir"] / "fixture-srv.json").exists()
+    finally:
+        rc, stderr = client.close()
+        assert rc == 0
+        assert "keeping upstream gate closed" in stderr
+
+
+def test_cache_store_rejects_tmp_as_leaf_cache_dir():
+    """Round 4 LOW #1: /tmp (root-owned, shared) must be rejected as a leaf cache dir on macOS and Linux."""
+    mod = _load_mcp_lazy_module()
+    payload = {
+        "version": 1,
+        "clientProtocolVersion": "2025-11-25",
+        "initialize": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "s", "version": "1"},
+        },
+        "tools": {"tools": []},
+    }
+    store = mod.CacheStore(Path("/tmp"), "mcp-lazy-tmp-leaf-reject")
+    assert store.load() is None
+    assert store.save(payload) is False
+    assert not Path("/tmp/mcp-lazy-tmp-leaf-reject.json").exists()

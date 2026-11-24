@@ -66,6 +66,7 @@ MAX_CACHE_BYTES = 16 * 1024 * 1024
 MAX_FRAME_BYTES = 64 * 1024 * 1024
 MAX_HEADER_LINE_BYTES = 8192
 MAX_HEADER_COUNT = 32
+MAX_JSON_DEPTH = 512
 
 ID_RE = re.compile(r"[a-z0-9-]+")
 _STOP_SENTINEL = object()
@@ -117,8 +118,36 @@ def _reject_json_constant(token: str) -> Any:
     raise ValueError(f"non-standard JSON constant rejected: {token}")
 
 
+def _check_json_depth(raw: bytes, max_depth: int = MAX_JSON_DEPTH) -> None:
+    """Reject excessively nested JSON before C/Python decoder recursion limits can be hit."""
+    if raw.count(b"[") + raw.count(b"{") <= max_depth:
+        return
+    depth = 0
+    in_str = False
+    escaped = False
+    for b in raw:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif b == 0x5C:  # '\\'
+                escaped = True
+            elif b == 0x22:  # '"'
+                in_str = False
+            continue
+        if b == 0x22:  # '"'
+            in_str = True
+        elif b in (0x5B, 0x7B):  # '[' or '{'
+            depth += 1
+            if depth > max_depth:
+                raise RecursionError(f"JSON nesting depth exceeds {max_depth}")
+        elif b in (0x5D, 0x7D):  # ']' or '}'
+            if depth > 0:
+                depth -= 1
+
+
 def json_loads_strict(raw: bytes) -> Any:
-    """Decode strict RFC 8259 JSON, rejecting NaN/Infinity/-Infinity at decode time."""
+    """Decode strict RFC 8259 JSON, rejecting excessive nesting and NaN/Infinity at decode time."""
+    _check_json_depth(raw)
     return json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
 
 
@@ -449,14 +478,17 @@ class CacheStore:
                     return None
                 except OSError as e:
                     # Only at depth 0 under `/` on macOS: allow verified OS system symlinks (/var, /tmp, /etc).
+                    # Fall through to the standard fstat / leaf ownership & mode checks (never skip them!).
                     if idx == 0 and e.errno in (errno.ELOOP, errno.ENOTDIR):
                         sys_fd = self._open_verified_darwin_system_link(cur_fd, part)
                         if sys_fd is not None:
-                            os.close(cur_fd)
-                            cur_fd = sys_fd
-                            continue
-                    log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
-                    return None
+                            next_fd = sys_fd
+                        else:
+                            log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
+                            return None
+                    else:
+                        log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
+                        return None
 
                 os.close(cur_fd)
                 cur_fd = next_fd
@@ -557,8 +589,8 @@ class CacheStore:
                 return None
             try:
                 parsed = json_loads_strict(raw)
-            except (UnicodeDecodeError, ValueError) as e:
-                log_err(f"ignoring corrupt cache JSON ({self.path}): {e}")
+            except (UnicodeDecodeError, ValueError, RecursionError) as e:
+                log_err(f"ignoring corrupt cache JSON ({self.path}): {type(e).__name__}")
                 return None
             clean = self.sanitize_payload(parsed)
             if clean is None:
@@ -661,6 +693,7 @@ class ChildProcess:
         on_exit: Callable[["ChildProcess", int], None],
         on_io_error: Callable[["ChildProcess", str], None],
         *,
+        on_popen: Optional[Callable[["ChildProcess"], None]] = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
     ) -> None:
@@ -675,10 +708,6 @@ class ChildProcess:
             shell=False,
             start_new_session=True,
         )
-        assert self.proc.stdin is not None and self.proc.stdout is not None
-        os.set_blocking(self.proc.stdin.fileno(), False)
-        self._stdout_reader = io.BufferedReader(self.proc.stdout)
-
         self.pid = self.proc.pid
         self.ready = False
         self.allow_upstream = False
@@ -698,50 +727,62 @@ class ChildProcess:
         self._on_exit = on_exit
         self._on_io_error = on_io_error
 
+        # Register the process handle immediately after Popen returns (before any later work can stall).
+        if on_popen is not None:
+            on_popen(self)
+
+        assert self.proc.stdin is not None and self.proc.stdout is not None
+        os.set_blocking(self.proc.stdin.fileno(), False)
+        self._stdout_reader = io.BufferedReader(self.proc.stdout)
+
         self._reader = threading.Thread(target=self._read_loop, name=f"child-read-{self.pid}", daemon=True)
         self._waiter = threading.Thread(target=self._wait_loop, name=f"child-wait-{self.pid}", daemon=True)
         self._reader.start()
         self._waiter.start()
 
-    def write(self, payload: bytes, timeout: Optional[float] = None) -> bool:
-        """Write one framed message to child stdin with a strict wall-clock timeout."""
+    def write_unlocked(self, payload: bytes, timeout: Optional[float] = None) -> bool:
+        """Write one framed message to child stdin; caller MUST already hold self._wlock."""
         limit = self.write_timeout if timeout is None else timeout
         data = format_framed_message(payload, self.framing)
         view = memoryview(data)
         sent = 0
         deadline = time.monotonic() + limit
-        with self._wlock:
-            if self._stdin_closed or self.proc.stdin is None:
+        if self._stdin_closed or self.proc.stdin is None:
+            return False
+        try:
+            fd = self.proc.stdin.fileno()
+        except (OSError, ValueError):
+            return False
+        while sent < len(view):
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                log_err(f"child (pid={self.pid}) stdin write timed out after {limit:g}s")
                 return False
             try:
-                fd = self.proc.stdin.fileno()
+                _, writable, _ = select.select([], [fd], [], min(rem, 0.25))
             except (OSError, ValueError):
                 return False
-            while sent < len(view):
-                rem = deadline - time.monotonic()
-                if rem <= 0:
-                    log_err(f"child (pid={self.pid}) stdin write timed out after {limit:g}s")
+            if not writable:
+                if self.exited or self.reaped:
                     return False
-                try:
-                    _, writable, _ = select.select([], [fd], [], min(rem, 0.25))
-                except (OSError, ValueError):
-                    return False
-                if not writable:
-                    if self.exited or self.reaped:
-                        return False
+                continue
+            try:
+                n = os.write(fd, view[sent:])
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                     continue
-                try:
-                    n = os.write(fd, view[sent:])
-                except BlockingIOError:
-                    continue
-                except OSError as e:
-                    if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                        continue
-                    return False
-                if n <= 0:
-                    return False
-                sent += n
+                return False
+            if n <= 0:
+                return False
+            sent += n
         return True
+
+    def write(self, payload: bytes, timeout: Optional[float] = None) -> bool:
+        """Write one framed message to child stdin with a strict wall-clock timeout."""
+        with self._wlock:
+            return self.write_unlocked(payload, timeout=timeout)
 
     def _wake_internal(self) -> None:
         for ev, _box in list(self.internal.values()):
@@ -773,11 +814,17 @@ class ChildProcess:
                 log_err(f"child (pid={self.pid}) framing error: {e}")
                 self._on_io_error(self, f"framing error: {e}")
             return
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, RecursionError) as e:
             self._stdout_eof.set()
             if not self.reaped:
                 log_err(f"child (pid={self.pid}) stdout read error: {type(e).__name__}")
                 self._on_io_error(self, f"stdout read error: {type(e).__name__}")
+            return
+        except Exception as e:  # noqa: BLE001 — never let reader die silently leaving pending calls stranded
+            self._stdout_eof.set()
+            if not self.reaped:
+                log_err(f"child (pid={self.pid}) unexpected stdout error: {type(e).__name__}")
+                self._on_io_error(self, f"unexpected stdout error: {type(e).__name__}")
             return
         finally:
             self._stdout_eof.set()
@@ -868,6 +915,8 @@ class LazyProxy:
         *,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+        init_ready_timeout: Optional[float] = None,
+        shutdown_timeout: float = 5.0,
     ) -> None:
         self.server_id = server_id
         self.child_argv = list(child_argv)
@@ -875,6 +924,10 @@ class LazyProxy:
         self.start_timeout = start_timeout
         self.max_frame_bytes = max_frame_bytes
         self.write_timeout = write_timeout
+        self.init_ready_timeout = (
+            min(start_timeout, 30.0) if init_ready_timeout is None else init_ready_timeout
+        )
+        self.shutdown_timeout = shutdown_timeout
         self.cache = CacheStore(cache_dir, server_id)
 
         self.lock = threading.RLock()
@@ -884,6 +937,7 @@ class LazyProxy:
 
         self.child: Optional[ChildProcess] = None
         self.spawning_count = 0
+        self.spawning_children: set[ChildProcess] = set()
         self.tearing_down: set[ChildProcess] = set()
         self.client_framing = "ndjson"
         self.client_init_params: Optional[dict[str, Any]] = None
@@ -914,6 +968,9 @@ class LazyProxy:
 
     def _after_child_popen(self, child: ChildProcess) -> None:
         """Hook point between ChildProcess creation and publication under self.cond (used by tests)."""
+
+    def _before_pending_write(self, child: ChildProcess, req_key: str) -> None:
+        """Hook point inside child._wlock right before pending_client insert and wire write (used by tests)."""
 
     # --- Client I/O (stdout carries ONLY valid strict JSON-RPC 2.0 envelopes) ---
 
@@ -973,8 +1030,8 @@ class LazyProxy:
                     self.client_framing = framing
                 try:
                     msg = json_loads_strict(raw)
-                except (UnicodeDecodeError, ValueError) as e:
-                    log_err(f"malformed JSON from client: {e}")
+                except (UnicodeDecodeError, ValueError, RecursionError) as e:
+                    log_err(f"malformed JSON from client: {type(e).__name__}")
                     self.send_error(None, -32700, "Parse error")
                     continue
                 if not isinstance(msg, dict):
@@ -1214,16 +1271,28 @@ class LazyProxy:
                 # Reply to client's initialize first.
                 self.send_result(mid, init_result)
 
-                # Wait for the client's real `notifications/initialized` (or next post-init client message)
-                # before forwarding `notifications/initialized` to the child and opening upstream traffic.
+                # Wait strictly for the client's real `notifications/initialized` before opening the
+                # upstream gate or sending `notifications/initialized` to the child. Never synthesize
+                # `notifications/initialized` on timeout or without real client readiness.
                 with self.cond:
-                    wait_deadline = time.monotonic() + min(self.start_timeout, 30.0)
+                    wait_deadline = time.monotonic() + self.init_ready_timeout
                     while not (self.client_initialized or self.client_post_init_seen or self.stopping or child.exited):
                         rem = wait_deadline - time.monotonic()
                         if rem <= 0:
                             break
                         self.cond.wait(timeout=rem)
                     if self.stopping or child.exited:
+                        return
+                    if not self.client_initialized:
+                        reason = (
+                            "client sent post-init message without notifications/initialized"
+                            if self.client_post_init_seen
+                            else f"timed out after {self.init_ready_timeout:g}s waiting for client notifications/initialized"
+                        )
+                        log_err(
+                            f"cold warm-up for {self.server_id}: {reason}; "
+                            "keeping upstream gate closed and retiring warm-up child"
+                        )
                         return
 
                 # Transition upstream gate BEFORE writing `notifications/initialized` so an immediate
@@ -1263,6 +1332,11 @@ class LazyProxy:
 
     # --- Child lifecycle & discovery refresh ---
 
+    def _register_spawning_child(self, child: ChildProcess) -> None:
+        with self.cond:
+            self.spawning_children.add(child)
+            self.cond.notify_all()
+
     def _spawn_child_raw(self) -> Optional[ChildProcess]:
         with self.cond:
             if self.stopping:
@@ -1280,6 +1354,7 @@ class LazyProxy:
                 on_message=self._on_child_message,
                 on_exit=self._on_child_exit,
                 on_io_error=self._on_child_io_error,
+                on_popen=self._register_spawning_child,
                 max_frame_bytes=self.max_frame_bytes,
                 write_timeout=self.write_timeout,
             )
@@ -1287,6 +1362,8 @@ class LazyProxy:
         except OSError as e:
             log_err(f"failed to spawn child {self.child_argv[0]!r}: {e}")
             with self.cond:
+                if child is not None:
+                    self.spawning_children.discard(child)
                 self.spawning_count -= 1
                 self.cond.notify_all()
             return None
@@ -1294,6 +1371,8 @@ class LazyProxy:
             if child is not None:
                 child.force_kill_pg()
             with self.cond:
+                if child is not None:
+                    self.spawning_children.discard(child)
                 self.spawning_count -= 1
                 self.cond.notify_all()
             raise
@@ -1302,6 +1381,7 @@ class LazyProxy:
         stop_won = False
         with self.cond:
             self.spawning_count -= 1
+            self.spawning_children.discard(child)
             if self.stopping:
                 stop_won = True
                 child.reaped = True
@@ -1597,31 +1677,43 @@ class LazyProxy:
                     self.send_error(mid, -32603, f"mcp-lazy: failed to start child for {self.server_id}")
                 return
 
-            with self.lock:
-                # Recheck cancellation atomically right before transitioning queued -> pending & writing!
-                if key in self.cancelled_requests:
-                    self.cancelled_requests.discard(key)
-                    self.queued_requests.discard(key)
-                    self.cond.notify_all()
-                    return
-                if self.child is not child or not child.ready:
-                    if attempt == 0:
-                        continue
-                    self.queued_requests.discard(key)
+            # Hold child._wlock across cancelled check + pending_client insert + wire write
+            # (strict lock order: child._wlock -> self.lock) so a control-thread cancellation
+            # either suppresses the unwritten request OR blocks on child._wlock and follows it on the wire.
+            retry = False
+            unavailable = False
+            with child._wlock:
+                self._before_pending_write(child, key)
+                with self.lock:
+                    if key in self.cancelled_requests:
+                        self.cancelled_requests.discard(key)
+                        self.queued_requests.discard(key)
+                        self.cond.notify_all()
+                        return
+                    if self.child is not child or not child.ready:
+                        if attempt == 0:
+                            retry = True
+                        else:
+                            self.queued_requests.discard(key)
+                            unavailable = True
+                    else:
+                        self.queued_requests.discard(key)
+                        self.pending_client[key] = (method, mid, record_cache, sub_op, sub_uri)
+                        if sub_op == "sub" and sub_uri is not None:
+                            self.subscriptions.add(sub_uri)
+                        self.writing_count += 1
+                        self.last_activity = time.monotonic()
+                if unavailable:
                     self.send_error(mid, -32603, f"mcp-lazy: child unavailable for {self.server_id}")
                     return
-                self.queued_requests.discard(key)
-                self.pending_client[key] = (method, mid, record_cache, sub_op, sub_uri)
-                if sub_op == "sub" and sub_uri is not None:
-                    self.subscriptions.add(sub_uri)
-                self.writing_count += 1
-                self.last_activity = time.monotonic()
-            try:
-                ok = child.write(payload)
-            finally:
-                with self.lock:
-                    self.writing_count -= 1
-                    self.cond.notify_all()
+                if retry:
+                    continue
+                try:
+                    ok = child.write_unlocked(payload)
+                finally:
+                    with self.lock:
+                        self.writing_count -= 1
+                        self.cond.notify_all()
 
             if ok:
                 return
@@ -1689,6 +1781,9 @@ class LazyProxy:
     def _on_child_message(self, child: ChildProcess, raw: bytes) -> None:
         try:
             msg = json_loads_strict(raw)
+        except RecursionError:
+            self._fail_and_retire_child(child, "child returned excessively nested JSON")
+            return
         except (UnicodeDecodeError, ValueError):
             if self._handle_nonfinite_child_line(child, raw):
                 return
@@ -1872,15 +1967,16 @@ class LazyProxy:
 
         # Wait for ALL in-flight spawns (spawning_count) AND all in-progress teardowns (tearing_down)
         # so EOF/SIGTERM racing either process creation or idle reap can never leave an orphan child.
-        deadline = time.monotonic() + 5.0
+        deadline = time.monotonic() + self.shutdown_timeout
         with self.cond:
             while self.spawning_count > 0 or self.tearing_down:
                 rem = deadline - time.monotonic()
                 if rem <= 0:
                     break
                 self.cond.wait(timeout=rem)
-            stragglers = list(self.tearing_down)
+            stragglers = list(self.tearing_down | self.spawning_children)
         for s in stragglers:
+            s.reaped = True
             s.force_kill_pg()
             try:
                 s.proc.wait(timeout=1.0)
@@ -1961,6 +2057,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         except ValueError:
             pass
 
+    init_ready_env = os.environ.get("MCP_LAZY_INIT_READY_TIMEOUT")
+    init_ready_timeout: Optional[float] = None
+    if init_ready_env:
+        try:
+            v_r = float(init_ready_env)
+            if math.isfinite(v_r) and v_r > 0:
+                init_ready_timeout = v_r
+        except ValueError:
+            pass
+
     proxy = LazyProxy(
         server_id=server_id,
         child_argv=child_argv,
@@ -1969,6 +2075,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         start_timeout=start_timeout,
         max_frame_bytes=max_frame_bytes,
         write_timeout=write_timeout,
+        init_ready_timeout=init_ready_timeout,
     )
     return proxy.run()
 
