@@ -108,11 +108,12 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 14
-    assert by_id["paseo-daemon-status-capabilities"]["targets"] == ["desktop-build-3", "android-build-3"]
-    assert by_id["paseo-daemon-status-capabilities"]["status"] == "queued"
-    assert by_id["paseo-daemon-status-capabilities"].get("hold")
-    assert all(k not in by_id["paseo-daemon-status-capabilities"] for k in ("commit", "branch", "pr"))
+    assert len(by_id) == 15
+    for b3_id in ("paseo-daemon-status-capabilities", "paseo-agent-id-search-p2-fixes"):
+        assert by_id[b3_id]["targets"] == ["desktop-build-3", "android-build-3"]
+        assert by_id[b3_id]["status"] == "queued"
+        assert by_id[b3_id].get("hold")
+        assert all(k not in by_id[b3_id] for k in ("commit", "branch", "pr"))
     assert by_id["paseo-settings-search"]["pr"] == 9875
     assert by_id["paseo-settings-search"]["expected_head"] == "084d2be0cc12e38bb961684bf45fac7de34e50c6"
     assert by_id["paseo-settings-search"]["targets"] == ["desktop-build-3", "android-build-3"]
@@ -136,7 +137,8 @@ def test_shipped_registry_is_valid():
         assert by_id[pid]["expected_head"] == "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
         assert "b720fd6b6773b3036c59dd54a2efa89436a24f76" in by_id[pid]["notes"]
     assert "hold" not in by_id["paseo-shift-drag-copy"] and by_id["paseo-shift-drag-copy"]["trial_required"] is False
-    assert by_id["paseo-android-fork-release"]["status"] == "landed:main"
+    assert by_id["paseo-android-fork-release"]["status"] == "landed:2"
+    assert "fork-android-v0.17.3-r2" in by_id["paseo-android-fork-release"]["notes"]
     for pid in (
         "paseo-workspace-id-search",
         "desktop-app-dist-precompress",
