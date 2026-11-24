@@ -41,6 +41,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_lead_succession as succ  # noqa: E402
+import ade_paseo_client as paseo_client  # noqa: E402
 
 PASS, REDIRECT, REFUSE = "pass", "redirect", "refuse"
 ALLOW_ENV = "ADE_ALLOW_ARCHIVED_SEND"  # =<the agent's full id> in a command's environment: one deliberate resume of it
@@ -247,8 +248,33 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
     return Decision(PASS, target)
 
 
-def paseo_inspect(paseo: str = "paseo", timeout: int = 5):
-    """An `inspect` callable over `paseo agent inspect ID --json` (argv list, bounded). LookupError for a not-found agent."""
+def _transport_env(env):
+    """Merge os.environ with explicit caller env for daemon transport discovery (never used for security overrides)."""
+    if env is None:
+        return os.environ
+    merged = dict(os.environ)
+    merged.update(env)
+    return merged
+
+
+def paseo_inspect(paseo: str = "paseo", timeout: int = 5, env=None):
+    """An `inspect` callable over Paseo's loopback daemon API (zero subprocesses by default), or `paseo agent inspect`
+    when an explicit CLI binary path or `ADE_PASEO_TRANSPORT=cli` is requested. LookupError for a not-found agent."""
+    tenv = _transport_env(env)
+    use_cli = paseo_client.transport_mode(cli_override=paseo, env=tenv) == "cli"
+    if not use_cli:
+        client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
+
+        def inspect_daemon(ident: str) -> dict:
+            try:
+                return client.inspect_agent(ident, cli_shape=True)
+            except paseo_client.AgentNotFoundError as exc:
+                raise LookupError(ident) from exc
+            except paseo_client.DaemonError as exc:
+                raise OSError(f"paseo daemon inspect failed: {exc}") from exc
+
+        return inspect_daemon
+
     def inspect(ident: str) -> dict:
         proc = subprocess.run([paseo, "agent", "inspect", ident, "--json"], capture_output=True, text=True, timeout=timeout,
                               check=False)
@@ -261,10 +287,34 @@ def paseo_inspect(paseo: str = "paseo", timeout: int = 5):
     return inspect
 
 
-def paseo_ls_label(paseo: str = "paseo", timeout: int = 10):
-    """An `ls_label` callable over `paseo ls -a -g --json --label K=V` (argv list, bounded): the server-side filter is the only
-    reader of labels (the installed `inspect` and `ls` rows do not carry them). Raises on any failure: a caller that cannot read
-    the listing has no evidence (ownership fails closed)."""
+def paseo_ls_label(paseo: str = "paseo", timeout: int = 10, env=None):
+    """An `ls_label` callable over Paseo's loopback daemon API (zero subprocesses by default) or
+    `paseo ls -a -g --json --label K=V` when an explicit CLI binary or `ADE_PASEO_TRANSPORT=cli` is requested.
+    Raises on any failure: a caller that cannot read the listing has no evidence (ownership fails closed)."""
+    tenv = _transport_env(env)
+    use_cli = paseo_client.transport_mode(cli_override=paseo, env=tenv) == "cli"
+    if not use_cli:
+        client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
+
+        def ls_label_daemon(label: str) -> list:
+            if "=" not in label:
+                raise ValueError("label must be K=V")
+            key, value = label.split("=", 1)
+            try:
+                rows = client.list_agents(
+                    include_background=True,
+                    include_archived=True,
+                    labels={key: value},
+                    cli_rows=True,
+                )
+            except paseo_client.DaemonError as exc:
+                raise OSError(f"paseo daemon ls failed: {exc}") from exc
+            if not isinstance(rows, list):
+                raise ValueError("paseo daemon did not return a list")
+            return rows
+
+        return ls_label_daemon
+
     def ls_label(label: str) -> list:
         proc = subprocess.run([paseo, "ls", "-a", "-g", "--json", "--label", label], capture_output=True, text=True,
                               timeout=timeout, check=False)
@@ -343,7 +393,7 @@ def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = N
     try:
         enrolled = current_role(target)
         if enrolled is not None:
-            record = paseo_inspect(paseo)(enrolled)
+            record = paseo_inspect(paseo, env=env)(enrolled)
             if record.get("Archived") is not False:
                 return Decision(REFUSE, target, "enrolled owner is archived or unavailable")
             return Decision(REDIRECT if enrolled != target else PASS, enrolled, "authoritative stable role owner")
@@ -351,8 +401,8 @@ def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = N
         # A configured enrollment or role read error must never become legacy pass.
         return Decision(REFUSE, target, "enrolled authority unavailable; no local fallback")
     sender = (env.get(SENDER_ENV) or "").strip()
-    d = decide(target, paseo_inspect(paseo), allow_archived=env.get(ALLOW_ENV) or False,
-               allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, sender=sender or None, ls_label=paseo_ls_label(paseo), **kw)
+    d = decide(target, paseo_inspect(paseo, env=env), allow_archived=env.get(ALLOW_ENV) or False,
+               allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, sender=sender or None, ls_label=paseo_ls_label(paseo, env=env), **kw)
     if d.replaced_by:
         log_override(d, log_path, source)
     if d.resumed:

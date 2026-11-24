@@ -21,7 +21,29 @@ Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
 others are cross-checked against aiuse pools when a clean mapping exists. The
 supervisor refines this as it learns account->quota mappings.
 """
-import json, re, subprocess, sys
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+_BIN_DIR = str(Path(__file__).resolve().parent)
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+import ade_paseo_client as paseo_client  # noqa: E402
+
+
+def list_agents_rows(timeout=30):
+    """Read live + background agents directly from Paseo's loopback daemon API (zero Node subprocesses).
+
+    Only uses the `paseo` CLI when explicitly opted in via `ADE_PASEO_TRANSPORT=cli`.
+    Fails closed (raises RuntimeError) if the daemon is unreachable or returns malformed data.
+    """
+    if paseo_client.transport_mode() == "cli":
+        agents = j(["paseo", "ls", "-g", "--background", "--json"], timeout=timeout)
+        return agents if isinstance(agents, list) else agents.get("agents", [])
+    try:
+        client = paseo_client.PaseoClient(timeout=timeout)
+        return client.list_agents(include_background=True, include_archived=False, cli_rows=True, use_cache=True)
+    except paseo_client.DaemonError as exc:
+        raise RuntimeError(f"paseo daemon failed: {exc}") from exc
 
 def j(cmd, timeout=30, ok=(0,)):
     """Run a JSON-producing command. `ok` lists accepted exit codes: aiuse exits 3 when every pool is unusable but
@@ -173,8 +195,7 @@ def main():
     as_json = "--json" in sys.argv
     # --background: without it a Pi agent in a background workspace is left out and never flagged (ade-progress,
     # context-watch and ade-update-auto all pass it for that reason).
-    agents = j(["paseo","ls","-g","--background","--json"])
-    rows = agents if isinstance(agents, list) else agents.get("agents", [])
+    rows = list_agents_rows()
     # Operator-known baseline: OpenAI prepaid was at $0.  Treat it as suspect
     # only until a fresh aiuse reading says otherwise (a stale/absent reading
     # must not flap every openai agent).

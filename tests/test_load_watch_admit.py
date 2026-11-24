@@ -492,6 +492,8 @@ PASEO_LS_LIVE = [
 
 
 def test_count_agents_counts_paseo_live_statuses_only(monkeypatch):
+    monkeypatch.setenv("ADE_PASEO_TRANSPORT", "cli")
+    monkeypatch.delenv("ADE_PASEO_URL", raising=False)
     lw = load_module()
     calls = []
 
@@ -507,6 +509,8 @@ def test_count_agents_counts_paseo_live_statuses_only(monkeypatch):
 
 def test_retired_acp_run_and_acp_dispatch_names_are_not_counted_as_agents(monkeypatch):
     """Wave 6 checklist B6: retired shim process names are never a live agent class."""
+    monkeypatch.setenv("ADE_PASEO_TRANSPORT", "cli")
+    monkeypatch.delenv("ADE_PASEO_URL", raising=False)
     lw = load_module()
     assert "acp-run" not in lw.AGENT_CLIS and "acp-dispatch" not in lw.AGENT_CLIS
     assert lw.RETIRED_AGENT_NAMES == frozenset({"acp-run", "acp-dispatch"})
@@ -532,6 +536,8 @@ def test_retired_acp_run_and_acp_dispatch_names_are_not_counted_as_agents(monkey
 
 
 def test_paseo_that_exists_but_fails_raises_and_an_absent_paseo_does_not(monkeypatch):
+    monkeypatch.setenv("ADE_PASEO_TRANSPORT", "cli")
+    monkeypatch.delenv("ADE_PASEO_URL", raising=False)
     lw = load_module()
     for kw in ({"returncode": 1}, {"exc": subprocess.TimeoutExpired("paseo", 30)}, {"exc": PermissionError("no")}):
         fake_run(monkeypatch, lw, **kw)

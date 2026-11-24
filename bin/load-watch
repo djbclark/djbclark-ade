@@ -376,12 +376,23 @@ def git_top(path):
 PASEO_LS = ("ls", "-g", "--background", "--json")  # every workspace, background agents in, archived agents out
 PROC_CWD = os.path.exists("/proc/self/cwd")  # Linux: read /proc/PID/cwd; macOS (no /proc): lsof (review rule 5)
 
+_BIN_DIR = str(Path(__file__).resolve().parent)
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+import ade_paseo_client as paseo_client  # noqa: E402
+
 
 DELIVERED = ("sent", "completed")  # `paseo send` .status words that mean the line arrived; `queued` does not
 
 
 def paseo_cli():
     return os.environ.get("PASEO_CLI") or "paseo"
+
+
+def _paseo_use_daemon():
+    """Zero-subprocess loopback daemon mode by default; CLI only when explicitly opted in via ADE_PASEO_TRANSPORT=cli.
+    (Note: Paseo itself exports PASEO_CLI into every agent's environment, so PASEO_CLI must never disable daemon mode.)"""
+    return paseo_client.transport_mode() == "daemon"
 
 
 def paseo_env(home=None):
@@ -401,9 +412,35 @@ def expand_cwd(cwd):
     return os.path.realpath(cwd) if cwd.startswith("/") else ""
 
 
+def _parse_paseo_agent_rows(rows):
+    agents = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        try:
+            cwd = expand_cwd(row["cwd"]) if isinstance(row.get("cwd"), str) else ""
+        except ValueError:  # a NUL in the path: this row only
+            cwd = ""
+        if not cwd:
+            continue  # an agent with no usable cwd can never be joined
+        agents.append({"id": row["id"], "short": str(row.get("shortId") or row["id"][:8]),
+                       "name": str(row.get("name") or ""), "provider": str(row.get("provider") or ""),
+                       "status": str(row.get("status") or ""), "cwd": cwd})
+    return agents
+
+
 def paseo_agents():
-    """(agents, None) from `paseo ls -g --background --json`, each {id, short, name, provider, status, cwd}; or (None, why) when
-    there is no `paseo`, it fails, times out or prints something that is not a list of agents. Never raises."""
+    """(agents, None) from Paseo's loopback daemon API (zero Node subprocesses by default) or `paseo ls -g --background --json`
+    when explicitly opted into CLI mode, each {id, short, name, provider, status, cwd}; or (None, why) on error. Never raises."""
+    if _paseo_use_daemon():
+        try:
+            client = paseo_client.PaseoClient(timeout=30)
+            rows = client.list_agents(include_background=True, include_archived=False, cli_rows=True, use_cache=True)
+        except paseo_client.DaemonError as e:
+            return None, f"paseo daemon failed ({e})"
+        if not isinstance(rows, list):
+            return None, "paseo daemon returned no list of agents"
+        return _parse_paseo_agent_rows(rows), None
     cli = paseo_cli()
     try:
         r = subprocess.run([cli, *PASEO_LS], capture_output=True, text=True, timeout=30, env=paseo_env())
@@ -419,20 +456,7 @@ def paseo_agents():
         return None, f"`{cli} ls --json` printed no JSON"
     if not isinstance(rows, list):
         return None, f"`{cli} ls --json` printed no list of agents"
-    agents = []
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:
-            continue
-        try:
-            cwd = expand_cwd(row["cwd"]) if isinstance(row.get("cwd"), str) else ""
-        except ValueError:  # a NUL in the path: this row only
-            cwd = ""
-        if not cwd:
-            continue  # an agent with no usable cwd can never be joined
-        agents.append({"id": row["id"], "short": str(row.get("shortId") or row["id"][:8]),
-                       "name": str(row.get("name") or ""), "provider": str(row.get("provider") or ""),
-                       "status": str(row.get("status") or ""), "cwd": cwd})
-    return agents, None
+    return _parse_paseo_agent_rows(rows), None
 
 
 def agent_label(a):
@@ -2413,24 +2437,33 @@ LIVE_AGENT_STATUSES = frozenset({"running", "initializing"})  # admit --max-agen
 
 
 def count_agents():
-    """Live Paseo agents machine-wide (`paseo ls -g --background --json`, status running or initializing).
-    Retired Wave 6 shim process names (see RETIRED_AGENT_NAMES) are never counted. None when there is no `paseo`
-    binary; ReadFailed when paseo fails, times out or prints something that is not a list of agents."""
-    cli = paseo_cli()
-    try:
-        r = subprocess.run([cli, *PASEO_LS], capture_output=True, text=True, timeout=30, env=paseo_env())
-    except FileNotFoundError:
-        return None
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise ReadFailed(f"paseo ls: {e!r}") from e
-    if r.returncode != 0:
-        raise ReadFailed(f"paseo ls exited {r.returncode}")
-    try:
-        rows = json.loads(r.stdout)
-    except (TypeError, ValueError) as e:
-        raise ReadFailed("paseo ls printed no JSON") from e
-    if not isinstance(rows, list):
-        raise ReadFailed("paseo ls printed no list of agents")
+    """Live Paseo agents machine-wide (loopback daemon API by default; `paseo ls -g --background --json` when CLI mode
+    is explicitly selected; status running or initializing). Retired Wave 6 shim process names (see RETIRED_AGENT_NAMES)
+    are never counted. None when there is no `paseo` binary in CLI mode; ReadFailed on daemon/CLI error or bad JSON."""
+    if _paseo_use_daemon():
+        try:
+            client = paseo_client.PaseoClient(timeout=30)
+            rows = client.list_agents(include_background=True, include_archived=False, cli_rows=True, use_cache=True)
+        except paseo_client.DaemonError as e:
+            raise ReadFailed(f"paseo daemon: {e}") from e
+        if not isinstance(rows, list):
+            raise ReadFailed("paseo daemon returned no list of agents")
+    else:
+        cli = paseo_cli()
+        try:
+            r = subprocess.run([cli, *PASEO_LS], capture_output=True, text=True, timeout=30, env=paseo_env())
+        except FileNotFoundError:
+            return None
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise ReadFailed(f"paseo ls: {e!r}") from e
+        if r.returncode != 0:
+            raise ReadFailed(f"paseo ls exited {r.returncode}")
+        try:
+            rows = json.loads(r.stdout)
+        except (TypeError, ValueError) as e:
+            raise ReadFailed("paseo ls printed no JSON") from e
+        if not isinstance(rows, list):
+            raise ReadFailed("paseo ls printed no list of agents")
     n = 0
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"]:

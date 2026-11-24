@@ -316,13 +316,34 @@ def cmd_ack(a) -> int:
 
 # ---------- native state ----------
 
-def classify(paseo: list[str], agent_id: str, ls_row: dict | None) -> dict:
-    """kind: idle | busy | stopped | unknown, from `paseo inspect`; contradictory or missing data is unknown."""
-    rc, out = run(paseo + ["inspect", agent_id, "--json"], 20)
-    try:
-        info = json.loads(out) if rc == 0 else None
-    except ValueError:
-        info = None
+_BIN_DIR = str(Path(__file__).resolve().parent)
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+import ade_paseo_client as paseo_client  # noqa: E402
+
+
+def _use_daemon() -> bool:
+    return paseo_client.transport_mode(cli_env_vars=("ADE_PROGRESS_PASEO",)) == "daemon"
+
+
+def classify(paseo: list[str] | None, agent_id: str, ls_row: dict | None) -> dict:
+    """kind: idle | busy | stopped | unknown, from Paseo's loopback daemon API (or `paseo inspect` in explicit CLI mode);
+    contradictory or missing data is unknown."""
+    info = None
+    rc = 0
+    if _use_daemon():
+        try:
+            info = paseo_client.PaseoClient(timeout=20).inspect_agent(agent_id, cli_shape=True)
+        except paseo_client.AgentNotFoundError:
+            return {"kind": "unknown", "why": "inspect not found"}
+        except paseo_client.DaemonError as exc:
+            return {"kind": "unknown", "why": f"daemon inspect failed: {exc}"}
+    else:
+        rc, out = run((paseo or ["paseo"]) + ["inspect", agent_id, "--json"], 20)
+        try:
+            info = json.loads(out) if rc == 0 else None
+        except ValueError:
+            info = None
     if not isinstance(info, dict):
         return {"kind": "unknown", "why": f"inspect rc={rc}"}
     status, archived, perms = info.get("Status"), info.get("Archived"), info.get("PendingPermissions")
@@ -557,10 +578,11 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
 
 
 def cmd_scan(a) -> int:
+    use_daemon = _use_daemon()
     paseo = tool("ADE_PROGRESS_PASEO", "paseo")
     rep = {"mode": "apply" if a.yes else "dry-run", "partial": False, "suppressed": None, "health": [], "events": [],
            "withdrawn": 0, "ping": "none"}
-    if not paseo:
+    if not use_daemon and not paseo:
         raise Fail(4, "paseo not found (ADE_PROGRESS_PASEO)")
 
     def go(st):
@@ -574,13 +596,25 @@ def cmd_scan(a) -> int:
                 rec["ping"] = "unknown"
             if rec.get("ui") == "intent":
                 rec["ui"] = "unverified"
-        rc, out = run(paseo + ["ls", "-g", "--background", "--json"], 30)
-        try:
-            rows = {r["id"]: r for r in json.loads(out) if isinstance(r, dict) and r.get("id")} if rc == 0 else None
-        except (ValueError, TypeError):
-            rows = None
+        if use_daemon:
+            try:
+                listed = paseo_client.PaseoClient(timeout=30).list_agents(
+                    include_background=True, include_archived=False, cli_rows=True,
+                )
+                rows = {r["id"]: r for r in listed if isinstance(r, dict) and r.get("id")}
+                ls_err = ""
+            except paseo_client.DaemonError as exc:
+                rows = None
+                ls_err = str(exc)
+        else:
+            rc, out = run(paseo + ["ls", "-g", "--background", "--json"], 30)
+            ls_err = f"rc={rc}"
+            try:
+                rows = {r["id"]: r for r in json.loads(out) if isinstance(r, dict) and r.get("id")} if rc == 0 else None
+            except (ValueError, TypeError):
+                rows = None
         if rows is None:
-            rep["health"].append(f"paseo ls unreadable (rc={rc}); no claim about any agent")
+            rep["health"].append(f"paseo ls unreadable ({ls_err}); no claim about any agent")
             rows = {}
             cands = []
         else:

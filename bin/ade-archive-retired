@@ -278,7 +278,42 @@ def parse_aware_iso(value) -> float | None:
     return ts if math.isfinite(ts) else None
 
 
+def _load_paseo_client():
+    """Load sibling bin/ade_paseo_client.py by absolute path (works under `python3 -I`)."""
+    path = Path(__file__).resolve().with_name("ade_paseo_client.py")
+    if not path.is_file():
+        return None
+    key = "_ade_archive_retired_paseo_client"
+    found = sys.modules.get(key)
+    if found is not None and Path(found.__file__).resolve() == path:
+        return found
+    spec = importlib.util.spec_from_file_location(key, path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[key] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(key, None)
+        return None
+    return module
+
+
 def run_paseo_json(paseo_bin: str, argv: list[str], timeout: int) -> tuple[int, object | None, str]:
+    pc = _load_paseo_client()
+    if pc is not None and pc.transport_mode(cli_override=paseo_bin, cli_env_vars=("ADE_PASEO_BIN",)) == "daemon":
+        try:
+            client = pc.PaseoClient(timeout=timeout)
+            if argv[:2] == ["ls", "-g"]:
+                return 0, client.list_agents(include_background=False, include_archived=False, cli_rows=True), ""
+            if argv[:2] == ["agent", "inspect"] and len(argv) >= 3:
+                return 0, client.inspect_agent(argv[2], cli_shape=True), ""
+            if argv[:2] == ["agent", "archive"] and len(argv) >= 3:
+                client.archive_agent(argv[2])
+                return 0, {"success": True}, ""
+        except pc.DaemonError as exc:
+            return 1, None, clean(str(exc), 160)
     try:
         proc = subprocess.run([paseo_bin, *argv], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

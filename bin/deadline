@@ -463,8 +463,31 @@ def _owner_send_refusal(info: object, aid: str) -> str | None:
     return None
 
 
+def _deadline_paseo_client():
+    bin_dir = os.path.dirname(os.path.realpath(__file__))
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    import ade_paseo_client as pc  # noqa: PLC0415
+    return pc
+
+
+def _deadline_use_daemon() -> bool:
+    pc = _deadline_paseo_client()
+    return pc.transport_mode(cli_env_vars=("DEADLINE_PASEO",)) == "daemon"
+
+
 def _paseo_json(*args: str, timeout: float = 30) -> tuple[int, object | None, str]:
-    """(rc, parsed JSON or None, err). Uses DEADLINE_PASEO / PATH like other deadline paseo calls."""
+    """(rc, parsed JSON or None, err). Uses Paseo's loopback daemon API by default (zero subprocesses), or DEADLINE_PASEO / CLI when opted in."""
+    if _deadline_use_daemon():
+        pc = _deadline_paseo_client()
+        try:
+            client = pc.PaseoClient(timeout=timeout)
+            if args[:2] == ("agent", "inspect") and len(args) >= 3:
+                return 0, client.inspect_agent(args[2], cli_shape=True), ""
+            if args[:1] == ("ls",):
+                return 0, client.list_agents(include_background="--background" in args, include_archived="-a" in args, cli_rows=True), ""
+        except pc.DaemonError as e:
+            return 1, None, str(e)[:120]
     try:
         r = subprocess.run(paseo_cmd(*args), capture_output=True, text=True, timeout=timeout, env=clean_env())
     except subprocess.TimeoutExpired:
@@ -896,7 +919,36 @@ def paseo_cmd(*args: str) -> list[str]:
 
 
 def agent_rows() -> tuple[list[dict], str | None]:
-    """[{id, short, name, idle_s | None, skip}], error. idle = age of `paseo inspect` UpdatedAt for a running agent."""
+    """[{id, short, name, idle_s | None, skip}], error. idle = age of UpdatedAt for a running agent.
+
+    Uses Paseo's loopback daemon API by default (zero Node subprocesses); falls back to CLI only when DEADLINE_PASEO
+    or ADE_PASEO_TRANSPORT=cli is explicitly set.
+    """
+    if _deadline_use_daemon():
+        pc = _deadline_paseo_client()
+        try:
+            client = pc.PaseoClient(timeout=30)
+            agents = client.list_agents(include_background=True, include_archived=False, cli_rows=True)
+        except pc.DaemonError as exc:
+            return [], f"paseo daemon failed: {exc}"
+        running = [a for a in agents if isinstance(a, dict) and a.get("status") == "running" and a.get("id")]
+        out_rows = []
+        for a in running:
+            row = {"id": a["id"], "short": a.get("shortId") or a["id"][:7], "name": a.get("name", ""), "idle_s": None, "skip": None}
+            ts = a.get("updatedAt")
+            if not ts:
+                try:
+                    ts = client.inspect_agent(a["id"], cli_shape=True).get("UpdatedAt")
+                except pc.DaemonError:
+                    ts = None
+            try:
+                row["idle_s"] = now() - datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() if ts else None
+            except (ValueError, AttributeError, TypeError):
+                row["idle_s"] = None
+            if row["idle_s"] is None:
+                row["skip"] = "last activity unreadable (no UpdatedAt from paseo inspect)"
+            out_rows.append(row)
+        return out_rows, None
     rc, out = sh(paseo_cmd("ls", "-g", "--background", "--json"), timeout=30, keep=0)   # --background: those agents are hidden by default
     if rc != 0:
         return [], f"paseo ls failed rc={rc}: {out[:120]}"

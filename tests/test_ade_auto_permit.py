@@ -43,10 +43,12 @@ elif a[:2] == ['permit','allow']:
 else: sys.exit(9)
 """)
     fake.chmod(0o755)
+    run_env = {**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
+               'FAKE_ROOT': str(tmp_path), 'ADE_PASEO_TRANSPORT': 'cli'}
+    run_env.pop('ADE_PASEO_URL', None)
     result = subprocess.run([sys.executable, str(SCRIPT), '--lead', LEAD,
                              '--log', str(tmp_path/'audit.jsonl'), *args],
-                            env={**os.environ, 'PATH':str(tmp_path)+os.pathsep+os.environ['PATH'],
-                                 'FAKE_ROOT':str(tmp_path)}, capture_output=True, text=True, timeout=10)
+                            env=run_env, capture_output=True, text=True, timeout=10)
     calls = [json.loads(x) for x in (tmp_path/'calls.jsonl').read_text().splitlines()] if (tmp_path/'calls.jsonl').exists() else []
     return result, calls
 

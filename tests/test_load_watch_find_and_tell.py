@@ -72,6 +72,8 @@ else:
 """)
         script(self.bin / "hermes-ping", f"import sys\nopen({str(self.pings)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
         monkeypatch.setenv("PATH", str(self.bin) + os.pathsep + "/usr/bin:/bin")
+        monkeypatch.setenv("ADE_PASEO_TRANSPORT", "cli")
+        monkeypatch.delenv("ADE_PASEO_URL", raising=False)
         monkeypatch.delenv("PASEO_CLI", raising=False)
         monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
         lw = self.lw = load_module()
