@@ -1054,6 +1054,42 @@ def test_the_grokbot_copy_target_rows_are_classified_not_stuck(tmp_path):  # adv
         assert rows and all(mod.classify(state) in ("ok", "fixable") for _, _, state in rows), r.stdout
 
 
+def test_the_gemini_target_rows_are_parsed_and_classified_by_ade_update(tmp_path):
+    """Real skill-everywhere --check rows for gemini parse cleanly and never emit spurious paseo gaps."""
+    mod = load_module()
+    src = tmp_path / "skills" / "alpha"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text("---\nname: alpha\n---\n")
+    home, empty_bin = tmp_path / "home", tmp_path / "empty-bin"
+    home.mkdir()
+    empty_bin.mkdir()
+    base_env = dict(os.environ, HOME=str(home), SKILL_EVERYWHERE_ADE=str(tmp_path / "skills"),
+                    CODEX_HOME=str(home / ".codex"), SKILL_EVERYWHERE_ONLY="gemini",
+                    SKILL_EVERYWHERE_BIN_DIR=str(empty_bin))
+
+    # Absent ~/.gemini and no CLI: not installed -> ok.
+    r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path, env=base_env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines()[-1] == "== end"
+    assert mod.parse_skill_check(r.stdout) == [("alpha", "gemini", "not installed")]
+    assert mod.classify("not installed") == "ok"
+
+    # Present ~/.gemini without link: missing -> fixable, no paseo stderr gap.
+    (home / ".gemini").mkdir()
+    r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path, env=base_env)
+    assert r.returncode == 0 and r.stderr == "", r.stdout + r.stderr
+    assert mod.parse_skill_check(r.stdout) == [("alpha", "gemini", "missing")]
+    assert mod.classify("missing") == "fixable"
+
+    # After linking: linked -> ok.
+    link = subprocess.run([str(REAL_SE), "alpha"], capture_output=True, text=True, cwd=tmp_path, env=base_env)
+    assert link.returncode == 0, link.stdout + link.stderr
+    r = subprocess.run([str(REAL_SE), "--check", "alpha"], capture_output=True, text=True, cwd=tmp_path, env=base_env)
+    assert r.returncode == 0 and r.stderr == "", r.stdout + r.stderr
+    assert mod.parse_skill_check(r.stdout) == [("alpha", "gemini", "linked")]
+    assert mod.classify("linked") == "ok"
+
+
 def test_an_inherited_skill_everywhere_only_never_narrows_the_helper_run(tmp_path, monkeypatch):  # adversary R15-2
     mod = load_module()
     monkeypatch.setenv("SKILL_EVERYWHERE_ONLY", "claude")

@@ -37,7 +37,8 @@
 # Hermes owns ~/.hermes/, so it is never edited here. Instead Hermes itself put
 # ~/.local/share/skill-everywhere/skills in its skills.external_dirs (done
 # 2026-10-03), and this script links into that dir.
-# A TUI whose binary is not installed is skipped. Being linked is not the same
+# A TUI that is not installed (no binary via PATH/SKILL_EVERYWHERE_BIN_DIR; for
+# gemini, also ~/.gemini dir) is skipped. Being linked is not the same
 # as being loaded: re-verify with the per-TUI check in skill-everywhere.md
 # (the README next to this script).
 # This script makes no model calls.
@@ -94,11 +95,14 @@ chrome_root="${SKILL_EVERYWHERE_CHROME:-$HOME/src/chrome-use/skill-data}"
 # vendor clients + Hermes). Operator may remove leftover ~/.omp and
 # ~/.config/opencode skill links by hand.
 # (goose, agy, copilot, qwen, devin, cline, muse and zcode rows removed 2026-11-06, slim-down E9.)
+# gemini (~/.gemini/skills) added 2026-11-24: Antigravity under Paseo/macOS and Gemini CLI read
+# ~/.gemini/skills even when no gemini/antigravity binary is on PATH (see target_installed below).
 targets='
 claude|~/.claude/skills
 codex|~/.agents/skills
 pi|~/.agents/skills
 hermes|~/.local/share/skill-everywhere/skills
+gemini|~/.gemini/skills
 cursor-agent|via ~/.claude/skills
 grokbot|copy ~/agent-data/workflows
 '
@@ -148,6 +152,16 @@ resolve_cli() {
   command -v "$1"
 }
 has_cli() { resolve_cli "$1" >/dev/null 2>&1; }
+# Target availability for link/via targets. Most TUIs are detected by their CLI binary.
+# gemini (Antigravity under Paseo/macOS and Gemini CLI) reads ~/.gemini/skills even when
+# no gemini or antigravity binary is on PATH, so an existing $HOME/.gemini directory also
+# marks it installed while SKILL_EVERYWHERE_BIN_DIR still governs binary probes.
+target_installed() {
+  case $1 in
+    gemini) [[ -d $HOME/.gemini ]] || has_cli gemini || has_cli antigravity ;;
+    *) has_cli "$1" ;;
+  esac
+}
 # would <msg> | <cmd...>: print in dry-run mode, else run the command.
 act() { local msg=$1; shift; if ((dry)); then printf '  %-13s would %s\n' "$bin" "$msg"; else "$@"; fi; }
 
@@ -306,7 +320,7 @@ for name in "$@"; do
       ((no_copy)) || copy_target "${dir#copy }"  # SKILL_EVERYWHERE_NO_COPY=1: link targets only
       continue
     fi
-    if ! has_cli "$bin"; then printf '  %-13s not installed\n' "$bin"; continue; fi
+    if ! target_installed "$bin"; then printf '  %-13s not installed\n' "$bin"; continue; fi
     if [[ $dir == via* || $dir == x* ]]; then printf '  %-13s %s\n' "$bin" "${dir#x }"; continue; fi
     dir="${dir/#\~/$HOME}"; link="$dir/$name"
     if [[ -n ${gone_srcs[*]:-} && -L $link ]]; then  # --remove of a gone skill: whichever root this link names
@@ -358,13 +372,15 @@ for name in "$@"; do
   done <<<"$targets"
 done
 
-# Paseo's own skill. The Paseo daemon syncs ~/.agents/skills/paseo (and ~/.claude/skills/paseo) and marks them with
-# .paseo-managed-files.json, so we never write, copy over or delete anything there. Hermes reads neither dir, so
+# Paseo's own skill. The Paseo daemon syncs ~/.agents/skills/paseo (and ~/.claude/skills/paseo, plus
+# ~/.gemini/config/skills/paseo for Antigravity — not ~/.gemini/skills/paseo) and marks them with
+# .paseo-managed-files.json, so we never write, copy over or delete anything there. Hermes reads none of those dirs, so
 # ~/.local/share/skill-everywhere/skills/paseo is a symlink to the daemon-managed copy and follows its updates.
 # Link mode creates that one link (idempotent; a foreign real dir at the target is left alone and is an error, like a
 # collision with one of our own names; a missing source creates nothing). --check fails (exit 1, `error:` line on
 # stderr) when `paseo` is absent from any live target: claude, codex/pi or hermes, a target being live only when its
-# client is installed. `--remove paseo` removes the Hermes link when it is ours (a link to the Paseo copy), and other
+# client is installed (`gemini` is skipped here because Paseo manages Antigravity's copy under ~/.gemini/config/skills/
+# and linking into ~/.gemini/skills/paseo would duplicate it). `--remove paseo` removes the Hermes link when it is ours (a link to the Paseo copy), and other
 # --remove runs leave it alone. The step prints a `== paseo (managed by Paseo)` section in link and remove modes and with --all.
 paseo_src="$HOME/.agents/skills/paseo"
 paseo_step() {
@@ -376,8 +392,8 @@ paseo_step() {
   while IFS='|' read -r bin dir; do
     [[ -z $bin ]] && continue
     wanted "$bin" || continue
-    [[ $dir == copy\ * || $dir == via* || $dir == x* ]] && continue
-    has_cli "$bin" || { ((!show)) || printf '  %-13s not installed\n' "$bin"; continue; }
+    [[ $bin == gemini || $dir == copy\ * || $dir == via* || $dir == x* ]] && continue
+    target_installed "$bin" || { ((!show)) || printf '  %-13s not installed\n' "$bin"; continue; }
     dir="${dir/#\~/$HOME}"; link="$dir/paseo"
     if [[ $bin == hermes ]]; then
       if [[ -L $link && "$(greadlink "$link")" == "$paseo_src" && -e $link ]]; then state=linked
@@ -423,9 +439,9 @@ paseo_step
 
 # Skills retired from this repository (2026-11-24: consolidated into skills/self-handoff).
 # In link mode (except a paseo-only invocation), stale symlinks pointing at one of our four
-# roots and Grok Bot managed copies are removed cleanly across every target dir plus legacy
-# ~/.gemini/skills (when not excluded by SKILL_EVERYWHERE_ONLY). Foreign links and real
-# directories are never touched, and a name that still exists in any root is skipped.
+# roots and Grok Bot managed copies are removed cleanly across every target dir (including
+# gemini's ~/.gemini/skills via targets, when not excluded by SKILL_EVERYWHERE_ONLY). Foreign
+# links and real directories are never touched, and a name that still exists in any root is skipped.
 # In `--check --all` mode, any remaining retired link/copy warns on stderr and sets rc=1;
 # named `--check` stays untouched so `bin/ade-update` row parsing is unaffected.
 retired_skills=(
@@ -495,13 +511,6 @@ retired_step() {
       seen_dirs="${seen_dirs}${dir}|"
       _clean_retired_link "$bin" "$dir" "$rname"
     done <<<"$targets"
-    # Legacy ~/.gemini/skills links (e.g. Antigravity / Gemini CLI) are cleaned unless filtered out.
-    if [[ -z $only ]] || wanted gemini; then
-      dir="$HOME/.gemini/skills"
-      if [[ $seen_dirs != *"|$dir|"* ]]; then
-        _clean_retired_link gemini "$dir" "$rname"
-      fi
-    fi
   done
 }
 retired_step

@@ -2,10 +2,11 @@
 
 README for [`skill-everywhere`](../bin/skill-everywhere) (canonical script in
 this repository; compatibility command `~/ops/site-private/bin/skill-everywhere`). It makes a local skill available to
-every agent TUI on this machine (Claude Code, Codex, Pi, Cursor and Hermes;
-omp/opencode dropped 2026-11-09 under the Pi sole-TUI policy; the xAI CLI
-(2026-11-07), goose, Copilot, zcode, Qwen, Devin, Cline, Muse and Antigravity
-were dropped 2026-11-06) by
+every agent TUI on this machine (Claude Code, Codex, Pi, Hermes, Antigravity /
+Gemini CLI (`gemini`), and Cursor; omp/opencode dropped 2026-11-09 under the Pi
+sole-TUI policy; the xAI CLI (2026-11-07), goose, Copilot, zcode, Qwen, Devin,
+Cline, Muse and standalone `agy` CLI were dropped 2026-11-06; `gemini`
+(`~/.gemini/skills`) added as a first-class link target 2026-11-24) by
 symlinking it into each one's skills dir (Grok Bot, on its own Linux box, gets
 a rendered copy instead; see its row in section 2), and this page says how to prove each
 TUI actually loads it. Until 2026-10-08 this was the `skill-everywhere` skill;
@@ -84,7 +85,7 @@ the target is left alone and exits 1 (it is a collision with a link we are makin
 `--check` (named or `--all`, so `bin/ade-update` sees it) exits 1 with
 `error: paseo skill is <state> on <tui> (<path>): <hint>` on stderr (`<state>` is `missing`, `dangling -> ...`, `other
 link -> ...` or `real dir/file (not ours)`) when `paseo` is absent from any **live** target: claude `~/.claude/skills`, codex and pi `~/.agents/skills`,
-hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it). `skill-everywhere paseo` runs just this step (`paseo` is
+hermes. A target is live only when its binary is installed (and `SKILL_EVERYWHERE_ONLY` allows it); `gemini` is skipped by this step because Paseo's daemon syncs Antigravity's copy into `~/.gemini/config/skills/paseo` rather than `~/.gemini/skills/paseo` (linking into `~/.gemini/skills/paseo` would duplicate it). `skill-everywhere paseo` runs just this step (`paseo` is
 not a skill directory, so the name itself adds no header or per-skill rows; the step's own `== paseo (managed by Paseo)` section is printed only in link and remove modes and with `--all`). `skill-everywhere --remove paseo` removes the Hermes link when it is ours and leaves any other entry alone; a `--remove` of other names never touches it. **`bin/ade-update` reads those stderr lines as
 rows of the pseudo-skill `paseo` (2026-11-21, after #871), not as a helper failure (exit 4)**: a missing or dangling Hermes link is a
 link gap, fixable (exit 10 on `--check`, `would run: skill-everywhere paseo`; apply runs it, so apply self-heals the link); `paseo`
@@ -109,9 +110,9 @@ after the directory is gone: it removes only links whose target is exactly
 `<root>/<name>` for one of the four roots. Skills added to `retired_skills` in
 `bin/skill-everywhere` (since 2026-11-24: `old-handoff-use-paseo-handoff`,
 `old-hand-use-paseo-handoff`) are also cleaned automatically on link-mode runs
-(across every active target dir, Grok Bot managed copies with a regular-file
-non-symlink `.skill-everywhere` marker, and legacy
-`~/.gemini/skills` when not excluded by `SKILL_EVERYWHERE_ONLY`), leaving
+(across every active target dir, including `~/.gemini/skills` via the `gemini`
+target, and Grok Bot managed copies with a regular-file non-symlink
+`.skill-everywhere` marker, when not excluded by `SKILL_EVERYWHERE_ONLY`), leaving
 foreign links and real directories untouched and skipping any name that still
 ships a `SKILL.md` in a root; `--check --all` warns on stderr and exits 1 while
 any retired symlink or managed copy remains. Set `SKILL_EVERYWHERE_BIN_DIR` in
@@ -126,14 +127,16 @@ isolated tests to override client binary availability checks without mutating
 | Codex (`codex`) | `~/.agents/skills` |
 | Pi (`pi`) | `~/.agents/skills` (same shared dir as Codex; do not also link `~/.pi/agent/skills`) |
 | Hermes (`hermes`) | `~/.local/share/skill-everywhere/skills`, which Hermes put in its own `skills.external_dirs`; `paseo` there is a link to the Paseo-managed `~/.agents/skills/paseo` (section 1) |
+| Antigravity / Gemini CLI (`gemini`; present when `~/.gemini` is a directory or `gemini` / `antigravity` is installed) | `~/.gemini/skills` (added as a first-class link target 2026-11-24 so Antigravity under Paseo/macOS gets shared skills on `--all` even without a `gemini` CLI binary on `PATH`; `SKILL_EVERYWHERE_BIN_DIR` still governs binary checks in tests; Paseo syncs its own Antigravity skills to `~/.gemini/config/skills/`, so `paseo_step` skips `gemini`) |
 | Cursor (`cursor-agent`) | already read `~/.claude/skills`; no extra link |
 | Grok Bot (`grokbot`, no binary; present when `~/agent-data/workflows` exists) | **Copy, not link** (added 2026-10-23): Grok Bot runs on its own Linux box (`HOME=/home/box`) and reads `~/agent-data/workflows/<slug>/SKILL.md` as plain files, so no link into a Mac checkout could resolve. The script renders `ade-<name>/`: symlinks dereferenced (only a link to a regular file inside the skill; a skill holding any other link, one that leaves the skill, dangles or names a directory or special file, is refused: `--check` reports `unsafe source symlink`; link mode copies nothing, leaves any existing copy alone and exits 1; 2026-10-23),  a "managed copy" banner after the front matter (Mac-only paths, Grok Bot's approval rules win, and a standing 2026-11-11 note that Grok Bot does all AI work itself unless Chief of Staff says usage is over pace; `SKILL_EVERYWHERE_GROKBOT_NOTE` adds one more banner paragraph after that; its link and the marker's `source=` name the root the skill came from, djbclark-ade, site-djbclark or site-private, since 2026-11-06), and a `.skill-everywhere` marker. Only a dir with that marker is updated or removed; `--check` reports `copied`, `stale copy`, `missing` or `not ours`. `SKILL_EVERYWHERE_NO_COPY=1` skips this target (`ade-update` sets it for a non-canonical `--repo`, which is report-only and may be an untrusted PR branch), so a report-only run prints no `grokbot` row and renders nothing. On the box run it with `SKILL_EVERYWHERE_ONLY=grokbot`, or the box's own claude, codex, pi and hermes get links too. The box's nightly driver is `/home/box/agent-data/shared/skills-sync/sync.sh` (fetches `origin/master`, picks which skills suit Grok Bot, keeps a manifest, runs this script). |
 | `/btww` (side question, 2026-11-01) | Skill `btww` **names the TUI's native side-question command, or says it has none; it never answers the question** (a skill is an ordinary turn, so it cannot be non-interrupting or off-transcript). Native: Claude `/btw`, Codex `/side`, Cursor `/btw`, Hermes `/btw`, Pi (see `skills/btww/SKILL.md`); none in Grok Bot. Claude cannot alias a built-in. Hermes CLI `quick_commands.btww` alias to `btw` (`~/.hermes/config.yaml`, template `agents/hermes/config.yaml.tmpl`). Details: `skills/btww/SKILL.md`. |
 
 `aiuse --json` providers with no TUI of their own (alibaba, deepseek,
-openrouter, litellm, opencode-zen, clinepass; copilot, zai and devin since 2026-11-06; antigravity is reached through
-Paseo's antigravity provider since 2026-11-06) are API pools behind the
-TUIs above, so they need nothing.
+openrouter, litellm, opencode-zen, clinepass; copilot, zai and devin since 2026-11-06) are API pools behind the
+TUIs above, so they need nothing. Antigravity is reached through Paseo's
+`antigravity` provider since 2026-11-06 and reads shared skills from `~/.gemini/skills`
+via the `gemini` row above (2026-11-24).
 
 **Hermes owns `~/.hermes/`; never edit it yourself.** If the script warns that
 the external dir has gone, ask Hermes to re-add it:

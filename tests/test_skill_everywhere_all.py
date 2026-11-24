@@ -608,17 +608,21 @@ def test_retired_handoff_skills_cleaned_across_targets_and_gemini(catalog, tmp_p
     assert (gemini_dir / "old-handoff-use-paseo-handoff").is_symlink()
     assert grok_copy.is_dir()
 
-    # --check --all fails with warnings while retired links remain.
+    # --check --all fails with warnings while retired links remain (no duplicate scan of ~/.gemini/skills).
     chk_before = run(catalog, "--check", "--all")
     assert chk_before.returncode == 1
     assert "retired skill link still present" in chk_before.stderr
     assert "retired skill copy still present" in chk_before.stderr
+    assert chk_before.stderr.count(str(gemini_dir / "old-handoff-use-paseo-handoff")) == 1
+    assert chk_before.stderr.count(str(gemini_dir / "old-hand-use-paseo-handoff")) == 1
 
-    # Link mode installs self-handoff/handoff/hand and removes all our retired links + managed copy.
+    # Link mode installs self-handoff/handoff/hand (including into ~/.gemini/skills) and removes all our retired links + managed copy.
     applied = run(catalog, "--all")
     assert applied.returncode == 0, applied.stdout + applied.stderr
     assert "== retired skills" in applied.stdout
-    for d in (claude_dir, agents_dir, hermes_dir):
+    assert applied.stdout.count(str(gemini_dir / "old-handoff-use-paseo-handoff")) == 1
+    assert applied.stdout.count(str(gemini_dir / "old-hand-use-paseo-handoff")) == 1
+    for d in (claude_dir, agents_dir, hermes_dir, gemini_dir):
         assert (d / "self-handoff").readlink() == public / "self-handoff"
         assert (d / "handoff").readlink() == public / "handoff"
         assert (d / "hand").readlink() == public / "hand"
@@ -721,9 +725,113 @@ def test_repo_self_handoff_split_and_deprecation_aliases(catalog):
     env["SKILL_EVERYWHERE_ONLY"] = "codex,gemini"
     res = run(catalog, "--all")
     assert res.returncode == 0, res.stdout + res.stderr
-    assert (agents_dir / "self-handoff").readlink() == skills_dir / "self-handoff"
-    assert (agents_dir / "handoff").readlink() == skills_dir / "handoff"
-    assert (agents_dir / "hand").readlink() == skills_dir / "hand"
     for d in (agents_dir, gemini_dir):
+        assert (d / "self-handoff").readlink() == skills_dir / "self-handoff"
+        assert (d / "handoff").readlink() == skills_dir / "handoff"
+        assert (d / "hand").readlink() == skills_dir / "hand"
         assert not os.path.lexists(d / "old-handoff-use-paseo-handoff")
         assert not os.path.lexists(d / "old-hand-use-paseo-handoff")
+
+
+# --- First-class gemini (~/.gemini/skills) target (2026-11-24) --------------------------------------------------
+
+def test_gemini_target_detected_via_dot_gemini_dir_without_cli(catalog, tmp_path):
+    """Antigravity runs without a gemini/antigravity binary on PATH: ~/.gemini dir enables linking/checking/removal."""
+    home, public, _, env = catalog
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    env["SKILL_EVERYWHERE_ONLY"] = "gemini"
+    env["SKILL_EVERYWHERE_BIN_DIR"] = str(empty_bin)
+    src = skill(public, "self-handoff")
+
+    # Neither ~/.gemini dir nor CLI binary: treated as not installed; link mode creates nothing.
+    chk_absent = run(catalog, "--check", "--all")
+    assert chk_absent.returncode == 0, chk_absent.stdout + chk_absent.stderr
+    assert "gemini" in chk_absent.stdout and "not installed" in chk_absent.stdout
+    assert chk_absent.stdout.rstrip().endswith("== end")
+    assert run(catalog, "--all").returncode == 0
+    assert not (home / ".gemini").exists()
+
+    # A plain file at ~/.gemini is not a directory: still not installed.
+    (home / ".gemini").write_text("not a dir\n")
+    chk_file = run(catalog, "--check", "--all")
+    assert chk_file.returncode == 0 and "not installed" in chk_file.stdout
+    (home / ".gemini").unlink()
+
+    # Creating ~/.gemini enables the target even with no binary in SKILL_EVERYWHERE_BIN_DIR.
+    (home / ".gemini").mkdir()
+    chk_missing = run(catalog, "--check", "--all")
+    assert chk_missing.returncode == 1
+    assert "gemini" in chk_missing.stdout and "missing" in chk_missing.stdout
+    assert "paseo skill is" not in chk_missing.stderr  # Paseo syncs ~/.gemini/config/skills/paseo, not ~/.gemini/skills/paseo
+
+    linked = run(catalog, "--all")
+    assert linked.returncode == 0, linked.stdout + linked.stderr
+    link = home / ".gemini" / "skills" / "self-handoff"
+    assert link.is_symlink() and link.readlink() == src
+
+    chk_ok = run(catalog, "--check", "--all")
+    assert chk_ok.returncode == 0, chk_ok.stdout + chk_ok.stderr
+    assert "linked" in chk_ok.stdout and chk_ok.stdout.rstrip().endswith("== end")
+
+    again = run(catalog, "--all")
+    assert again.returncode == 0 and "already linked" in again.stdout
+
+    removed = run(catalog, "--remove", "self-handoff")
+    assert removed.returncode == 0, removed.stdout + removed.stderr
+    assert "removed" in removed.stdout and not os.path.lexists(link)
+
+
+@pytest.mark.parametrize("cli_name", ["gemini", "antigravity"])
+def test_gemini_target_detected_via_cli_binary_in_bin_dir(catalog, tmp_path, cli_name):
+    """A gemini or antigravity binary in SKILL_EVERYWHERE_BIN_DIR enables linking even before ~/.gemini exists."""
+    home, public, _, env = catalog
+    bindir = tmp_path / f"bin-{cli_name}"
+    bindir.mkdir()
+    fake = bindir / cli_name
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    env["SKILL_EVERYWHERE_ONLY"] = "gemini"
+    env["SKILL_EVERYWHERE_BIN_DIR"] = str(bindir)
+    src = skill(public, "steps")
+    assert not (home / ".gemini").exists()
+
+    chk = run(catalog, "--check", "--all")
+    assert chk.returncode == 1 and "missing" in chk.stdout
+
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    link = home / ".gemini" / "skills" / "steps"
+    assert link.is_symlink() and link.readlink() == src
+    assert run(catalog, "--check", "--all").returncode == 0
+
+
+def test_gemini_only_retired_cleanup_runs_once_without_duplicates(catalog, tmp_path):
+    """SKILL_EVERYWHERE_ONLY=gemini scans ~/.gemini/skills once for retired links and preserves foreign entries."""
+    home, public, _, env = catalog
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    env["SKILL_EVERYWHERE_ONLY"] = "gemini"
+    env["SKILL_EVERYWHERE_BIN_DIR"] = str(empty_bin)
+    src = skill(public, "self-handoff")
+
+    gemini_dir = home / ".gemini" / "skills"
+    gemini_dir.mkdir(parents=True)
+    retired_link = gemini_dir / "old-handoff-use-paseo-handoff"
+    retired_link.symlink_to(public / "old-handoff-use-paseo-handoff")
+    foreign_link = gemini_dir / "old-hand-use-paseo-handoff"
+    foreign_link.symlink_to(tmp_path / "someone-else")
+
+    chk = run(catalog, "--check", "--all")
+    assert chk.returncode == 1
+    assert chk.stderr.count(str(retired_link)) == 1
+    assert str(foreign_link) not in chk.stderr
+
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert applied.stdout.count(str(retired_link)) == 1
+    assert not os.path.lexists(retired_link)
+    assert foreign_link.is_symlink() and foreign_link.readlink() == tmp_path / "someone-else"
+    assert (gemini_dir / "self-handoff").readlink() == src
+    assert run(catalog, "--check", "--all").returncode == 0
+
