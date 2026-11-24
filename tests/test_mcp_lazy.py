@@ -85,8 +85,15 @@ def main():
     cursor_file = os.environ.get("FIXTURE_CURSOR_FILE")
     fail_init_file = os.environ.get("FIXTURE_FAIL_INIT_FILE")
     roots_flag = os.environ.get("FIXTURE_ASK_ROOTS_ON_TOOLS_LIST") == "1"
+    roots_on_init_flag = os.environ.get("FIXTURE_ASK_ROOTS_ON_INITIALIZED") == "1"
     pre_init_noise = os.environ.get("FIXTURE_PRE_INIT_NOISE") == "1"
     descendant_pid_file = os.environ.get("FIXTURE_DESCENDANT_PID_FILE")
+    init_started_file = os.environ.get("FIXTURE_INIT_STARTED_FILE")
+    init_release_file = os.environ.get("FIXTURE_INIT_RELEASE_FILE")
+    call_log_file = os.environ.get("FIXTURE_CALL_LOG")
+    cancel_log_file = os.environ.get("FIXTURE_CANCEL_LOG")
+    nan_tools_file = os.environ.get("FIXTURE_NAN_TOOLS_FILE")
+    init_roots_err_file = os.environ.get("FIXTURE_INIT_ROOTS_ERR_FILE")
 
     def current_tools():
         if tools_file and os.path.exists(tools_file):
@@ -100,6 +107,7 @@ def main():
             {"name": "stall_stdin", "description": "Stop reading stdin forever", "inputSchema": {"type": "object"}},
             {"name": "noisy", "description": "Write non-JSON line to stdout before replying", "inputSchema": {"type": "object"}},
             {"name": "json_noise", "description": "Write valid JSON without JSON-RPC envelope", "inputSchema": {"type": "object"}},
+            {"name": "nan_result", "description": "Write non-finite NaN in JSON-RPC result", "inputSchema": {"type": "object"}},
             {"name": "oversized", "description": "Write oversized NDJSON frame", "inputSchema": {"type": "object"}},
             {"name": "ask_client", "description": "Send a server-to-client request", "inputSchema": {"type": "object"}},
         ]
@@ -122,8 +130,15 @@ def main():
         return offered
 
     framing = "ndjson"
+    buffered_msgs = []
+
+    def next_msg():
+        if buffered_msgs:
+            return buffered_msgs.pop(0)
+        return read_msg()
+
     while True:
-        msg, seen_framing = read_msg()
+        msg, seen_framing = next_msg()
         if msg is None:
             if os.environ.get("FIXTURE_SLOW_EXIT") == "1":
                 time.sleep(0.45)
@@ -137,9 +152,32 @@ def main():
         if method is None:
             continue
         if "id" not in msg:
+            if method == "notifications/cancelled" and cancel_log_file:
+                with open(cancel_log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(params) + "\n")
+                    f.flush()
+            elif method == "notifications/initialized" and roots_on_init_flag:
+                req_id = f"srv-on-init-{os.getpid()}"
+                send_msg({"jsonrpc": "2.0", "id": req_id, "method": "roots/list", "params": {}}, framing)
+                while True:
+                    reply, r_fr = read_msg()
+                    if reply is None:
+                        return
+                    if reply.get("method") is None and reply.get("id") == req_id:
+                        if "error" in reply and init_roots_err_file:
+                            with open(init_roots_err_file, "w", encoding="utf-8") as f:
+                                json.dump(reply["error"], f)
+                        break
+                    buffered_msgs.append((reply, r_fr))
             continue
 
         if method == "initialize":
+            if init_started_file and init_release_file:
+                with open(init_started_file, "w", encoding="utf-8") as f:
+                    f.write(f"{os.getpid()}\n")
+                    f.flush()
+                while not os.path.exists(init_release_file):
+                    time.sleep(0.02)
             if pre_init_noise:
                 send_msg({"jsonrpc": "2.0", "method": "notifications/message", "params": {"data": "too-early"}}, framing)
                 send_msg({"jsonrpc": "2.0", "id": "early-req", "method": "roots/list", "params": {}}, framing)
@@ -160,6 +198,11 @@ def main():
                 },
             }, framing)
         elif method == "tools/list":
+            if nan_tools_file and os.path.exists(nan_tools_file):
+                raw_line = ('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"tools":[{"name":"bad","x":Infinity}]}}\n').encode("utf-8")
+                sys.stdout.buffer.write(raw_line)
+                sys.stdout.buffer.flush()
+                continue
             if roots_flag:
                 req_id = f"srv-roots-{os.getpid()}"
                 send_msg({"jsonrpc": "2.0", "id": req_id, "method": "roots/list", "params": {}}, framing)
@@ -188,6 +231,10 @@ def main():
         elif method == "tools/call":
             name = params.get("name")
             args = params.get("arguments") or {}
+            if call_log_file:
+                with open(call_log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"id": mid, "name": name, "args": args}) + "\n")
+                    f.flush()
             if name == "echo":
                 send_msg({
                     "jsonrpc": "2.0",
@@ -195,12 +242,19 @@ def main():
                     "result": {"content": [{"type": "text", "text": f"pid={os.getpid()} msg={args.get('msg', '')}"}]},
                 }, framing)
             elif name == "slow":
-                time.sleep(float(args.get("seconds", 1.5)))
+                # Support interruptible slow loop so we can observe notifications/cancelled on stdin if desired.
+                end_t = time.monotonic() + float(args.get("seconds", 1.5))
+                while time.monotonic() < end_t:
+                    time.sleep(0.05)
                 send_msg({
                     "jsonrpc": "2.0",
                     "id": mid,
                     "result": {"content": [{"type": "text", "text": f"pid={os.getpid()} slow=done"}]},
                 }, framing)
+            elif name == "nan_result":
+                raw_line = ('{"jsonrpc":"2.0","id":' + json.dumps(mid) + ',"result":{"value":NaN}}\n').encode("utf-8")
+                sys.stdout.buffer.write(raw_line)
+                sys.stdout.buffer.flush()
             elif name == "crash":
                 os._exit(42)
             elif name == "crash_with_descendant":
@@ -1073,7 +1127,7 @@ def test_stdout_strict_jsonrpc_filtering_bounded_frames_and_bounded_error_logs(f
 
     # 2. Oversized NDJSON frame from child retires child and resolves pending call with -32603, then respawns.
     fixture_env["pid_log"].unlink()
-    c_cap = fixture_env["start"](extra_env={"MCP_LAZY_MAX_FRAME_BYTES": "1024"})
+    c_cap = fixture_env["start"](extra_env={"MCP_LAZY_MAX_FRAME_BYTES": "2048"})
     try:
         c_cap.handshake()
         c_cap.send({
@@ -1321,3 +1375,328 @@ def test_hardening_child_cwd_is_home_and_relative_path_stripped(fixture_env):
     assert "relative/dir" not in path_entries
     assert "/opt/../etc" not in path_entries
     assert all(os.path.isabs(p) and ".." not in p.split("/") for p in path_entries)
+
+
+# --- Round 3 Adversary Regression Tests ---
+
+
+def test_cancellation_during_lazy_startup_never_reaches_server(fixture_env):
+    """Round 3 HIGH #1: call cancelled while lazy startup is held at a barrier never reaches the server."""
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    init_started = fixture_env["tmp"] / "init_started.flag"
+    init_release = fixture_env["tmp"] / "init_release.flag"
+    call_log = fixture_env["tmp"] / "calls.jsonl"
+    cancel_log = fixture_env["tmp"] / "cancels.jsonl"
+
+    client = fixture_env["start"](extra_env={
+        "FIXTURE_INIT_STARTED_FILE": str(init_started),
+        "FIXTURE_INIT_RELEASE_FILE": str(init_release),
+        "FIXTURE_CALL_LOG": str(call_log),
+        "FIXTURE_CANCEL_LOG": str(cancel_log),
+    })
+    try:
+        client.handshake()
+        assert fixture_env["read_pids"]() == []
+
+        # Trigger lazy startup with call id=200; server holds at init_started barrier.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 200,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "cancelled-before-dispatch"}},
+        })
+        deadline = time.monotonic() + 5.0
+        while not init_started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert init_started.exists(), "child did not reach initialize barrier"
+
+        # Cancel id=200 while startup is blocked at the barrier!
+        client.send({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 200, "reason": "user cancelled"},
+        })
+        # Give reader thread a moment to record cancellation, then release the startup barrier.
+        time.sleep(0.1)
+        init_release.write_text("go\n", encoding="utf-8")
+
+        # Send a second live call id=201 to prove child started cleanly and serves subsequent calls.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "live-after-cancel"}},
+        })
+        resp = client.recv(timeout=5.0)
+        assert resp["id"] == 201
+        assert "msg=live-after-cancel" in resp["result"]["content"][0]["text"]
+
+        # Verify cancelled call id=200 NEVER reached the server!
+        logged_calls = [json.loads(ln) for ln in call_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert [c["id"] for c in logged_calls] == [201], f"cancelled call reached server: {logged_calls}"
+
+        # Also verify in-flight cancellation forwards directly on the control path.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "tools/call",
+            "params": {"name": "slow", "arguments": {"seconds": 0.4}},
+        })
+        # Wait until server logs receipt of slow call 202, then send cancellation on control path.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            logged = [json.loads(ln) for ln in call_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if any(c["id"] == 202 for c in logged):
+                break
+            time.sleep(0.02)
+        client.send({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 202},
+        })
+        # Wait for slow to reply, then verify server received the cancellation notification.
+        _ = client.recv(timeout=5.0)
+        # Send one more echo to flush stdin ordering before reading cancel_log.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 203,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "flush"}},
+        })
+        assert client.recv(timeout=5.0)["id"] == 203
+        cancels = [json.loads(ln) for ln in cancel_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert any(c.get("requestId") == 202 for c in cancels), f"in-flight cancel not forwarded: {cancels}"
+    finally:
+        assert client.close()[0] == 0
+
+
+def test_eof_racing_child_spawn_before_publication_leaves_no_orphan(fixture_env):
+    """Round 3 HIGH #2: shutdown racing between ChildProcess Popen and publication retires child cleanly."""
+    import threading
+
+    mod = _load_mcp_lazy_module()
+    spawned_ev = threading.Event()
+    release_ev = threading.Event()
+    spawned_pids: list[int] = []
+
+    class BarrierProxy(mod.LazyProxy):
+        def _after_child_popen(self, child):
+            spawned_pids.append(child.pid)
+            spawned_ev.set()
+            release_ev.wait(timeout=5.0)
+
+    proxy = BarrierProxy(
+        server_id="barrier-srv",
+        child_argv=[sys.executable, str(fixture_env["server"])],
+        idle_seconds=60.0,
+        cache_dir=fixture_env["cache_dir"],
+    )
+
+    spawn_result: list[Any] = []
+    t_spawn = threading.Thread(target=lambda: spawn_result.append(proxy._spawn_child_raw()))
+    t_spawn.start()
+    assert spawned_ev.wait(timeout=5.0), "spawn did not reach post-popen barrier"
+    child_pid = spawned_pids[0]
+    assert _pid_alive(child_pid)
+
+    # Start shutdown while _spawn_child_raw is paused BEFORE publishing child!
+    t_shut = threading.Thread(target=proxy.shutdown)
+    t_shut.start()
+    time.sleep(0.1)
+    assert t_shut.is_alive(), "shutdown must wait for in-flight spawn instead of returning early"
+
+    # Release spawn barrier: _spawn_child_raw must see self.stopping and immediately terminate child.
+    release_ev.set()
+    t_spawn.join(timeout=5.0)
+    t_shut.join(timeout=5.0)
+    assert not t_spawn.is_alive() and not t_shut.is_alive()
+    assert spawn_result == [None]
+    assert proxy.child is None
+    assert not proxy.tearing_down
+    assert not _pid_alive(child_pid), f"orphan child pid={child_pid} leaked when EOF raced spawn"
+
+
+def test_nonfinite_json_in_tool_and_discovery_responses_never_strands_requests(fixture_env):
+    """Round 3 HIGH #3: non-finite NaN/Infinity in tool or discovery responses returns -32603 and recovers."""
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    # 1. Tool response containing NaN: must NOT strand id=300; returns -32603, retires child, next call succeeds.
+    client = fixture_env["start"]()
+    try:
+        client.handshake()
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 300,
+            "method": "tools/call",
+            "params": {"name": "nan_result", "arguments": {}},
+        })
+        err_r = client.recv(timeout=5.0)
+        assert err_r["id"] == 300 and err_r["error"]["code"] == -32603
+
+        # Subsequent call respawns cleanly and works.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 301,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "after-nan-tool"}},
+        })
+        ok_r = client.recv(timeout=5.0)
+        assert ok_r["id"] == 301 and "msg=after-nan-tool" in ok_r["result"]["content"][0]["text"]
+
+        # Client sending non-finite NaN on stdin gets -32700 Parse error and connection stays usable.
+        assert client.proc.stdin is not None
+        client.proc.stdin.write(b'{"jsonrpc":"2.0","id":302,"method":"ping","params":{"x":NaN}}\n')
+        client.proc.stdin.flush()
+        parse_err = client.recv(timeout=5.0)
+        assert parse_err["error"]["code"] == -32700
+    finally:
+        assert client.close()[0] == 0
+
+    # 2. Discovery response containing Infinity during on-demand startup: fails startup cleanly with -32603,
+    #    retires child, and after fixing the server the next call succeeds cleanly!
+    nan_tools_flag = fixture_env["tmp"] / "nan_tools.flag"
+    nan_tools_flag.write_text("1\n", encoding="utf-8")
+    c2 = fixture_env["start"](extra_env={"FIXTURE_NAN_TOOLS_FILE": str(nan_tools_flag)})
+    try:
+        c2.handshake()
+        c2.send({
+            "jsonrpc": "2.0",
+            "id": 303,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "during-bad-discovery"}},
+        })
+        err_disc = c2.recv(timeout=5.0)
+        assert err_disc["id"] == 303 and err_disc["error"]["code"] == -32603
+
+        # Fix server discovery and verify next call succeeds cleanly.
+        nan_tools_flag.unlink()
+        c2.send({
+            "jsonrpc": "2.0",
+            "id": 304,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "recovered-discovery"}},
+        })
+        ok_disc = c2.recv(timeout=5.0)
+        assert ok_disc["id"] == 304 and "msg=recovered-discovery" in ok_disc["result"]["content"][0]["text"]
+    finally:
+        assert c2.close()[0] == 0
+
+
+def test_immediate_server_request_on_notifications_initialized_accepted(fixture_env):
+    """Round 3 MEDIUM #1: gate tracks client's real notifications/initialized and opens before child write."""
+    err_file = fixture_env["tmp"] / "init_roots_err.json"
+    extra = {
+        "FIXTURE_ASK_ROOTS_ON_INITIALIZED": "1",
+        "FIXTURE_INIT_ROOTS_ERR_FILE": str(err_file),
+    }
+
+    # 1. Cold warm-up: child must NOT receive notifications/initialized or send roots/list until
+    #    the client sends its real notifications/initialized!
+    c1 = fixture_env["start"](extra_env=extra)
+    try:
+        c1.send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "lifecycle-client", "version": "1"},
+            },
+        })
+        init_r = c1.recv(timeout=5.0)
+        assert init_r["id"] == 1 and "result" in init_r
+
+        # Pause briefly BEFORE sending notifications/initialized: proxy must NOT leak child traffic yet!
+        assert c1.proc.stdout is not None
+        ready, _, _ = select.select([c1.proc.stdout.fileno()], [], [], 0.25)
+        assert not ready, "proxy leaked child message before client sent notifications/initialized"
+
+        # Now client sends its real notifications/initialized -> child immediately sends roots/list!
+        c1.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        roots_req = c1.recv(timeout=5.0)
+        assert roots_req.get("method") == "roots/list" and str(roots_req.get("id", "")).startswith("srv-on-init-")
+        c1.send({"jsonrpc": "2.0", "id": roots_req["id"], "result": {"roots": [{"uri": "file:///ws"}]}})
+
+        c1.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools_r = c1.recv(timeout=5.0)
+        assert tools_r["id"] == 2 and any(t["name"] == "echo" for t in tools_r["result"]["tools"])
+        assert not err_file.exists(), f"child request on initialized was rejected: {err_file.read_text()}"
+    finally:
+        assert c1.close()[0] == 0
+
+    # 2. On-demand startup: allow_upstream flips BEFORE writing notifications/initialized to child,
+    #    so child's immediate roots/list is forwarded cleanly and never rejected with -32600!
+    fixture_env["pid_log"].unlink()
+    c2 = fixture_env["start"](extra_env=extra)
+    try:
+        c2.handshake()
+        assert fixture_env["read_pids"]() == []
+        c2.send({
+            "jsonrpc": "2.0",
+            "id": 400,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "init-gate-ok"}},
+        })
+        roots_req2 = c2.recv(timeout=5.0)
+        assert roots_req2.get("method") == "roots/list" and str(roots_req2.get("id", "")).startswith("srv-on-init-")
+        c2.send({"jsonrpc": "2.0", "id": roots_req2["id"], "result": {"roots": [{"uri": "file:///ws"}]}})
+        call_r = c2.recv(timeout=5.0)
+        assert call_r["id"] == 400 and "msg=init-gate-ok" in call_r["result"]["content"][0]["text"]
+        assert not err_file.exists(), f"on-demand request on initialized was rejected: {err_file.read_text()}"
+    finally:
+        assert c2.close()[0] == 0
+
+
+def test_cache_store_step_by_step_dir_fd_ancestry_validation(tmp_path: Path):
+    """Round 3 MEDIUM #2: CacheStore pins every ancestor via dir_fd during creation and rejects untrusted parents."""
+    mod = _load_mcp_lazy_module()
+    payload = {
+        "version": 1,
+        "clientProtocolVersion": "2025-11-25",
+        "initialize": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "s", "version": "1"},
+        },
+        "tools": {"tools": []},
+    }
+
+    # 1. Nested non-existent dirs created via dir_fd with 0700 perms.
+    nested = tmp_path / "deep_a" / "deep_b" / "mcp-lazy"
+    store = mod.CacheStore(nested, "nested-srv")
+    assert store.save(payload) is True
+    assert stat.S_IMODE((tmp_path / "deep_a").stat().st_mode) == 0o700
+    assert stat.S_IMODE((tmp_path / "deep_a" / "deep_b").stat().st_mode) == 0o700
+    assert stat.S_IMODE(nested.stat().st_mode) == 0o700
+    assert stat.S_IMODE((nested / "nested-srv.json").stat().st_mode) == 0o600
+    assert store.load() == payload
+
+    # 2. World-writable non-sticky ancestor rejected on both load and save.
+    bad_parent = tmp_path / "world-parent"
+    bad_parent.mkdir(mode=0o777)
+    bad_parent.chmod(0o777)
+    store_bad = mod.CacheStore(bad_parent / "sub", "bad-srv")
+    assert store_bad.save(payload) is False
+    assert store_bad.load() is None
+
+    # 3. Symlink ancestor rejected on both load and save.
+    real_dir = tmp_path / "real-target"
+    real_dir.mkdir(mode=0o700)
+    sym_dir = tmp_path / "sym-ancestor"
+    sym_dir.symlink_to(real_dir)
+    store_sym = mod.CacheStore(sym_dir / "sub", "sym-srv")
+    assert store_sym.save(payload) is False
+    assert store_sym.load() is None
+
+    # 4. Path with '..' segment rejected.
+    store_dotdot = mod.CacheStore(tmp_path / "deep_a" / ".." / "deep_a", "dot-srv")
+    assert store_dotdot.save(payload) is False
+    assert store_dotdot.load() is None

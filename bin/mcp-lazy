@@ -21,13 +21,14 @@ Hardening (docs/mcp-on-demand.md §11.3, Adversary L3):
   - Fixes child working directory to `$HOME` (never the session checkout cwd).
   - Rebuilds child `PATH` keeping only absolute entries without `..` segments.
   - Restricts `--id` strictly to `^[a-z0-9-]+$`.
-  - Pins the `0700` cache directory via `O_DIRECTORY | O_NOFOLLOW` descriptor for all
-    cache reads, temp-file writes, and `os.replace`; opens cache files with
-    `O_NONBLOCK | O_NOFOLLOW`, verifying regular file (`S_ISREG`), ownership
-    (`st_uid == getuid()`), and strict permissions (`(st_mode & 0o077) == 0`).
+  - Pins every ancestor and the `0700` cache directory step-by-step via
+    `O_DIRECTORY | O_NOFOLLOW` descriptors for all cache reads, directory/temp creation,
+    and `os.replace`; opens cache files with `O_NONBLOCK | O_NOFOLLOW`, verifying regular
+    file (`S_ISREG`), ownership (`st_uid == getuid()`), and strict permissions
+    (`(st_mode & 0o077) == 0`).
   - Never stores or reads command/argv in the cache file (discovery responses only).
-  - Enforces strict JSON-RPC 2.0 envelopes and bounded frame sizes on stdout; all
-    diagnostics go to stderr.
+  - Enforces strict JSON-RPC 2.0 envelopes (rejecting non-finite JSON constants) and
+    bounded frame sizes on stdout; all diagnostics go to stderr.
 
 Exit codes: 0 normal EOF/signal shutdown; 2 invalid CLI arguments or hardening violation.
 Stdlib only (Python 3.9+).
@@ -69,6 +70,13 @@ MAX_HEADER_COUNT = 32
 ID_RE = re.compile(r"[a-z0-9-]+")
 _STOP_SENTINEL = object()
 
+# Verified macOS OS root symlinks (/var -> private/var, /tmp -> private/tmp, /etc -> private/etc).
+_DARWIN_SYSTEM_SYMLINKS: dict[str, tuple[str, ...]] = {
+    "var": ("private", "var"),
+    "tmp": ("private", "tmp"),
+    "etc": ("private", "etc"),
+}
+
 # method -> (cache_field, server_capability_key, list_changed_notification)
 CACHEABLE_METHODS: dict[str, tuple[str, str, str]] = {
     "tools/list": ("tools", "tools", "notifications/tools/list_changed"),
@@ -103,6 +111,15 @@ def log_err(msg: str) -> None:
         sys.stderr.flush()
     except OSError:
         pass
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"non-standard JSON constant rejected: {token}")
+
+
+def json_loads_strict(raw: bytes) -> Any:
+    """Decode strict RFC 8259 JSON, rejecting NaN/Infinity/-Infinity at decode time."""
+    return json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
 
 
 def json_dumps_bytes(obj: Any) -> bytes:
@@ -305,12 +322,16 @@ def format_framed_message(payload: bytes, framing: str) -> bytes:
 
 
 class CacheStore:
-    """Hardened per-server discovery cache anchored to a pinned directory descriptor.
+    """Hardened per-server discovery cache with step-by-step pinned directory descriptors.
 
-    - Opens the cache dir with `O_DIRECTORY | O_NOFOLLOW` and checks ancestor trust.
-    - Performs all file open, fstat, temp creation, and os.replace via `dir_fd`.
-    - Opens cache files with `O_NONBLOCK | O_NOFOLLOW` before validating `S_ISREG`,
-      so FIFOs never hang initialize.
+    - Walks from `/` component-by-component with `O_DIRECTORY | O_NOFOLLOW` (`dir_fd`),
+      creating missing components via `os.mkdir(..., dir_fd=cur_fd)` so no ancestor swap
+      can race validation vs open.
+    - Restricts symlink hops exclusively to verified macOS OS root symlinks
+      (`/var -> private/var`, `/tmp -> private/tmp`, `/etc -> private/etc`), re-verified
+      component-by-component as root-owned directories.
+    - Opens cache files with `O_NONBLOCK | O_NOFOLLOW` relative to the pinned leaf `dir_fd`
+      before validating `S_ISREG`, so FIFOs never hang initialize.
     - NEVER stores or reads command/argv — only allowlisted MCP discovery responses.
     """
 
@@ -346,89 +367,139 @@ class CacheStore:
         return clean
 
     @staticmethod
-    def _validate_ancestors(target_dir: Path, uid: int) -> bool:
-        """Check that ancestor directories of cache_dir are owned by root/uid and not group/world-writable
-        without the sticky bit, and that no user-owned path component is a symlink."""
-        abs_dir = target_dir if target_dir.is_absolute() else (Path.cwd() / target_dir)
-        parts = abs_dir.parts
-        cur = Path(parts[0])
-        for part in parts[1:-1]:
-            cur = cur / part
-            try:
-                st = os.lstat(cur)
-            except FileNotFoundError:
-                return True  # Not created yet; save() will create remaining components
-            except OSError as e:
-                log_err(f"cache ancestor stat failed ({cur}): {e}")
-                return False
-            if stat.S_ISLNK(st.st_mode):
-                # Allow OS root-owned system symlinks such as /var -> private/var or /tmp -> private/tmp,
-                # but reject any user- or third-party-owned symlink in the cache ancestor chain.
-                if st.st_uid != 0:
-                    log_err(f"untrusted non-root symlink in cache path: {cur}")
-                    return False
-                try:
-                    st = os.stat(cur)
-                except OSError as e:
-                    log_err(f"cache ancestor target stat failed ({cur}): {e}")
-                    return False
-            if not stat.S_ISDIR(st.st_mode):
-                log_err(f"cache ancestor is not a directory: {cur}")
-                return False
-            if st.st_uid not in (0, uid):
-                log_err(f"untrusted cache ancestor owner uid={st.st_uid}: {cur}")
-                return False
-            if (st.st_mode & 0o022) != 0 and not (st.st_mode & stat.S_ISVTX):
-                log_err(f"untrusted group/world-writable cache ancestor: {cur}")
-                return False
-        return True
-
-    def _open_dir_fd(self, *, create: bool) -> Optional[int]:
-        uid = os.getuid()
-        if not self._validate_ancestors(self.cache_dir, uid):
-            return None
-        if create and not os.path.lexists(self.cache_dir):
-            try:
-                self.cache_dir.parent.mkdir(parents=True, exist_ok=True)
-                os.mkdir(self.cache_dir, 0o700)
-            except FileExistsError:
-                pass
-            except OSError as e:
-                log_err(f"failed creating cache dir ({self.cache_dir}): {e}")
-                return None
+    def _open_step_no_follow(parent_fd: int, part: str, *, create: bool, mode: int) -> int:
         dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
-            dir_fd = os.open(str(self.cache_dir), dir_flags)
+            return os.open(part, dir_flags, dir_fd=parent_fd)
         except FileNotFoundError:
-            return None
-        except OSError as e:
-            log_err(f"ignoring untrusted/inaccessible cache dir ({self.cache_dir}): {e}")
-            return None
-        try:
-            st = os.fstat(dir_fd)
-            if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
-                log_err(f"ignoring untrusted cache dir (uid={st.st_uid}): {self.cache_dir}")
-                os.close(dir_fd)
-                return None
-            if create:
-                if (st.st_mode & 0o077) != 0:
-                    os.fchmod(dir_fd, 0o700)
-            else:
-                if (st.st_mode & 0o022) != 0:
-                    log_err(
-                        f"ignoring group/world-writable cache dir (mode={oct(stat.S_IMODE(st.st_mode))}): "
-                        f"{self.cache_dir}"
-                    )
-                    os.close(dir_fd)
-                    return None
-            return dir_fd
-        except OSError as e:
-            log_err(f"cache dir validation failed ({self.cache_dir}): {e}")
+            if not create:
+                raise
             try:
-                os.close(dir_fd)
+                os.mkdir(part, mode, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            return os.open(part, dir_flags, dir_fd=parent_fd)
+
+    @classmethod
+    def _open_verified_darwin_system_link(cls, root_fd: int, part: str) -> Optional[int]:
+        """Allow ONLY verified root-owned macOS OS symlinks at `/` (`/var`, `/tmp`, `/etc`)."""
+        if sys.platform != "darwin" or part not in _DARWIN_SYSTEM_SYMLINKS:
+            return None
+        expected_parts = _DARWIN_SYSTEM_SYMLINKS[part]
+        expected_target = "/".join(expected_parts)
+        try:
+            lst = os.lstat(part, dir_fd=root_fd)
+            if not stat.S_ISLNK(lst.st_mode) or lst.st_uid != 0:
+                return None
+            target = os.readlink(part, dir_fd=root_fd)
+            if target.lstrip("/") != expected_target:
+                return None
+        except OSError:
+            return None
+
+        cur_fd = os.dup(root_fd)
+        try:
+            for comp in expected_parts:
+                nxt = cls._open_step_no_follow(cur_fd, comp, create=False, mode=0o755)
+                os.close(cur_fd)
+                cur_fd = nxt
+                st = os.fstat(cur_fd)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                    os.close(cur_fd)
+                    return None
+                if (st.st_mode & 0o022) != 0 and not (st.st_mode & stat.S_ISVTX):
+                    os.close(cur_fd)
+                    return None
+            return cur_fd
+        except OSError:
+            try:
+                os.close(cur_fd)
             except OSError:
                 pass
             return None
+
+    def _open_dir_fd(self, *, create: bool) -> Optional[int]:
+        """Traverse from `/` pinning every ancestor with `O_DIRECTORY | O_NOFOLLOW` `dir_fd`."""
+        uid = os.getuid()
+        abs_dir = self.cache_dir if self.cache_dir.is_absolute() else (Path.cwd() / self.cache_dir)
+        raw_parts = abs_dir.parts[1:]
+        if not raw_parts or any(p == ".." or "\x00" in p for p in raw_parts):
+            log_err(f"refusing invalid cache dir path: {self.cache_dir}")
+            return None
+        parts = [p for p in raw_parts if p and p != "."]
+        if not parts:
+            log_err(f"refusing root as cache dir: {self.cache_dir}")
+            return None
+
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            cur_fd = os.open("/", dir_flags)
+        except OSError as e:
+            log_err(f"cannot open root dir: {e}")
+            return None
+
+        try:
+            for idx, part in enumerate(parts):
+                is_leaf = idx == len(parts) - 1
+                try:
+                    next_fd = self._open_step_no_follow(
+                        cur_fd, part, create=create, mode=0o700
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError as e:
+                    # Only at depth 0 under `/` on macOS: allow verified OS system symlinks (/var, /tmp, /etc).
+                    if idx == 0 and e.errno in (errno.ELOOP, errno.ENOTDIR):
+                        sys_fd = self._open_verified_darwin_system_link(cur_fd, part)
+                        if sys_fd is not None:
+                            os.close(cur_fd)
+                            cur_fd = sys_fd
+                            continue
+                    log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
+                    return None
+
+                os.close(cur_fd)
+                cur_fd = next_fd
+
+                st = os.fstat(cur_fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    log_err(f"cache path component {part!r} is not a directory")
+                    return None
+
+                if is_leaf:
+                    if st.st_uid != uid:
+                        log_err(f"ignoring untrusted cache dir (uid={st.st_uid}): {self.cache_dir}")
+                        return None
+                    if create:
+                        if (st.st_mode & 0o077) != 0:
+                            os.fchmod(cur_fd, 0o700)
+                    else:
+                        if (st.st_mode & 0o022) != 0:
+                            log_err(
+                                f"ignoring group/world-writable cache dir "
+                                f"(mode={oct(stat.S_IMODE(st.st_mode))}): {self.cache_dir}"
+                            )
+                            return None
+                else:
+                    if st.st_uid not in (0, uid):
+                        log_err(f"untrusted cache ancestor owner uid={st.st_uid} at {part!r}")
+                        return None
+                    if (st.st_mode & 0o022) != 0 and not (st.st_mode & stat.S_ISVTX):
+                        log_err(f"untrusted group/world-writable cache ancestor at {part!r}")
+                        return None
+
+            result_fd = cur_fd
+            cur_fd = -1
+            return result_fd
+        except OSError as e:
+            log_err(f"cache dir traversal failed ({self.cache_dir}): {e}")
+            return None
+        finally:
+            if cur_fd >= 0:
+                try:
+                    os.close(cur_fd)
+                except OSError:
+                    pass
 
     def load(self) -> Optional[dict[str, Any]]:
         uid = os.getuid()
@@ -485,7 +556,7 @@ class CacheStore:
                 log_err(f"ignoring oversized cache file: {self.path}")
                 return None
             try:
-                parsed = json.loads(raw.decode("utf-8"))
+                parsed = json_loads_strict(raw)
             except (UnicodeDecodeError, ValueError) as e:
                 log_err(f"ignoring corrupt cache JSON ({self.path}): {e}")
                 return None
@@ -501,12 +572,16 @@ class CacheStore:
             log_err("refusing to save invalid cache payload")
             return False
         assert set(clean.keys()).issubset(ALLOWED_CACHE_KEYS)
-        data = (
-            json.dumps(
-                clean, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
-            ).encode("utf-8")
-            + b"\n"
-        )
+        try:
+            data = (
+                json.dumps(
+                    clean, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+                ).encode("utf-8")
+                + b"\n"
+            )
+        except (TypeError, ValueError) as e:
+            log_err(f"refusing to save unserializable cache payload: {e}")
+            return False
         with self._lock:
             dir_fd = self._open_dir_fd(create=True)
             if dir_fd is None:
@@ -698,8 +773,12 @@ class ChildProcess:
                 log_err(f"child (pid={self.pid}) framing error: {e}")
                 self._on_io_error(self, f"framing error: {e}")
             return
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as e:
+            self._stdout_eof.set()
+            if not self.reaped:
+                log_err(f"child (pid={self.pid}) stdout read error: {type(e).__name__}")
+                self._on_io_error(self, f"stdout read error: {type(e).__name__}")
+            return
         finally:
             self._stdout_eof.set()
         # If child closed stdout without exiting, give _wait_loop a brief window, then retire.
@@ -804,15 +883,22 @@ class LazyProxy:
         self.spawn_lock = threading.Lock()
 
         self.child: Optional[ChildProcess] = None
+        self.spawning_count = 0
         self.tearing_down: set[ChildProcess] = set()
         self.client_framing = "ndjson"
         self.client_init_params: Optional[dict[str, Any]] = None
         self.served_init: Optional[dict[str, Any]] = None
+        self.client_initialized = False
+        self.client_post_init_seen = False
         self.log_level_params: Optional[dict[str, Any]] = None
         self.cache_data: Optional[dict[str, Any]] = None
         self.served_digests: dict[str, bytes] = {}
 
-        # Active tracking that blocks idle reaping:
+        # Request ownership & cancellation tracking (protected by self.lock):
+        # queued_requests: request id_keys enqueued on _request_queue but not yet written to child stdin.
+        # cancelled_requests: subset of queued_requests cancelled before dispatch (must never reach child).
+        self.queued_requests: set[str] = set()
+        self.cancelled_requests: set[str] = set()
         # pending_client: id_key -> (method, raw_id, record_cache, sub_op, sub_uri)
         self.pending_client: dict[str, tuple[str, Any, bool, Optional[str], Optional[str]]] = {}
         # pending_server: id_key -> owning ChildProcess (routes client replies even before child.ready)
@@ -826,7 +912,19 @@ class LazyProxy:
         self._internal_prefix = f"__mcp_lazy_{os.getpid()}_{secrets.token_hex(6)}_"
         self._internal_seq = 0
 
-    # --- Client I/O (stdout carries ONLY valid JSON-RPC 2.0 envelopes) ---
+    def _after_child_popen(self, child: ChildProcess) -> None:
+        """Hook point between ChildProcess creation and publication under self.cond (used by tests)."""
+
+    # --- Client I/O (stdout carries ONLY valid strict JSON-RPC 2.0 envelopes) ---
+
+    def _send_client_payload(self, payload: bytes) -> bool:
+        with self.out_lock:
+            try:
+                sys.stdout.buffer.write(format_framed_message(payload, self.client_framing))
+                sys.stdout.buffer.flush()
+                return True
+            except (OSError, ValueError):
+                return False
 
     def send_client(self, msg: dict[str, Any]) -> bool:
         if not is_valid_jsonrpc_message(msg):
@@ -837,19 +935,13 @@ class LazyProxy:
         except (TypeError, ValueError) as e:
             log_err(f"JSON serialization failed for client message: {e}")
             return False
-        with self.out_lock:
-            try:
-                sys.stdout.buffer.write(format_framed_message(payload, self.client_framing))
-                sys.stdout.buffer.flush()
-                return True
-            except (OSError, ValueError):
-                return False
+        return self._send_client_payload(payload)
 
-    def send_result(self, mid: Any, result: Any) -> None:
-        self.send_client({"jsonrpc": "2.0", "id": mid, "result": result})
+    def send_result(self, mid: Any, result: Any) -> bool:
+        return self.send_client({"jsonrpc": "2.0", "id": mid, "result": result})
 
-    def send_error(self, mid: Any, code: int, message: str) -> None:
-        self.send_client({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
+    def send_error(self, mid: Any, code: int, message: str) -> bool:
+        return self.send_client({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
 
     # --- Main client reader loop (NEVER blocks on child startup or discovery) ---
 
@@ -880,7 +972,7 @@ class LazyProxy:
                 if framing is not None:
                     self.client_framing = framing
                 try:
-                    msg = json.loads(raw.decode("utf-8"))
+                    msg = json_loads_strict(raw)
                 except (UnicodeDecodeError, ValueError) as e:
                     log_err(f"malformed JSON from client: {e}")
                     self.send_error(None, -32700, "Parse error")
@@ -899,7 +991,7 @@ class LazyProxy:
         return 0
 
     def _dispatch_inbound(self, msg: dict[str, Any]) -> None:
-        """Handle control/reply traffic immediately on the reader thread; enqueue requests for the worker."""
+        """Handle control/reply/cancellation traffic immediately on the reader thread; enqueue requests."""
         method = msg.get("method")
         has_id = "id" in msg
         mid = msg.get("id")
@@ -907,7 +999,7 @@ class LazyProxy:
         params_dict = params if isinstance(params, dict) else {}
 
         # 1. Client response to a server-initiated request: route directly to owning child
-        #    (works even during cold warm-up or on-demand discovery before child.ready is True!).
+        #    (works even during cold warm-up or on-demand discovery before child.ready is True).
         if method is None:
             if has_id:
                 with self.lock:
@@ -923,14 +1015,37 @@ class LazyProxy:
         # 2. Client notification (no "id")
         if not has_id:
             if method == "notifications/initialized":
+                with self.cond:
+                    self.client_initialized = True
+                    self.cond.notify_all()
                 return
             if method == "notifications/cancelled":
                 req_id = params_dict.get("requestId")
+                forward_target: Optional[ChildProcess] = None
                 if req_id is not None:
-                    with self.lock:
-                        self.pending_client.pop(id_key(req_id), None)
+                    ck = id_key(req_id)
+                    with self.cond:
+                        if ck in self.queued_requests:
+                            # Cancelled before dispatch: mark so worker drops it before writing to child.
+                            self.cancelled_requests.add(ck)
+                            self.cond.notify_all()
+                            return
+                        was_pending = self.pending_client.pop(ck, None) is not None
+                        if was_pending and self.child is not None and self.child.ready:
+                            forward_target = self.child
                         self.last_activity = time.monotonic()
                         self.cond.notify_all()
+                else:
+                    with self.lock:
+                        if self.child is not None and self.child.ready:
+                            forward_target = self.child
+                # Forward cancellation for already in-flight requests directly on the control path.
+                if forward_target is not None:
+                    self._write_child_or_retire(forward_target, msg)
+                return
+            with self.cond:
+                self.client_post_init_seen = True
+                self.cond.notify_all()
             self._request_queue.put(msg)
             return
 
@@ -942,7 +1057,17 @@ class LazyProxy:
             self.send_error(mid, -32601, "Method not found")
             return
 
-        # 4. All other requests go to the dedicated worker thread in FIFO order
+        # 4. Track request ownership from enqueue so cancellations arriving before dispatch are caught
+        req_key = id_key(mid)
+        with self.cond:
+            if method == "initialize":
+                self.client_initialized = False
+                self.client_post_init_seen = False
+            else:
+                self.client_post_init_seen = True
+            self.queued_requests.add(req_key)
+            self.cancelled_requests.discard(req_key)
+            self.cond.notify_all()
         self._request_queue.put(msg)
 
     def _worker_loop(self) -> None:
@@ -952,9 +1077,13 @@ class LazyProxy:
                 return
             try:
                 self._process_client_message(item)
-            except Exception as e:  # noqa: BLE001 — keep worker alive on unexpected error
+            except Exception as e:  # noqa: BLE001 — keep worker alive and guarantee terminal error
                 log_err(f"worker error: {type(e).__name__}: {e}")
                 if isinstance(item, dict) and "id" in item and item.get("method") is not None:
+                    req_key = id_key(item["id"])
+                    with self.lock:
+                        self.queued_requests.discard(req_key)
+                        self.cancelled_requests.discard(req_key)
                     self.send_error(item["id"], -32603, "mcp-lazy: internal proxy error")
 
     def _process_client_message(self, msg: dict[str, Any]) -> None:
@@ -968,14 +1097,29 @@ class LazyProxy:
             self._forward_if_running(msg)
             return
 
+        req_key = id_key(mid)
+        with self.lock:
+            if req_key in self.cancelled_requests:
+                self.cancelled_requests.discard(req_key)
+                self.queued_requests.discard(req_key)
+                return
+
         if method == "initialize":
-            self._handle_initialize(mid, params_dict)
+            try:
+                self._handle_initialize(mid, params_dict)
+            finally:
+                with self.lock:
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
             return
 
         if method == "logging/setLevel":
             self.log_level_params = params_dict
             with self.lock:
                 running = self.child is not None and self.child.ready
+                if not running:
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
             if not running:
                 self.send_result(mid, {})
                 return
@@ -988,6 +1132,8 @@ class LazyProxy:
                 cached = self.cache_data.get(cache_field) if self.cache_data else None
                 if not running and isinstance(cached, dict):
                     self.served_digests[method] = canonical_digest(cached)
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
                     result_copy = cached
                 else:
                     result_copy = None
@@ -1054,17 +1200,38 @@ class LazyProxy:
                     return
 
                 init_result = init_resp["result"]
+                try:
+                    # Verify init_result is strictly serializable BEFORE committing to client.
+                    json_dumps_bytes({"jsonrpc": "2.0", "id": mid, "result": init_result})
+                except (TypeError, ValueError):
+                    log_err("warm-up initialize result is not strictly JSON-serializable")
+                    self.send_error(mid, -32603, f"mcp-lazy: invalid initialize response for {self.server_id}")
+                    return
+
                 with self.lock:
                     self.served_init = init_result
 
-                # Reply to client's initialize BEFORE opening upstream child traffic for discovery,
-                # so the client is initialized and can answer server requests (e.g. roots/list).
+                # Reply to client's initialize first.
                 self.send_result(mid, init_result)
 
+                # Wait for the client's real `notifications/initialized` (or next post-init client message)
+                # before forwarding `notifications/initialized` to the child and opening upstream traffic.
+                with self.cond:
+                    wait_deadline = time.monotonic() + min(self.start_timeout, 30.0)
+                    while not (self.client_initialized or self.client_post_init_seen or self.stopping or child.exited):
+                        rem = wait_deadline - time.monotonic()
+                        if rem <= 0:
+                            break
+                        self.cond.wait(timeout=rem)
+                    if self.stopping or child.exited:
+                        return
+
+                # Transition upstream gate BEFORE writing `notifications/initialized` so an immediate
+                # server-to-client request triggered by that notification is never rejected as pre-init.
+                child.allow_upstream = True
                 if not child.write(json_dumps_bytes({"jsonrpc": "2.0", "method": "notifications/initialized"})):
                     log_err(f"warm-up notifications/initialized write failed for {self.server_id}")
                     return
-                child.allow_upstream = True
 
                 # Phase 2: discovery queries while main reader thread stays free to route client replies.
                 caps = init_result.get("capabilities")
@@ -1079,6 +1246,11 @@ class LazyProxy:
                         continue
                     resp = self._internal_request(child, method, {}, min(self.start_timeout, 30.0))
                     if resp and isinstance(resp.get("result"), dict) and not resp["result"].get("nextCursor"):
+                        try:
+                            canonical_digest(resp["result"])
+                        except (TypeError, ValueError):
+                            log_err(f"warm-up {method} result not strictly serializable; skipping cache")
+                            continue
                         payload[field] = resp["result"]
 
                 sanitized = self.cache.sanitize_payload(payload)
@@ -1087,12 +1259,17 @@ class LazyProxy:
                         self.cache_data = sanitized
                     self.cache.save(sanitized)
             finally:
-                # Reap warm-up child cleanly so cold starts do not leave an idle server resident.
                 self._retire_child(child, polite=True)
 
     # --- Child lifecycle & discovery refresh ---
 
     def _spawn_child_raw(self) -> Optional[ChildProcess]:
+        with self.cond:
+            if self.stopping:
+                return None
+            self.spawning_count += 1
+
+        child: Optional[ChildProcess] = None
         try:
             child_cwd = resolve_child_cwd()
             child_env = build_child_env()
@@ -1106,11 +1283,41 @@ class LazyProxy:
                 max_frame_bytes=self.max_frame_bytes,
                 write_timeout=self.write_timeout,
             )
+            self._after_child_popen(child)
         except OSError as e:
             log_err(f"failed to spawn child {self.child_argv[0]!r}: {e}")
+            with self.cond:
+                self.spawning_count -= 1
+                self.cond.notify_all()
             return None
-        with self.lock:
-            self.child = child
+        except BaseException:
+            if child is not None:
+                child.force_kill_pg()
+            with self.cond:
+                self.spawning_count -= 1
+                self.cond.notify_all()
+            raise
+
+        # Atomically recheck self.stopping at publication under the lifecycle lock.
+        stop_won = False
+        with self.cond:
+            self.spawning_count -= 1
+            if self.stopping:
+                stop_won = True
+                child.reaped = True
+                self.tearing_down.add(child)
+            else:
+                self.child = child
+            self.cond.notify_all()
+
+        if stop_won:
+            try:
+                child.terminate(polite=False)
+            finally:
+                with self.cond:
+                    self.tearing_down.discard(child)
+                    self.cond.notify_all()
+            return None
         return child
 
     def _retire_child(self, child: ChildProcess, *, polite: bool = False) -> None:
@@ -1200,16 +1407,17 @@ class LazyProxy:
                         f"mcp-lazy: server protocol version changed ({prior_proto} -> {live_proto}); reconnect required"
                     )
 
+            # Open upstream gate BEFORE writing `notifications/initialized` so an immediate
+            # server-to-client request triggered by that notification is accepted.
+            child.allow_upstream = True
             if not child.write(json_dumps_bytes({"jsonrpc": "2.0", "method": "notifications/initialized"})):
                 self._retire_child(child, polite=False)
                 return None
-            child.allow_upstream = True
 
             if self.log_level_params is not None:
                 self._internal_request(child, "logging/setLevel", self.log_level_params, 15.0)
 
             # Refresh discovery before forwarding the triggering request.
-            # Main reader thread is free to deliver any client replies (e.g. roots/list) to `child`.
             if not self._refresh_discovery(child, init_result):
                 log_err(f"discovery refresh failed for {self.server_id}; retiring child")
                 self._retire_child(child, polite=False)
@@ -1220,7 +1428,8 @@ class LazyProxy:
                 return None
 
             with self.lock:
-                if self.child is not child:
+                if self.child is not child or self.stopping:
+                    self._retire_child(child, polite=False)
                     return None
                 child.ready = True
                 self.last_activity = time.monotonic()
@@ -1248,7 +1457,6 @@ class LazyProxy:
             supported = (cap_key in caps_dict) or (method == "tools/list" and not caps_dict)
 
             if not supported:
-                # Capability disappeared: drop stale cached entry and invalidate client.
                 if field in updated:
                     del updated[field]
                     cache_dirty = True
@@ -1260,13 +1468,14 @@ class LazyProxy:
 
             resp = self._internal_request(child, method, {}, min(self.start_timeout, 30.0))
             if resp is None:
-                # Timeout or child crash during discovery: fail startup cleanly.
+                return False
+
+            if "error" in resp and resp["error"].get("code") == -32603 and "non-finite" in str(resp["error"].get("message", "")):
+                # Malformed/non-finite JSON in discovery response: fail startup cleanly so child retires.
                 return False
 
             result = resp.get("result")
             if not isinstance(result, dict) or result.get("nextCursor"):
-                # List became paginated or returned an error: cannot cache a complete list.
-                # Drop any stale cached entry and notify client to invalidate.
                 if field in updated:
                     del updated[field]
                     cache_dirty = True
@@ -1276,10 +1485,18 @@ class LazyProxy:
                     changed_notifications.append(notif_method)
                 continue
 
-            fresh_digest = canonical_digest(result)
+            try:
+                fresh_digest = canonical_digest(result)
+            except (TypeError, ValueError):
+                log_err(f"discovery {method} returned non-serializable data")
+                return False
+
             old_digest = old_served.get(method)
             if old_digest is None and isinstance(old_cache.get(field), dict):
-                old_digest = canonical_digest(old_cache[field])
+                try:
+                    old_digest = canonical_digest(old_cache[field])
+                except (TypeError, ValueError):
+                    old_digest = None
             if old_digest is not None and old_digest != fresh_digest:
                 if notif_method not in changed_notifications:
                     changed_notifications.append(notif_method)
@@ -1348,25 +1565,52 @@ class LazyProxy:
             payload = json_dumps_bytes(msg)
         except (TypeError, ValueError) as e:
             log_err(f"failed serializing client request: {e}")
+            with self.lock:
+                self.queued_requests.discard(key)
+                self.cancelled_requests.discard(key)
             self.send_error(mid, -32603, "mcp-lazy: request serialization failed")
             return
 
         for attempt in range(2):
+            with self.lock:
+                if key in self.cancelled_requests:
+                    self.cancelled_requests.discard(key)
+                    self.queued_requests.discard(key)
+                    return
+
             try:
                 child = self._ensure_child()
             except ProtocolMismatchError as e:
-                self.send_error(mid, -32603, str(e))
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32603, str(e))
                 return
             if child is None:
-                self.send_error(mid, -32603, f"mcp-lazy: failed to start child for {self.server_id}")
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32603, f"mcp-lazy: failed to start child for {self.server_id}")
                 return
 
             with self.lock:
+                # Recheck cancellation atomically right before transitioning queued -> pending & writing!
+                if key in self.cancelled_requests:
+                    self.cancelled_requests.discard(key)
+                    self.queued_requests.discard(key)
+                    self.cond.notify_all()
+                    return
                 if self.child is not child or not child.ready:
                     if attempt == 0:
                         continue
+                    self.queued_requests.discard(key)
                     self.send_error(mid, -32603, f"mcp-lazy: child unavailable for {self.server_id}")
                     return
+                self.queued_requests.discard(key)
                 self.pending_client[key] = (method, mid, record_cache, sub_op, sub_uri)
                 if sub_op == "sub" and sub_uri is not None:
                     self.subscriptions.add(sub_uri)
@@ -1417,10 +1661,37 @@ class LazyProxy:
 
     # --- Child callbacks ---
 
+    def _handle_nonfinite_child_line(self, child: ChildProcess, raw: bytes) -> bool:
+        """Detect if a strict-JSON decode failure was actually a JSON-RPC response containing NaN/Infinity.
+
+        Returns True if handled as a protocol error (internal waiter notified or child retired),
+        False if the line was plain non-JSON noise that should simply be dropped.
+        """
+        try:
+            lenient = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False
+        if not isinstance(lenient, dict) or lenient.get("jsonrpc") != "2.0" or "id" not in lenient:
+            return False
+        mid = lenient.get("id")
+        if lenient.get("method") is None and isinstance(mid, str) and mid in child.internal:
+            ev, box = child.internal[mid]
+            box[0] = {
+                "jsonrpc": "2.0",
+                "id": mid,
+                "error": {"code": -32603, "message": "non-finite JSON constant in server response"},
+            }
+            ev.set()
+            return True
+        self._fail_and_retire_child(child, "child returned invalid non-finite JSON response")
+        return True
+
     def _on_child_message(self, child: ChildProcess, raw: bytes) -> None:
         try:
-            msg = json.loads(raw.decode("utf-8"))
+            msg = json_loads_strict(raw)
         except (UnicodeDecodeError, ValueError):
+            if self._handle_nonfinite_child_line(child, raw):
+                return
             log_err(f"dropping non-JSON stdout line from child {self.server_id}")
             return
         if not is_valid_jsonrpc_message(msg):
@@ -1438,7 +1709,7 @@ class LazyProxy:
             ev.set()
             return
 
-        # Gate any child traffic before the client has received its initialize response.
+        # Gate any child traffic before the client has received its initialize response & sent initialized.
         if not child.allow_upstream:
             if method is not None and has_id:
                 child.write(
@@ -1453,7 +1724,15 @@ class LazyProxy:
             log_err(f"dropping pre-initialization child message for {self.server_id}")
             return
 
-        cache_update: Optional[tuple[str, Optional[dict[str, Any]]]] = None
+        # Pre-serialize strictly BEFORE popping pending_client so an unserializable response
+        # can NEVER strand an accepted request without a terminal response or error.
+        try:
+            outbound_payload = json_dumps_bytes(msg)
+        except (TypeError, ValueError):
+            self._fail_and_retire_child(child, "child returned unserializable JSON-RPC message")
+            return
+
+        cache_update: Optional[tuple[str, Optional[dict[str, Any]], Optional[bytes]]] = None
         with self.lock:
             if method is None and has_id:
                 self.last_activity = time.monotonic()
@@ -1467,24 +1746,26 @@ class LazyProxy:
                     if record_cache:
                         res = msg.get("result")
                         if isinstance(res, dict) and not res.get("nextCursor"):
-                            cache_update = (req_method, res)
+                            try:
+                                dig = canonical_digest(res)
+                                cache_update = (req_method, res, dig)
+                            except (TypeError, ValueError):
+                                cache_update = (req_method, None, None)
                         else:
-                            # Paginated or error response: drop stale cache entry for this method.
-                            cache_update = (req_method, None)
+                            cache_update = (req_method, None, None)
                 self.cond.notify_all()
             elif method is not None and has_id:
-                # Server-initiated request awaiting client response: associate with owning child.
                 self.last_activity = time.monotonic()
                 self.pending_server[id_key(mid)] = child
                 self.cond.notify_all()
             # Server-initiated notifications do NOT reset last_activity.
 
         if cache_update is not None:
-            req_method, res_dict = cache_update
+            req_method, res_dict, dig = cache_update
             field = CACHEABLE_METHODS[req_method][0]
             with self.lock:
-                if res_dict is not None:
-                    self.served_digests[req_method] = canonical_digest(res_dict)
+                if res_dict is not None and dig is not None:
+                    self.served_digests[req_method] = dig
                 else:
                     self.served_digests.pop(req_method, None)
                 if self.cache_data is not None:
@@ -1498,7 +1779,7 @@ class LazyProxy:
                         self.cache_data = sanitized
                         self.cache.save(sanitized)
 
-        self.send_client(msg)
+        self._send_client_payload(outbound_payload)
 
     def _on_child_io_error(self, child: ChildProcess, reason: str) -> None:
         self._fail_and_retire_child(child, reason)
@@ -1516,7 +1797,6 @@ class LazyProxy:
                 self.pending_server.pop(k, None)
             self.cond.notify_all()
 
-        # Reap any straggling processes in the dead child's process group.
         child.force_kill_pg()
 
         if not child.reaped:
@@ -1557,8 +1837,6 @@ class LazyProxy:
                 if remaining > 0:
                     self.cond.wait(timeout=remaining)
                     continue
-                # Retain ownership in self.tearing_down before releasing self.cond so shutdown()
-                # cannot exit while this child is mid-teardown.
                 child.reaped = True
                 self.child = None
                 self.tearing_down.add(child)
@@ -1592,11 +1870,11 @@ class LazyProxy:
                     self.tearing_down.discard(active)
                     self.cond.notify_all()
 
-        # Wait for any in-progress teardown (e.g., idle reap racing client EOF) to complete;
-        # force-kill any straggler so shutdown never leaves orphan child processes behind.
-        deadline = time.monotonic() + 3.0
+        # Wait for ALL in-flight spawns (spawning_count) AND all in-progress teardowns (tearing_down)
+        # so EOF/SIGTERM racing either process creation or idle reap can never leave an orphan child.
+        deadline = time.monotonic() + 5.0
         with self.cond:
-            while self.tearing_down:
+            while self.spawning_count > 0 or self.tearing_down:
                 rem = deadline - time.monotonic()
                 if rem <= 0:
                     break
