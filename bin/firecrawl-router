@@ -79,10 +79,21 @@ Environment:
                                "off" (default), "allowlist" (vetted OA repositories), or "pinned"
   FIRECRAWL_ROUTER_OA_VERSIONS "all" (default: published/accepted/submitted) or "peer-reviewed"
   FIRECRAWL_ROUTER_OA_CONTENT_API "off" (default) or "on" (opt-in content.openalex.org cached PDFs)
+  FIRECRAWL_ROUTER_OA_CORE     CORE API v3 OA backup inside OA fallback: "auto" (default: active when
+                               CORE_API_KEY is in sudo-secretspec), "on" (also keyless), or "off"
+  FIRECRAWL_ROUTER_OA_SPRINGER Springer Nature Free OA JATS API inside OA fallback: "auto" (default:
+                               active when SPRINGER_NATURE_API_KEY is in sudo-secretspec), "on", or "off"
   FIRECRAWL_ROUTER_OA_ENROLLED "on" (default) or "off" (rescue enrolled hosts if mit-bridge failed closed)
   FIRECRAWL_ROUTER_OA_SECRETSPEC_BIN / FIRECRAWL_ROUTER_OA_STATE_DIR / FIRECRAWL_ROUTER_OA_MAX_CONCURRENT /
   FIRECRAWL_ROUTER_OA_COOLDOWN_S / FIRECRAWL_ROUTER_OA_CONTACT
                                optional overrides for bin/firecrawl_oa_fallback.py (never from requests)
+  FIRECRAWL_ROUTER_WILEY_TDM   Opt-in MIT-IP Wiley TDM PDF API lane (bin/firecrawl_wiley_tdm.py):
+                               "off" (default), "on", or "auto" (active when WILEY_TDM_TOKEN is in
+                               sudo-secretspec); routes api.wiley.com over loopback SOCKS5 (127.0.0.1:18830)
+  FIRECRAWL_ROUTER_WILEY_ALLOW_CLOUD_LLM "off" (default; blocks cloud LLM extraction on wiley-tdm) or "on"
+  FIRECRAWL_ROUTER_WILEY_SECRETSPEC_BIN / FIRECRAWL_ROUTER_WILEY_SOCKS_HOST / FIRECRAWL_ROUTER_WILEY_SOCKS_PORT /
+  FIRECRAWL_ROUTER_WILEY_MIN_SPACING_S / FIRECRAWL_ROUTER_WILEY_MAX_PER_10MIN / FIRECRAWL_ROUTER_WILEY_STATE_DIR
+                               optional overrides for bin/firecrawl_wiley_tdm.py (never from requests)
 
 The base URLs above (SELFHOST, FALLBACK, SIPB, LITELLM) must each be https:// or loopback http
 (127.0.0.1, localhost, ::1) with a plain host[:port] (no userinfo), checked at startup; no variable lifts that.
@@ -156,8 +167,13 @@ def _load_oa_fallback_module():
     return _load_sibling_module("firecrawl_oa_fallback", "firecrawl_oa_fallback.py")
 
 
+def _load_wiley_tdm_module():
+    return _load_sibling_module("firecrawl_wiley_tdm", "firecrawl_wiley_tdm.py")
+
+
 _MIT_BRIDGE_MOD = _load_mit_bridge_module()
 _OA_FALLBACK_MOD = _load_oa_fallback_module()
+_WILEY_TDM_MOD = _load_wiley_tdm_module()
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 ABS_API_LINK_RE = re.compile(r"^https?://[^/]+(/v\d+/.*)$")
@@ -597,7 +613,8 @@ def build_extractor(env) -> Extractor | None:
 class Router:
     def __init__(self, primary: Backend, fallback: Backend | None, timeout: float,
                  token: str = "", log=sys.stderr, extractor: Extractor | None = None,
-                 search_timeout: float = 35.0, mit_bridge=None, oa_fallback=None):
+                 search_timeout: float = 35.0, mit_bridge=None, oa_fallback=None,
+                 wiley_tdm=None):
         self.extractor = extractor
         if extractor:
             extractor.log = log
@@ -611,8 +628,13 @@ class Router:
         if oa_fallback is not None:
             oa_fallback.log = log
             oa_fallback._reply_cls = Reply
-            if getattr(oa_fallback, "client", None) is not None:
-                oa_fallback.client.log = log
+            for sub in ("client", "core_client", "springer_client"):
+                if getattr(oa_fallback, sub, None) is not None:
+                    getattr(oa_fallback, sub).log = log
+        self.wiley_tdm = wiley_tdm
+        if wiley_tdm is not None:
+            wiley_tdm.log = log
+            wiley_tdm._reply_cls = Reply
         self.timeout = timeout
         self.search_timeout = search_timeout
         self.token = token
@@ -694,6 +716,17 @@ class Router:
             return reply, backend
         if reply.status != 200 or not isinstance(md, str) or not md.strip():
             return reply, backend
+        if backend == "wiley-tdm" and not (self.wiley_tdm and self.wiley_tdm.allow_cloud_llm):
+            data["warning"] = (
+                (data.get("warning") or "")
+                + " External LLM extraction (query/json) is disabled for wiley-tdm by policy "
+                + "(set FIRECRAWL_ROUTER_WILEY_ALLOW_CLOUD_LLM=on only if permitted by your Wiley TDM agreement)."
+            ).strip()
+            reply.body = json.dumps(out).encode()
+            reply.headers = {k: v for k, v in reply.headers.items() if k.lower() != "content-length"}
+            reply.headers["X-Firecrawl-LLM"] = "blocked-policy"
+            self._log(method, path, backend, reply, t0, "llm: blocked-policy (wiley-tdm)")
+            return reply, backend
         fields, used, warning = self.extractor.run(wants, md)
         data.update(fields)
         if warning:
@@ -762,6 +795,27 @@ class Router:
                 first = Reply(first.status, {**first.headers, "X-Firecrawl-OA-Fallback": f"skipped:{oa_note}"},
                               first.body, first.error)
                 oa_log_note = f"oa-fallback skipped:{oa_note}"
+        wiley_log_note = ""
+        if self.wiley_tdm is not None and self.wiley_tdm.enabled:
+            w_reply, w_backend, w_note = self.wiley_tdm.maybe_fetch(
+                method, path, body, first, reason, Reply
+            )
+            if w_reply is not None and w_backend:
+                notes = []
+                if was_enrolled and b_note and b_note != "primary-ok":
+                    notes.append(f"mit-bridge skipped:{b_note}")
+                elif bridge_log_note:
+                    notes.append(bridge_log_note)
+                if oa_log_note:
+                    notes.append(oa_log_note)
+                if w_note:
+                    notes.append(w_note)
+                self._log(method, path, w_backend, w_reply, t0, "; ".join(notes))
+                return w_reply, w_backend
+            if w_note:
+                first = Reply(first.status, {**first.headers, "X-Firecrawl-Wiley-TDM": f"skipped:{w_note}"},
+                              first.body, first.error)
+                wiley_log_note = f"wiley-tdm skipped:{w_note}"
         if was_enrolled:
             notes = []
             if b_note and b_note != "primary-ok":
@@ -770,9 +824,11 @@ class Router:
                 notes.append(f"{reason}; enrolled")
             if oa_log_note:
                 notes.append(oa_log_note)
+            if wiley_log_note:
+                notes.append(wiley_log_note)
             self._log(method, path, "primary", first, t0, "; ".join(notes))
             return self.rewrite(first, "primary"), "primary"
-        extra_notes = [n for n in (bridge_log_note, oa_log_note) if n]
+        extra_notes = [n for n in (bridge_log_note, oa_log_note, wiley_log_note) if n]
         if not reason or not self.fallback:
             note = reason and f"{reason}; no fallback"
             if extra_notes:
@@ -882,9 +938,17 @@ def build_router(env, token: str) -> Router:
         if oa_mode in ("allowlist", "pinned"):
             print("firecrawl-router: FIRECRAWL_ROUTER_OA_FALLBACK enabled but firecrawl_oa_fallback.py is missing; failing closed",
                   file=sys.stderr, flush=True)
+    wiley_mode = (env.get("FIRECRAWL_ROUTER_WILEY_TDM") or "off").strip().lower()
+    if _WILEY_TDM_MOD is not None:
+        wiley_tdm = _WILEY_TDM_MOD.build_wiley_tdm(env)
+    else:
+        wiley_tdm = None
+        if wiley_mode in ("on", "auto"):
+            print("firecrawl-router: FIRECRAWL_ROUTER_WILEY_TDM enabled but firecrawl_wiley_tdm.py is missing; failing closed",
+                  file=sys.stderr, flush=True)
     return Router(primary, fallback, float(env.get("FIRECRAWL_ROUTER_TIMEOUT") or 120), token,
                   extractor=build_extractor(env), search_timeout=search_timeout,
-                  mit_bridge=mit_bridge, oa_fallback=oa_fallback)
+                  mit_bridge=mit_bridge, oa_fallback=oa_fallback, wiley_tdm=wiley_tdm)
 
 
 def serve(router: Router, listen: str, require_loopback: bool = False) -> http.server.ThreadingHTTPServer:
@@ -946,6 +1010,12 @@ def main(argv=None) -> int:
         "FIRECRAWL_ROUTER_LITELLM_KEY",
         "OPENALEX_API_KEY",
         "FIRECRAWL_ROUTER_OPENALEX_KEY",
+        "CORE_API_KEY",
+        "FIRECRAWL_ROUTER_CORE_KEY",
+        "SPRINGER_NATURE_API_KEY",
+        "FIRECRAWL_ROUTER_SPRINGER_KEY",
+        "WILEY_TDM_TOKEN",
+        "FIRECRAWL_ROUTER_WILEY_TDM_TOKEN",
     )
     env = {k: v for k, v in os.environ.items() if k not in hidden}
     env["FIRECRAWL_API_URL"] = router.public_base
