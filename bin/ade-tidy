@@ -461,20 +461,28 @@ def idle_paid_work_check(
     log: str | None,
     logstate: str,
     retask_log: bool,
+    receipt: bool = False,
 ) -> tuple[bool, str, str]:
     """Verify an own-chain idle/closed worker has no unreported or unacked paid work (~/CLAUDE.md item 9).
 
-    Returns `(safe, code, detail)`. Fails closed on missing/unverified slice reports, `STATUS: working`,
-    `BLOCKED:`, `NO-REPORT:`, missing `.done`, missing `.done.ack` (unless `--handled`), re-tasks after completion,
-    unanswered inbound messages, pending cards, or unreadable logs without a verified done+acked report.
+    Returns `(safe, code, detail)`. Fails closed on unreadable logs, unanswered inbound messages, pending cards,
+    `STATUS: working` / `BLOCKED:` / `NO-REPORT:` / `Please reply: ack` in the log tail, missing/unverified slice
+    reports, missing `.done`, missing `.done.ack` (unless `--handled`), re-tasks or post-completion activity past
+    `ACTIVITY_MARGIN`, and `closed` ad-hoc workers (unless `--handled`).
     """
     if logstate == "inbound":
         return False, "unanswered-inbound", "last log entry is an inbound message not yet answered"
+    if logstate == "unreadable":
+        return False, "log-unreadable", "log is unreadable (fail closed)"
     text, card, _ = last_text(log)
     if card:
         return False, "waiting-on-operator", "question or permission card in log tail"
     if re.search(r"(^|\n)\s*BLOCKED:", text):
         return False, "waiting-on-lead", "BLOCKED line in log tail"
+    if re.search(r"(^|\n)\s*NO-REPORT:", text):
+        return False, "unreported-work", "NO-REPORT line in log tail"
+    if re.search(r"(^|\n)\s*STATUS:\s*working\b", text):
+        return False, "unreported-work", "log tail shows STATUS: working"
     if re.search(r"Please reply:\s*ack", text):
         return False, "waiting-on-lead", "asks for ack in log tail"
     labels = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else (row.get("labels") or {})
@@ -499,19 +507,22 @@ def idle_paid_work_check(
         if not acked and row["id"] not in handled:
             return False, "unacked-work", f"report {rep.name} completion not acked (missing .done.ack and not in --handled)"
         done_m = mtime(Path(f"{rep}.done"))
+        ack_m = mtime(Path(f"{rep}.done.ack"))
         done_ev = max(filter(None, (mtime(rep), done_m)), default=None)
+        act_base = max(done_ev, ack_m) if receipt and ack_m and done_ev else done_ev
         rename_m = max((mtime(q) or 0.0 for q in rep.parent.glob(rep.name + ".done.r*")), default=None)
         if (
             retask_log
+            or done_ev is None
+            or act_base is None
             or (rename_m is not None and (done_m is None or done_m <= rename_m))
-            or (done_ev is not None and last_user_message(row["id"]) > done_ev + 2)
+            or last_user_message(row["id"]) > done_ev + 2
+            or last_activity(row["id"]) > act_base + ACTIVITY_MARGIN
         ):
-            return False, "retasked-unreported", f"worker re-tasked after {rep.name} without new .done/.done.ack"
+            return False, "retasked-unreported", f"worker re-tasked or active after {rep.name} without new .done/.done.ack"
         return True, "verified-done-idle", f"report {rep.name} DONE + .done + acked"
-    if logstate == "unreadable":
-        return False, "log-unreadable", "no slice report and log is unreadable (fail closed)"
-    if re.search(r"(^|\n)\s*STATUS:\s*working\b", text):
-        return False, "unreported-work", "log tail shows STATUS: working"
+    if row.get("status") == "closed" and row["id"] not in handled:
+        return False, "closed-unverified", "closed ad-hoc worker without verified report (resume or pass --handled)"
     return True, "idle-no-unreported-work", "ad-hoc own-worker, readable log, no pending work"
 
 
@@ -1263,8 +1274,8 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
                     continue
                 log = log_tail(aid)
                 _, _, lstate = last_text(log)
-                retask_log, _ = scan_log(log)
-                safe, pw_code, pw_detail = idle_paid_work_check(r, st_rec, opts.reports_dir or [], handled_set, log, lstate, retask_log)
+                retask_log, receipt = scan_log(log)
+                safe, pw_code, pw_detail = idle_paid_work_check(r, st_rec, opts.reports_dir or [], handled_set, log, lstate, retask_log, receipt)
                 if not safe:
                     p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": pw_code, "detail": pw_detail})
                     continue
@@ -1527,7 +1538,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         verdict(fresh_meta, text, card, None, (opts.reports_dir if opts else None) or [], handled_set, lstate, retask_log, receipt)
         if fresh_meta["verdict"] in ("waiting-on-lead", "waiting-on-operator"):
             return rec("idle-hibernate", aid, False, f"now {fresh_meta['verdict']}: skipped")
-        safe, pw_code, pw_detail = idle_paid_work_check(fresh_meta, stt, (opts.reports_dir if opts else None) or [], handled_set, log, lstate, retask_log)
+        safe, pw_code, pw_detail = idle_paid_work_check(fresh_meta, stt, (opts.reports_dir if opts else None) or [], handled_set, log, lstate, retask_log, receipt)
         if not safe:
             return rec("idle-hibernate", aid, False, f"paid-work guard ({pw_code}): {clean(pw_detail, 90)}")
         rc, out, err = paseo(["agent", "archive", aid])  # no --force: a running agent is never interrupted

@@ -124,14 +124,14 @@ Every guard is evaluated during planning and **re-verified live** right before e
    - `ade.role` or `ade.kind` label containing `watch` (case-insensitive), or truthy `ade.watcher` label.
    - Title matching `\b(load[- ]?watch(?:er)?|watcher|watch[- ]?load)\b`.
 4. **Never unreported or unacked paid work (`~/CLAUDE.md` item 9):**
-   - Any agent with `verdict == "waiting-on-lead"` (`BLOCKED:`, trailing `?`, `Please reply: ack`, or unacked completion) or an unanswered inbound message (`logstate == "inbound"`) is excluded.
+   - All workers (both sliced and ad-hoc) fail closed when `paseo logs` is unreadable/empty (`logstate == "unreadable"`), when an inbound message is unanswered (`logstate == "inbound"`), when `verdict == "waiting-on-lead"` (`BLOCKED:`, trailing `?`, `Please reply: ack`, or unacked completion), or when the log tail contains `STATUS: working`, `BLOCKED:`, `NO-REPORT:`, or `Please reply: ack`.
    - Any own-chain worker with a `slice` label **must** have a verifiable regular report file (`unit-<slice>.md`, `<slice>-report.md`, or `<slice>-N-report.md`) in `--reports-dir` that:
      - does **not** contain `STATUS: working`, `BLOCKED:`, or `NO-REPORT:`,
      - ends in `DONE` with a current `<report>.done` marker,
      - is acked via `<report>.done.ack` (or `--handled`), and
-     - has not been re-tasked after completion (`scan_log`, `.done.r*`, or `lastUserMessageAt`).
+     - has not been re-tasked or active after completion (`scan_log`, `.done.r*`, `lastUserMessageAt`, and `lastActivityAt <= act_base + ACTIVITY_MARGIN`, where `act_base` incorporates `.done.ack` only when the completion notice and ack receipt appear in the log tail).
    - Missing slice reports fail closed (`missing-report`).
-   - Ad-hoc own-chain workers without a `slice` label require a readable log (`logstate == "ok"`) with no `STATUS: working`, `BLOCKED:`, `?`, or `Please reply: ack`.
+   - Ad-hoc own-chain workers without a `slice` label require `status == "idle"` (a `closed` ad-hoc worker without a verified report is rejected as `closed-unverified` unless explicitly passed via `--handled`) and a readable log (`logstate == "ok"`) with no `STATUS: working`, `BLOCKED:`, `NO-REPORT:`, `?`, or `Please reply: ack`.
    - `ade.placement=main` workers are excluded unless explicitly listed in `--handled`.
 5. **Never active worktree claims or live children:** agents holding an active claim (`bin/ade_claims.py`) or referenced as `paseo.parent-agent-id` by any unarchived child (which Paseo's archive would cascade to) are excluded; unreadable claim or agent records fail closed.
 6. **Never operator-owned sessions or other leads' workers:** `operator`, `other-worker`, and `lead` sessions idle past `--idle-hours` are listed strictly under `idle_operator_candidates` (Section `I#o`) as operator-call items and are **never** archived by `--apply`.

@@ -1315,9 +1315,12 @@ class NoPathIdleEnv:
         self.lw_dir = tmp_path / "load-watch"
         self.reports.mkdir()
         self.lw_dir.mkdir()
-        self.data = {"agents": [], "workspaces": [], "logs": {}, "permits": [], "terminals": {}, "ps": []}
+        self.data = {"agents": [], "workspaces": [], "logs": {}, "logs_fail": [], "permits": [], "terminals": {}, "ps": []}
         self.paseo_stub = tmp_path / "fake-paseo"
-        self.paseo_stub.write_text(STUB)
+        self.paseo_stub.write_text(STUB.replace(
+            'elif a[0] == "logs":\n',
+            'elif a[0] == "logs":\n    if a[1] in d.get("logs_fail", []):\n        sys.exit(1)\n',
+        ))
         self.paseo_stub.chmod(0o755)
         self.ps_stub = tmp_path / "fake-ps"
         self.ps_stub.write_text(IDLE_PS_STUB)
@@ -1540,3 +1543,137 @@ def test_idle_hours_apply_rechecks_live_status_before_archiving(tmp_path: Path, 
     assert r.returncode == 0, r.stderr
     assert e.archived_agents() == set()
     assert f"SKIP idle-hibernate {w}" in r.stdout
+
+
+def test_idle_hours_activity_long_after_ack_blocks_archive(tmp_path: Path, monkeypatch) -> None:
+    """F1 (Codex 4680095552): a sliced worker active well past its old .done/.done.ack (scrolled past log tail)
+    must be blocked as retasked-unreported unless receipt proves the ack explains that activity."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    # Re-tasked worker: report/.done/.done.ack are 10h old, lastActivityAt is 5h old (> ACTIVITY_MARGIN)
+    retasked = e.agent("50000001-0000-0000-0000-000000000000", W_WORK, "worker retasked", status="idle",
+                       labels={"ade.lead": LEAD, "slice": "sretask"}, hours_ago=5.0)
+    r1 = e.reports / "sretask-report.md"
+    r1.write_text("round 1\nDONE\n")
+    Path(f"{r1}.done").write_text("")
+    Path(f"{r1}.done.ack").write_text("")
+    t10 = time.time() - 10 * 3600
+    for q in (r1, Path(f"{r1}.done"), Path(f"{r1}.done.ack")):
+        os.utime(q, (t10, t10))
+
+    # Ack-timestamp without receipt in log: .done is 6h old, .done.ack is 5h old, activity is 5h old, no receipt -> blocked
+    no_receipt = e.agent("50000002-0000-0000-0000-000000000000", W_WORK, "worker noreceipt", status="idle",
+                         labels={"ade.lead": LEAD, "slice": "snorec"}, hours_ago=5.0)
+    r2 = e.reports / "snorec-report.md"
+    r2.write_text("round 1\nDONE\n")
+    Path(f"{r2}.done").write_text("")
+    Path(f"{r2}.done.ack").write_text("")
+    t6, t5 = time.time() - 6 * 3600, time.time() - 5 * 3600
+    os.utime(r2, (t6, t6))
+    os.utime(Path(f"{r2}.done"), (t6, t6))
+    os.utime(Path(f"{r2}.done.ack"), (t5, t5))
+
+    # Ack-timestamp WITH receipt in log: .done is 6h old, .done.ack is 5h old, activity is 5h old, receipt present -> allowed
+    with_receipt = e.agent(
+        "50000003-0000-0000-0000-000000000000", W_WORK, "worker receipt", status="idle",
+        labels={"ade.lead": LEAD, "slice": "srec"}, hours_ago=5.0,
+        tags=[
+            "[Shell] bin/completion-notice --send --requester " + LEAD + " --title x --status done",
+            "[Message received]",
+        ],
+        text="ack 50000003-0000-0000-0000-000000000000 msg-1",
+    )
+    r3 = e.reports / "srec-report.md"
+    r3.write_text("round 1\nDONE\n")
+    Path(f"{r3}.done").write_text("")
+    Path(f"{r3}.done.ack").write_text("")
+    os.utime(r3, (t6, t6))
+    os.utime(Path(f"{r3}.done"), (t6, t6))
+    os.utime(Path(f"{r3}.done.ack"), (t5, t5))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[retasked] == "retasked-unreported"
+    assert skipped[no_receipt] == "retasked-unreported"
+    assert {x["agent"] for x in p["idle_hibernate"]} == {with_receipt}
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == {with_receipt}
+
+
+def test_idle_hours_closed_adhoc_worker_blocked_unless_handled(tmp_path: Path, monkeypatch) -> None:
+    """F2: a closed ad-hoc own-worker (e.g., interrupted by daemon restart) must not be archived unless --handled."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    closed_adhoc = e.agent("60000001-0000-0000-0000-000000000000", W_WORK, "interrupted adhoc", status="closed",
+                           labels={"ade.lead": LEAD}, hours_ago=6.0)
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    assert {x["agent"]: x["reason"] for x in p["idle_skipped"]}[closed_adhoc] == "closed-unverified"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
+
+    # Explicitly marked --handled allows archiving it
+    r_handled = e.run("--idle-hours", "4", "--handled", closed_adhoc, apply=True, as_json=False)
+    assert r_handled.returncode == 0, r_handled.stderr
+    assert e.archived_agents() == {closed_adhoc}
+
+
+def test_idle_hours_no_report_and_status_working_in_log_tail_blocked(tmp_path: Path, monkeypatch) -> None:
+    """F3 (Codex 4680095577): NO-REPORT: and STATUS: working in the log tail block both ad-hoc and sliced workers."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    adhoc_nr = e.agent("70000001-0000-0000-0000-000000000000", W_WORK, "adhoc no-report", status="idle",
+                       labels={"ade.lead": LEAD}, hours_ago=6.0, text="NO-REPORT: missing credentials")
+    sliced_sw = e.agent("70000002-0000-0000-0000-000000000000", W_WORK, "sliced status working", status="idle",
+                        labels={"ade.lead": LEAD, "slice": "ssw"}, hours_ago=6.0, text="STATUS: working on follow-up")
+    sliced_nr = e.agent("70000003-0000-0000-0000-000000000000", W_WORK, "sliced no-report", status="idle",
+                        labels={"ade.lead": LEAD, "slice": "snr"}, hours_ago=6.0, text="NO-REPORT: could not complete")
+    t6 = time.time() - 6 * 3600
+    for sname in ("ssw", "snr"):
+        rp = e.reports / f"{sname}-report.md"
+        rp.write_text("prior round\nDONE\n")
+        Path(f"{rp}.done").write_text("")
+        Path(f"{rp}.done.ack").write_text("")
+        for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+            os.utime(q, (t6, t6))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[adhoc_nr] == "unreported-work"
+    assert skipped[sliced_sw] == "unreported-work"
+    assert skipped[sliced_nr] == "unreported-work"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
+
+
+def test_idle_hours_unreadable_or_failed_logs_blocks_sliced_worker(tmp_path: Path, monkeypatch) -> None:
+    """F4: a sliced worker fails closed as log-unreadable when `paseo logs` fails or returns an empty/unreadable log."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    log_fail = e.agent("80000001-0000-0000-0000-000000000000", W_WORK, "sliced log fail", status="idle",
+                       labels={"ade.lead": LEAD, "slice": "slf"}, hours_ago=6.0)
+    log_empty = e.agent("80000002-0000-0000-0000-000000000000", W_WORK, "sliced log empty", status="closed",
+                        labels={"ade.lead": LEAD, "slice": "sle"}, hours_ago=6.0)
+    e.data["logs_fail"] = [log_fail]
+    e.data["logs"][log_empty] = "No activity to display."
+    t6 = time.time() - 6 * 3600
+    for sname in ("slf", "sle"):
+        rp = e.reports / f"{sname}-report.md"
+        rp.write_text("done\nDONE\n")
+        Path(f"{rp}.done").write_text("")
+        Path(f"{rp}.done.ack").write_text("")
+        for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+            os.utime(q, (t6, t6))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[log_fail] == "log-unreadable"
+    assert skipped[log_empty] == "log-unreadable"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
