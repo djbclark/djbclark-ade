@@ -131,6 +131,8 @@ def supervised(tool: str, name: str, budget_s: float, heartbeat_s: float, script
     shutil.rmtree(mark_dir, ignore_errors=True)
     if got and not started:   # cancelled before the wait began: the caller asked it to stop, so it must not wait in this process
         return 128 + got[0]
+    if rc == 124:   # stopped by the enforcer, even if expiry landed before the inner copy touched `mark`: never fall back unregistered
+        return 124
     if not started:   # `deadline run` ended without ever starting the wait: nothing waited, so wait here
         warn(tool, f"the deadline tool did not run the wait (exit {rc}): waiting without a deadline")
         return None

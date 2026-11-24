@@ -77,6 +77,9 @@ class World:
     def records(self) -> list[str]:
         return sorted(p.name for p in self.state.glob("*.json")) if self.state.exists() else []
 
+    def started_marks(self) -> int:
+        return sum(1 for d in self.tmpd.iterdir() if (d / "started").exists())
+
     def sweep(self, now: float) -> subprocess.CompletedProcess:
         return subprocess.run([sys.executable, str(DEADLINE), "sweep", "--no-agents"], capture_output=True, text=True, timeout=60,
                               env={**self.env, "DEADLINE_NOW": str(now)})
@@ -146,6 +149,7 @@ def test_sigterm_deregisters_and_stops_the_waiter(world):
 def test_expiry_kills_the_waiters_own_group_with_its_own_exit_code(world):
     p, name = world.start(secs=LONG)
     rec = wait_until(lambda: world.live(name))
+    wait_until(lambda: world.started_marks() == 1)
     # a sweep skips a record another enforcer holds the lock of (the run loop, a beat): like the real 60 s sweep, simply sweep again
     for _ in range(40):
         r = world.sweep(rec["started"] + rec["budget_s"] + 5)
@@ -153,11 +157,26 @@ def test_expiry_kills_the_waiters_own_group_with_its_own_exit_code(world):
         if world.record(name)["state"] != "running":
             break
         time.sleep(0.25)
+    assert world.record(name)["state"] != "running", "sweep never acquired the record lock to expire it"
     out, err = p.communicate(timeout=90)
     assert p.returncode == NATURAL_RC, (out, err)   # admit answers 75: its callers fail OPEN on an unknown exit
     assert world.record(name)["state"] == "expired", "the DEADLINE stopped it, not the wait's own end"
     assert "deadline expired" in err
     wait_until(lambda: group_gone(rec["pgid"]), timeout=15)
+
+
+def test_expiry_before_start_mark_still_honors_deadline(world):
+    """If the enforcer expires `deadline run` (exit 124) before the inner copy touches its start mark,
+    the supervisor must honor exit 124 rather than falling back to an unregistered wait."""
+    early_expire = world.tmp / "early-expire-deadline"
+    early_expire.write_text("#!/bin/sh\nexit 124\n")
+    early_expire.chmod(0o755)
+    p, _ = world.start(secs=LONG, DEADLINE_BIN=str(early_expire))
+    out, err = p.communicate(timeout=30)
+    assert p.returncode == NATURAL_RC, (out, err)
+    assert "deadline expired" in err
+    assert "waiting without a deadline" not in err
+    assert list(world.tmpd.iterdir()) == []
 
 
 def test_no_deadline_flag_registers_nothing(world):
