@@ -384,3 +384,38 @@ def test_deadline_name_keeps_attempt_under_long_id() -> None:
     # digest still present
     digest = __import__("hashlib").sha256(long_id.encode()).hexdigest()[:12]
     assert digest in name
+
+
+def test_bg_bin_stage0_dual_read_and_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Queue #123: bg_bin() dual-reads ~/.local/bin/bgrun, active tendcf pair, and legacy ~/ops without PATH rewrites."""
+    home = tmp_path / "home"
+    troot = home / "tendcf-ops"
+    (troot / "tendcf-private-acme").mkdir(parents=True)
+    pub_bgrun = troot / "tendcf-public-acme" / "bin" / "bgrun"
+    pub_bgrun.parent.mkdir(parents=True)
+    pub_bgrun.write_text("#!/bin/sh\nexit 0\n")
+    pub_bgrun.chmod(0o755)
+    legacy = home / "ops" / "site-private-djbclark" / "bin" / "bgrun"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/bin/sh\nexit 0\n")
+    legacy.chmod(0o755)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("VERIFYCMD_BG", raising=False)
+    monkeypatch.delenv("VERIFYCMD_NO_BG", raising=False)
+    monkeypatch.delenv("TENDCF_SITE", raising=False)
+    monkeypatch.delenv("TENDCF_OPS_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-xdg"))
+
+    # Without a site selector, sole tendcf-ops site is NOT globbed -> legacy ~/ops wins.
+    assert vc.bg_bin() == str(legacy)
+
+    # With TENDCF_SITE=acme, tendcf-public-acme/bin/bgrun wins.
+    monkeypatch.setenv("TENDCF_SITE", "acme")
+    assert vc.bg_bin() == str(pub_bgrun.resolve())
+
+    # ~/.local/bin/bgrun takes top precedence.
+    local_bgrun = home / ".local" / "bin" / "bgrun"
+    local_bgrun.parent.mkdir(parents=True)
+    local_bgrun.symlink_to(pub_bgrun)
+    assert vc.bg_bin() == str(local_bgrun)

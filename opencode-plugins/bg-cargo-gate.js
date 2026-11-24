@@ -1,6 +1,7 @@
 // 2026-10-28: require bg for Cargo compilation, including release builds.
 // This is an accidental-bypass guard, not a sandbox for arbitrary scripts.
-const reason = "Cargo builds and tests must run through ~/ops/site-private/bin/bgrun (use the full path). --release is not an exemption. If bgrun refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
+import {realpathSync} from "node:fs";
+const reason = "Cargo builds and tests must run through ~/.local/bin/bgrun (or ~/tendcf-ops/tendcf-{public,private}-<slug>/bin/bgrun or legacy ~/ops/site-private/bin/bgrun; use the full path). --release is not an exemption. If bgrun refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
 const compile = new Set(["build", "b", "test", "t", "check", "c", "clippy", "bench", "run", "r", "rustc", "rustdoc", "doc", "d", "install", "fix", "nextest", "miri", "llvm-cov", "package", "publish"]);
 const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bgrun", "bg", "bgb", "timeout", "gtimeout", "sudo", "caffeinate", "xargs"]);
 const valueOptions = new Set(["--manifest-path", "--config", "--color", "--target-dir", "--lockfile-path", "-Z", "-C"]);
@@ -13,8 +14,125 @@ const wrapperValues = {
 };
 const basename = (s) => s.split("/").pop();
 const assignment = (s) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(s);
-const fullBg = (s) => /^(?:~|\$HOME|\$\{HOME\})\/ops\/(?:site-private(?:-djbclark)?|site-(?:public-)?djbclark)\/bin\/bg(?:run)?$/.test(s)
-  || /^\/(?:[^/\s]+\/)*ops\/(?:site-private(?:-djbclark)?|site-(?:public-)?djbclark)\/bin\/bg(?:run)?$/.test(s);
+const SITE_SLUG_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const LEGACY_SITE_RE = /^site-[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const isValidSiteSlug = (slug) => slug.length > 0 && slug.length <= 64 && SITE_SLUG_RE.test(slug) && !slug.endsWith("-wt");
+const isTendcfSiteDir = (name) => {
+  if (name.startsWith("tendcf-public-")) return isValidSiteSlug(name.slice("tendcf-public-".length));
+  if (name.startsWith("tendcf-private-")) return isValidSiteSlug(name.slice("tendcf-private-".length));
+  return false;
+};
+const isLegacySiteDir = (name) => LEGACY_SITE_RE.test(name) && !name.endsWith("-wt");
+const splitAbsParts = (raw) => {
+  if (!raw || typeof raw !== "string" || !raw.startsWith("/") || raw.includes("\0") || raw.includes("//")) return null;
+  const trimmed = raw.replace(/\/+$/, "");
+  if (!trimmed) return null;
+  const parts = trimmed.slice(1).split("/");
+  if (!parts.length || parts.some((p) => p === "" || p === "." || p === "..")) return null;
+  return parts;
+};
+const expandEnvRoot = (raw, homeParts) => {
+  if (!raw || !raw.trim() || raw.includes("\0")) return null;
+  if (raw === "~") return homeParts;
+  if (raw.startsWith("~/")) {
+    const rest = raw.slice(2);
+    if (!homeParts || !rest || rest.startsWith("/")) return null;
+    return splitAbsParts(`/${homeParts.join("/")}/${rest}`);
+  }
+  if (raw.startsWith("~")) return null;
+  return splitAbsParts(raw);
+};
+const hasPrefix = (parts, prefix) => {
+  if (!prefix || parts.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (parts[i] !== prefix[i]) return false;
+  }
+  return true;
+};
+const addRootWithCanonical = (list, parts) => {
+  if (!parts) return;
+  const key = parts.join("/");
+  if (!list.some((p) => p.join("/") === key)) list.push(parts);
+  try {
+    const real = realpathSync(`/${key}`);
+    const realParts = splitAbsParts(real);
+    if (realParts) {
+      const rkey = realParts.join("/");
+      if (!list.some((p) => p.join("/") === rkey)) list.push(realParts);
+    }
+  } catch {
+    // Path may not exist on disk in static/unit-test checks; lexical root remains active.
+  }
+};
+const getConfiguredRoots = () => {
+  const homeRoots = [];
+  const homeParts = splitAbsParts(process?.env?.HOME);
+  addRootWithCanonical(homeRoots, homeParts);
+  const tendcfRoots = [];
+  if (process?.env && Object.prototype.hasOwnProperty.call(process.env, "TENDCF_OPS_ROOT")) {
+    const custom = expandEnvRoot(process.env.TENDCF_OPS_ROOT, homeParts);
+    if (custom) {
+      addRootWithCanonical(tendcfRoots, custom);
+      for (const h of homeRoots) addRootWithCanonical(tendcfRoots, [...h, "tendcf-ops"]);
+    }
+  } else {
+    for (const h of homeRoots) addRootWithCanonical(tendcfRoots, [...h, "tendcf-ops"]);
+  }
+  const legacyRoots = [];
+  if (process?.env?.OPS_ROOT) {
+    const customLegacy = expandEnvRoot(process.env.OPS_ROOT, homeParts);
+    addRootWithCanonical(legacyRoots, customLegacy);
+  }
+  for (const h of homeRoots) addRootWithCanonical(legacyRoots, [...h, "ops"]);
+  return {homeParts, homeRoots, tendcfRoots, legacyRoots};
+};
+const matchesAnchoredOpsRoots = (absParts) => {
+  const {tendcfRoots, legacyRoots} = getConfiguredRoots();
+  for (const root of tendcfRoots) {
+    if (absParts.length === root.length + 3 && hasPrefix(absParts, root)
+        && absParts[root.length + 1] === "bin" && isTendcfSiteDir(absParts[root.length])) {
+      return true;
+    }
+  }
+  for (const root of legacyRoots) {
+    if (absParts.length === root.length + 3 && hasPrefix(absParts, root)
+        && absParts[root.length + 1] === "bin" && isLegacySiteDir(absParts[root.length])) {
+      return true;
+    }
+  }
+  return false;
+};
+const fullBg = (s) => {
+  if (typeof s !== "string" || !s || s.includes("\0") || /\s/.test(s)) return false;
+  let rel = null;
+  for (const prefix of ["~/", "$HOME/", "${HOME}/"]) {
+    if (s.startsWith(prefix)) { rel = s.slice(prefix.length); break; }
+  }
+  if (rel !== null) {
+    if (!rel || rel.startsWith("/")) return false;
+    const parts = rel.split("/");
+    if (parts.some((p) => p === "" || p === "." || p === "..")) return false;
+    const exe = parts[parts.length - 1];
+    if (exe !== "bgrun" && exe !== "bg") return false;
+    if (parts.length === 3 && parts[0] === ".local" && parts[1] === "bin") return true;
+    if (parts.length === 4 && parts[0] === "tendcf-ops" && parts[2] === "bin") return isTendcfSiteDir(parts[1]);
+    if (parts.length === 4 && parts[0] === "ops" && parts[2] === "bin") return isLegacySiteDir(parts[1]);
+    const {homeParts} = getConfiguredRoots();
+    return homeParts ? matchesAnchoredOpsRoots([...homeParts, ...parts]) : false;
+  }
+  const parts = splitAbsParts(s);
+  if (!parts) return false;
+  const exe = parts[parts.length - 1];
+  if (exe !== "bgrun" && exe !== "bg") return false;
+  const {homeRoots} = getConfiguredRoots();
+  for (const h of homeRoots) {
+    if (parts.length === h.length + 3 && hasPrefix(parts, h)
+        && parts[h.length] === ".local" && parts[h.length + 1] === "bin") {
+      return true;
+    }
+  }
+  return matchesAnchoredOpsRoots(parts);
+};
 
 function heredocs(line, state) {
   const result = []; let {quote, arithmetic} = state;
@@ -75,7 +193,7 @@ export function requiresBg(command, depth = 0) {
         args.splice(0, 2); if (args[0] === "--install") args.shift(); args.shift();
         if (args[0] === "--") args.shift(); continue;
       }
-      if (!wrappers.has(name)) break;
+      if (!wrappers.has(name) && !/^bgrun/.test(name)) break;
       if (["bgrun", "bg"].includes(name) && fullBg(args[0])) { args.length = 0; break; }
       args.shift();
       if (name === "command" && ["-v", "-V"].includes(args[0])) { args.length = 0; break; }

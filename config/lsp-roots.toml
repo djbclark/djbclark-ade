@@ -2,7 +2,7 @@
 # A language server whose workspace root is one of these (realpath, `~` expanded) is started with no root, so it
 # serves the files the client opens and indexes nothing. ADE_LSP_CONTAINER_ROOTS (colon list) and --container add more.
 [containers]
-paths = ["~", "~/src", "~/s", "~/s/*", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
+paths = ["~", "~/src", "~/s", "~/s/*", "~/ops", "~/tendcf-ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/", "/Users",
          "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp", "/private",
          "/private/tmp", "/var", "/private/var", "/Library", "/home", "/nix", "/mnt", "/srv", "/Network", "/media", "/root"]
 # Also a container without being listed: a non-project directory directly under / or above $HOME, and one that is not

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Maintain the durable handoff log for a session, spanning every workspace
-it touches (e.g. a worktree task and the matching ~/ops deploy checkout at
+it touches (e.g. a worktree task and the matching ~/tendcf-ops or ~/ops deploy checkout at
 once).
 
 The canonical log lives at ``<state-root>/chains/<chain-key>/SESSION_LOG.md``

@@ -103,6 +103,18 @@ from urllib.parse import unquote
 
 DEFAULT_STORE = "~/ops/site-private/memory"
 DEFAULT_CONFIG = "~/.basic-memory/config.json"
+
+
+def default_store(env=None):
+    """Stage 0 dual-read default store: active tendcf-private-<slug>/memory if present, else ~/ops/site-private/memory."""
+    bin_dir = os.path.dirname(os.path.realpath(__file__))
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    try:
+        import ade_ops_paths  # noqa: PLC0415
+        return str(ade_ops_paths.resolve_default_bm_store(env))
+    except Exception:
+        return DEFAULT_STORE
 READ_FLOOR = 1 << 20  # read at most max(--max-bytes, this) bytes of one note
 SKIP_LIST_CAP = 50
 
@@ -653,8 +665,10 @@ def build_parser():
                "some were skipped). A note that cannot be parsed is listed under skipped and the rest "
                "of the run goes on; an internal error prints the exception class only. --json output "
                "is local-only: it names note paths.")
-    ap.add_argument("store", nargs="?", default=os.environ.get("BM_LINT_STORE", DEFAULT_STORE),
-                    help="store directory to lint (default: $BM_LINT_STORE else %s)" % DEFAULT_STORE)
+    env_store = os.environ.get("BM_LINT_STORE")
+    store_default = env_store if env_store is not None else default_store()
+    ap.add_argument("store", nargs="?", default=store_default,
+                    help="store directory to lint (default: $BM_LINT_STORE else active tendcf-private-<slug>/memory or %s)" % DEFAULT_STORE)
     ap.add_argument("--json", action="store_true",
                     help="emit one JSON object (store, generated_at, notes, skipped, "
                          "findings with stable keys, summary counts) instead of text; "

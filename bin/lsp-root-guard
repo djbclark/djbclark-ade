@@ -51,7 +51,7 @@ except ModuleNotFoundError:  # Python < 3.11: the built-in container list below 
 PROJECT_MARKERS = (".git", ".jj", ".hg", "pyproject.toml", "setup.py", "package.json", "Cargo.toml", "go.mod",
                    "Package.swift", "tsconfig.json", "Makefile", "Gemfile", "pyrightconfig.json", "requirements.txt", "setup.cfg",
                    "deno.json", "flake.nix", ".lsp-root-guard-project")
-DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/s/*", "~/ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
+DEFAULT_CONTAINERS = ("~", "~/src", "~/s", "~/s/*", "~/ops", "~/tendcf-ops", "~/Desktop", "~/Documents", "~/Downloads", "~/Library", "/",
                       "/Users", "/Users/Shared", "/Volumes", "/Applications", "/System", "/usr", "/etc", "/opt", "/tmp",
                       "/private", "/private/tmp", "/var", "/private/var", "/Library", "/home", "/nix", "/mnt", "/srv",
                       "/Network", "/media", "/root")
@@ -60,6 +60,20 @@ HEURISTIC_SCAN_LIMIT = 400
 
 def _repo_root() -> Path:
     return Path(os.path.realpath(__file__)).parent.parent
+
+
+def _custom_tendcf_ops_root() -> str | None:
+    if "TENDCF_OPS_ROOT" not in os.environ:
+        return None
+    bin_dir = str(_repo_root() / "bin")
+    if bin_dir not in sys.path:
+        sys.path.insert(0, bin_dir)
+    try:
+        import ade_ops_paths  # noqa: PLC0415
+        root = ade_ops_paths.tendcf_ops_root()
+        return str(root) if root is not None else None
+    except Exception:
+        return None
 
 
 def load_policy() -> tuple[list[str], int]:
@@ -73,6 +87,9 @@ def load_policy() -> tuple[list[str], int]:
             min_children = int(data.get("containers", {}).get("min_repo_children", min_children))
         except (OSError, ValueError, TypeError, AttributeError):
             pass  # a bad config falls back to the built-in list: the guard must never block a server
+    custom_tendcf = _custom_tendcf_ops_root()
+    if custom_tendcf and custom_tendcf not in paths:
+        paths.append(custom_tendcf)
     extra = os.environ.get("ADE_LSP_CONTAINER_ROOTS", "")
     paths += [p for p in extra.split(":") if p]
     return paths, min_children
