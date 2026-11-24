@@ -698,3 +698,186 @@ def test_q98_small_window_low_baseline_still_fires_at_80k_and_300k_window_unchan
     assert "At the next task completion" in out_b and "Context is large:" not in out_b
     out_h = box(217_000, sid="s-300k-h")
     assert "Context is large:" in out_h and "267,000" in out_h
+
+
+def test_hard_tier_repeats_on_posttooluse_rate_limited_and_on_user_prompt(box):
+    """e0d271f5 fix (1): while still at/above hard tier, do not go silent until +100k."""
+    out0 = box(219_703, event="PostToolUse", sid="s-repeat")
+    assert "Context is large:" in json.loads(out0)["hookSpecificOutput"]["additionalContext"]
+
+    # +25s (> POST_TOOL_CHECK_SECONDS=20, < HARD_REPEAT_SECONDS=60): suppressed.
+    box.clock[0] += 25
+    assert box(230_000, event="PostToolUse", sid="s-repeat") == ""
+
+    # +60s since initial hard nudge: first PostToolUse ask_repeat fires.
+    box.clock[0] += 35
+    out1 = box(245_000, event="PostToolUse", sid="s-repeat")
+    msg1 = json.loads(out1)["hookSpecificOutput"]["additionalContext"]
+    assert "Hard handoff reminder (#1):" in msg1 and "/self-handoff" in msg1
+    assert "Context is" not in msg1
+
+    # +60s more and within HANDOFF_RESERVE (<=15k left): escalates to URGENT.
+    box.clock[0] += 60
+    out2 = box(255_000, event="PostToolUse", sid="s-repeat")
+    msg2 = json.loads(out2)["hookSpecificOutput"]["additionalContext"]
+    assert "URGENT — imminent auto-compaction (#2):" in msg2 and "12,000 left" in msg2
+
+    # UserPromptSubmit immediately emits ask_repeat (not throttled by HARD_REPEAT_SECONDS).
+    box.clock[0] += 5
+    out3 = box(260_000, event="UserPromptSubmit", sid="s-repeat")
+    assert "URGENT — imminent auto-compaction (#3):" in out3 and "/self-handoff" in out3
+
+    # Wall-clock rollback must not suppress a subsequent PostToolUse ask_repeat.
+    box.clock[0] -= 300
+    out4 = box(264_000, event="PostToolUse", sid="s-repeat")
+    assert "(#4):" in json.loads(out4)["hookSpecificOutput"]["additionalContext"]
+
+    kinds = [r["kind"] for r in box.records()]
+    assert kinds == ["ask", "midtask", "boundary", "ask_repeat", "ask_repeat", "ask_repeat", "ask_repeat"]
+
+
+def test_hard_tier_pages_once_per_climb_on_267k_wall_and_small_dip_does_not_repage(box, monkeypatch):
+    """e0d271f5 fix (2): once-per-climb hermes-ping at level >= 2 on a 267k wall."""
+    pings = []
+    monkeypatch.setattr(box.hook, "_send_ping", lambda msg, cwd=None: pings.append((msg, cwd)))
+
+    # Boundary (189k) does not page.
+    assert box(189_295, event="PostToolUse", sid="s-ping")
+    assert pings == []
+
+    # Crossing hard tier (219k) pages once.
+    box.clock[0] += 30
+    assert box(219_703, event="PostToolUse", sid="s-ping")
+    assert len(pings) == 1
+    assert "/self-handoff then /new" in pings[0][0]
+    assert "219k/267k" in pings[0][0]
+
+    # Repeated tool calls at hard tier, small dip (<25%) and re-climb never double-page.
+    for size in (235_000, 205_000, 245_000, 264_919):
+        box.clock[0] += 65
+        box(size, event="PostToolUse", sid="s-ping")
+    assert len(pings) == 1
+
+
+@pytest.mark.parametrize("mode", ["compacted_record", "midturn_boundary", "shrink_no_boundary"])
+def test_post_compaction_handoff_due_persists_across_all_compaction_paths(box, tmp_path, monkeypatch, mode):
+    """e0d271f5 fix (3): compaction after level >= 2 persists handoff_due, emits directive, and pages once."""
+    pings = []
+    monkeypatch.setattr(box.hook, "_send_ping", lambda msg, cwd=None: pings.append((msg, cwd)))
+    sid = f"s-compact-{mode}"
+    transcript = tmp_path / f"{sid}.jsonl"
+
+    def usage(n):
+        return json.dumps({"message": {"usage": {"input_tokens": n, "cache_read_input_tokens": 0}}}) + "\n"
+
+    def run_event(event="UserPromptSubmit", session_id=sid):
+        import contextlib
+        buf = io.StringIO()
+        old_stdin = sys.stdin
+        try:
+            sys.stdin = io.StringIO(json.dumps({
+                "session_id": session_id, "hook_event_name": event,
+                "transcript_path": str(transcript), "cwd": str(tmp_path),
+            }))
+            with contextlib.redirect_stdout(buf):
+                box.hook.main()
+            return buf.getvalue()
+        finally:
+            sys.stdin = old_stdin
+
+    transcript.write_text(usage(50_000) + usage(264_919))
+    out0 = run_event("PostToolUse")
+    assert "Context is large:" in json.loads(out0)["hookSpecificOutput"]["additionalContext"]
+    assert len(pings) == 1  # climb ping at hard tier
+
+    box.clock[0] += 65
+    boundary = json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n"
+    if mode == "compacted_record":
+        with transcript.open("a") as f:
+            f.write(boundary)
+        assert run_event("PostToolUse") == ""
+        state = json.loads(box.hook.STATE_PATH.read_text())[sid]
+        assert state["level"] == 0 and state["handoff_due"]["peak"] == 264_919
+        box.clock[0] += 65
+        with transcript.open("a") as f:
+            f.write(usage(101_000))
+    elif mode == "midturn_boundary":
+        with transcript.open("a") as f:
+            f.write(boundary + usage(101_000) + usage(115_000))
+    else:
+        with transcript.open("a") as f:
+            f.write(usage(101_000))
+
+    # First post-compaction turn: emits post_compact_handoff_due + sends exactly one compaction ping.
+    out_post = run_event("UserPromptSubmit")
+    assert "Post-compaction handoff due:" in out_post
+    assert "264,919" in out_post and "/self-handoff" in out_post
+    assert len(pings) == 2
+    assert "auto-compacted after missed hard handoff" in pings[1][0]
+
+    # PostToolUse is rate-limited by HARD_REPEAT_SECONDS (60 s), and never double-pages.
+    box.clock[0] += 25
+    assert run_event("PostToolUse") == ""
+    box.clock[0] += 40
+    out_tool = run_event("PostToolUse")
+    assert "Post-compaction handoff due:" in json.loads(out_tool)["hookSpecificOutput"]["additionalContext"]
+    assert len(pings) == 2
+
+    # Another UserPromptSubmit still reminds, still no extra ping.
+    out_post2 = run_event("UserPromptSubmit")
+    assert "Post-compaction handoff due:" in out_post2
+    assert len(pings) == 2
+
+    # Log records post_compact_handoff_due cleanly.
+    post_kinds = [r["kind"] for r in box.records() if r["kind"] == "post_compact_handoff_due"]
+    assert len(post_kinds) == 3
+
+    # A fresh session_id (/self-handoff or /new) starts with its own transcript and has no handoff_due.
+    fresh_transcript = tmp_path / f"fresh-{mode}.jsonl"
+    fresh_transcript.write_text(usage(60_000))
+    import contextlib
+    buf = io.StringIO()
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(json.dumps({
+            "session_id": "fresh-successor", "hook_event_name": "UserPromptSubmit",
+            "transcript_path": str(fresh_transcript), "cwd": str(tmp_path),
+        }))
+        with contextlib.redirect_stdout(buf):
+            box.hook.main()
+        assert buf.getvalue() == ""
+    finally:
+        sys.stdin = old_stdin
+    assert "handoff_due" not in json.loads(box.hook.STATE_PATH.read_text())["fresh-successor"]
+
+
+def test_sub_hard_compaction_does_not_set_handoff_due_or_page(box, monkeypatch):
+    """Manual compaction before reaching level 2 must not fabricate a missed hard handoff."""
+    pings = []
+    monkeypatch.setattr(box.hook, "_send_ping", lambda msg, cwd=None: pings.append(msg))
+    assert box(150_000, sid="s-subhard")
+    assert box(compact=True, sid="s-subhard") == ""
+    state = json.loads(box.hook.STATE_PATH.read_text())["s-subhard"]
+    assert "handoff_due" not in state
+    assert box(80_000, sid="s-subhard") == ""
+    assert pings == []
+
+
+def test_legacy_hard_state_without_prior_ping_pages_on_compacted_boundary_once(box, monkeypatch):
+    """If pre-fix state had level=2 and paged=False, compacting pages once immediately and does not double-page."""
+    pings = []
+    monkeypatch.setattr(box.hook, "_send_ping", lambda msg, cwd=None: pings.append(msg))
+    box.hook.STATE_PATH.write_text(json.dumps({
+        "s-legacy": {"baseline": 71_000, "level": 2, "peak": 264_919, "last": 264_919, "paged": False}
+    }))
+    assert box(compact=True, sid="s-legacy") == ""
+    assert len(pings) == 1
+    assert "auto-compacted after missed hard handoff" in pings[0]
+    state = json.loads(box.hook.STATE_PATH.read_text())["s-legacy"]
+    assert state["handoff_due"]["paged"] is True
+    assert state["handoff_due"]["peak"] == 264_919
+
+    # Subsequent post-compaction turn still emits the directive without sending a duplicate ping.
+    out = box(101_000, sid="s-legacy")
+    assert "Post-compaction handoff due:" in out and "264,919" in out
+    assert len(pings) == 1

@@ -1,5 +1,8 @@
 """Contract tests for precompact_handoff.py workspace resolution."""
 import hashlib
+import io
+import json
+import os
 import re
 import subprocess
 import sys
@@ -11,6 +14,7 @@ import pytest
 HOOKS_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(HOOKS_DIR))
 
+import precompact_handoff  # noqa: E402
 from precompact_handoff import resolve_workspace  # noqa: E402
 
 
@@ -138,3 +142,77 @@ def test_long_path_slug_is_bounded_hashed_and_deterministic(tmp_path):
         r"[^A-Za-z0-9._-]+", "-", str(directory.resolve()))).strip("-")
     assert first[1].endswith("-" + hashlib.sha1(
         original.encode("utf-8")).hexdigest()[:8])
+
+
+def _run_hook(monkeypatch, tmp_path, repo_dir, session_id, nudge_state=None):
+    state_root = tmp_path / "handoffs"
+    nudge_path = tmp_path / "context-nudges.json"
+    if nudge_state is not None:
+        nudge_path.write_text(nudge_state if isinstance(nudge_state, str) else json.dumps(nudge_state))
+    monkeypatch.setattr(precompact_handoff, "STATE_ROOT", state_root)
+    monkeypatch.setattr(precompact_handoff, "NUDGE_STATE_PATH", nudge_path)
+    monkeypatch.setenv("HANDOFF_ENRICH", "0")
+    monkeypatch.chdir(repo_dir)
+    payload = json.dumps({"session_id": session_id, "trigger": "auto", "transcript_path": ""})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+    precompact_handoff.hook_main()
+    files = list(state_root.rglob("precompact-*.md"))
+    assert len(files) == 1
+    return files[0].read_text()
+
+
+def test_hook_main_stamps_pending_hard_handoff_for_level_2(monkeypatch, tmp_path, repo):
+    content = _run_hook(
+        monkeypatch, tmp_path, repo, "sess-hard",
+        {"sess-hard": {"level": 2, "peak": 264_919, "last": 264_000}},
+    )
+    assert "pending_hard_handoff: true\n" in content
+    assert "pending_hard_peak: 264919\n" in content
+    assert "Hard handoff was already pending before compaction (peak 264,919 tokens)" in content
+    assert "/self-handoff" in content
+
+
+def test_hook_main_stamps_pending_hard_handoff_for_handoff_due(monkeypatch, tmp_path, repo):
+    content = _run_hook(
+        monkeypatch, tmp_path, repo, "sess-due",
+        {"sess-due": {"level": 0, "handoff_due": {"peak": 251_000, "wall": 267_000, "level": 2}}},
+    )
+    assert "pending_hard_handoff: true\n" in content
+    assert "pending_hard_peak: 251000\n" in content
+    assert "peak 251,000 tokens" in content
+
+
+def test_hook_main_omits_pending_hard_handoff_below_hard_tier(monkeypatch, tmp_path, repo):
+    content = _run_hook(
+        monkeypatch, tmp_path, repo, "sess-early",
+        {"sess-early": {"level": 1, "peak": 150_000, "last": 150_000}},
+    )
+    assert "pending_hard_handoff" not in content
+    assert "pending_hard_peak" not in content
+
+
+@pytest.mark.parametrize("case", ["missing", "corrupt", "oversized", "symlink"])
+def test_hook_main_nudge_state_failures_fail_silent(monkeypatch, tmp_path, repo, case):
+    state_root = tmp_path / f"handoffs-{case}"
+    nudge_path = tmp_path / f"nudges-{case}.json"
+    if case == "corrupt":
+        nudge_path.write_text("{not valid json")
+    elif case == "oversized":
+        nudge_path.write_bytes(b" " * (precompact_handoff.NUDGE_STATE_MAX_BYTES + 16))
+    elif case == "symlink":
+        if not hasattr(os, "O_NOFOLLOW"):
+            pytest.skip("O_NOFOLLOW unavailable")
+        target = tmp_path / "real-nudges.json"
+        target.write_text(json.dumps({"sess-x": {"level": 2, "peak": 250_000}}))
+        nudge_path.symlink_to(target)
+    monkeypatch.setattr(precompact_handoff, "STATE_ROOT", state_root)
+    monkeypatch.setattr(precompact_handoff, "NUDGE_STATE_PATH", nudge_path)
+    monkeypatch.setenv("HANDOFF_ENRICH", "0")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"session_id": "sess-x", "trigger": "auto"})))
+    precompact_handoff.hook_main()
+    files = list(state_root.rglob("precompact-*.md"))
+    assert len(files) == 1
+    content = files[0].read_text()
+    assert "compacted: true\n" in content
+    assert "pending_hard_handoff" not in content

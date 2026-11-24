@@ -63,8 +63,8 @@ compact tier derives from that wall:
 |---|---|---|---|
 | early (delegate; never compact) | +32k growth from the floor | unchanged | unchanged |
 | boundary (once per session id: "at the next task completion, if work remains, run self-handoff Step 9 yourself") | wall - 80k (`BOUNDARY_HEADROOM`), never below 120k, never above the hard tier | 187k (was a fixed 120k) | 887k |
-| hard / ask | wall - 50k (`ASK_HEADROOM`), by total only; again every 100k | 217k | 917k |
-| Hermes page | max(400k, hard tier) total, or +page-growth | 400k / +300k | 917k / +817k |
+| hard / ask | wall - 50k (`ASK_HEADROOM`), by total only; repeats while at/above hard tier (`ask_repeat`, every 60 s on `PostToolUse` and every `UserPromptSubmit`), plus full level-climb ask every 100k | 217k | 917k |
+| Hermes page | once per climb at the hard tier (`level >= 2`, 2026-11-24; `PAGE_TOTAL_MIN` 400k / `PAGE_GROWTH_MIN` +300k kept as fallback for huge windows), plus one ping if auto-compaction occurs after a missed hard handoff | 217k (once) + post-compact (once) | 917k (once) + post-compact (once) |
 
 A small configured window cannot loop handoffs (adversary L1, PR 862; queue #98, 2026-11-24): the hard
 tier never sits below `ASK_FLOOR` (80k, above a fresh session's own 46-71k), and a wall at or under it
@@ -110,12 +110,27 @@ call; for a sub-agent Claude Code fires the same hooks with the parent's `sessio
 transcript) is ignored before the throttle stamp, so it cannot spend the top-level
 session's one-shot notes; a long-lived teammate therefore gets no PostToolUse nudge. Unrelated or non-string event
 names are ignored; an omitted event name keeps the UserPromptSubmit default.
-Each emitted early, ask, embedded mid-task or boundary note appends a JSON line to
+Each emitted early, ask, embedded mid-task, hard-repeat (`ask_repeat`), post-compaction
+handoff-due (`post_compact_handoff_due`) or boundary note appends a JSON line to
 `~/.claude/state/context-nudge-log.jsonl`, including UTC timestamp, session ID,
 event, level, total tokens, growth and kind. An absolute `CONTEXT_NUDGE_LOG_PATH`
 overrides the log path; relative overrides are ignored. A new log has mode 0600,
 and opens reject symlinks where O_NOFOLLOW is available. Compaction resets the
-nudge state but preserves this history;
+floor and climb level, preserves this history, and — when the session had already
+reached the hard tier (`level >= 2`) before compacting (2026-11-24, `e0d271f5` fix) —
+persists a `handoff_due` record (`peak`, `wall`, `level`, `compacted_at`, `paged`) in
+`context-nudges.json` across the reset so subsequent post-compaction `UserPromptSubmit`
+and `PostToolUse` turns (rate-limited by `HARD_REPEAT_SECONDS` = 60 s on `PostToolUse`)
+keep directing `/self-handoff` (`kind="post_compact_handoff_due"`) and send one
+operator `hermes-ping` for that compaction until a fresh `session_id` starts.
+While still at or above the hard tier (`level >= 2` and `fired >= 2`), the hook also
+re-emits an escalating reminder (`kind="ask_repeat"`) on `UserPromptSubmit` and every
+`HARD_REPEAT_SECONDS` (60 s) on `PostToolUse` instead of going silent until `+100k`,
+and triggers a once-per-climb detached `hermes-ping` as soon as `level >= 2` fires.
+`claude/hooks/precompact_handoff.py` best-effort reads `~/.claude/state/context-nudges.json`
+(`O_NOFOLLOW`, 1 MiB cap, fail-silent, strictly exit 0) and stamps `pending_hard_handoff: true`
+and `pending_hard_peak: <int>` into the sidecar checkpoint YAML frontmatter plus a one-line
+body note whenever the compacting session already had `level >= 2` or `handoff_due`.
 at about 2 MiB the log rotates to a single `.1` backup. This records emission,
 not whether the model acted on the note. Logging errors are ignored, and the
 hook retains its two-second deadline. As of 2026-10-29, the usage tail reader
