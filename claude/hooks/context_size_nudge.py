@@ -59,7 +59,8 @@ History:
   `autoCompactWindow`; unreadable/unknown: today's 267k, bin/context-watch imports the same
   function) and every tier derives from it: hard = wall - ASK_HEADROOM (50k), boundary =
   wall - BOUNDARY_HEADROOM (80k, never below BOUNDARY_FLOOR 120k, never above the hard tier),
-  paging max(400k, hard tier); the hard tier never below ASK_FLOOR 80k (a small configured window would loop handoffs). On the 267k wall that is boundary 187k (was 120k), hard 217k
+  paging max(400k, hard tier); the hard tier never below ASK_FLOOR 80k (a small configured
+  window would loop handoffs). On the 267k wall that is boundary 187k (was 120k), hard 217k
   (unchanged). 80k is about ten tool rounds ahead of the hard tier's own 50k; there a handoff
   (a fresh session re-writes ~46k) beats the compaction that is certain to follow (~72k
   re-written plus a summariser call, ~104k left behind), and before it a handoff only throws
@@ -68,8 +69,15 @@ History:
   hard tier). The messages print the computed wall and tokens left, keep the 2026-11-14
   ruling (hand off yourself, never a /new for the operator) and say a finished task alone
   is no reason to hand off below this tier. The EARLY tier is unchanged.
-  Adversary L1 (PR 862): the hard tier never sits below ASK_FLOOR 80k, and a wall at or under it has no
-  handoff tiers (NO_TIER), so a small configured window cannot make every fresh session hand itself off.
+  Adversary L1 (PR 862): the hard tier never sits below ASK_FLOOR 80k, and a wall at or under
+  it has no handoff tiers (NO_TIER), so a small configured window cannot make every fresh
+  session hand itself off.
+- 2026-11-24 (queue #98, PR 862 L2): for compaction windows of ~114k-163k (wall 81k-130k),
+  the hard and boundary tiers sit at ASK_FLOOR (80k), only ~9k above the 71k median fresh
+  session, so a successor starting above 80k immediately re-handed off on turn 1. Now a
+  floor-clamped tier (ask_total <= ASK_FLOOR) requires at least ASK_MIN_GROWTH (16k, ~2 tool
+  rounds) of growth since the baseline before firing hard or boundary nudges; larger windows
+  (including the live 300k window) are unchanged.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
@@ -155,9 +163,12 @@ MAX_WINDOW = 10_000_000  # a configured window above this is taken as junk (unse
 # 2026-10-28: ASK_GROWTH 200k fired at floor+200k = 235-271k (median floor 71k: past the
 # wall, never), leaving 0-20k, and ASK_TOTAL 300k sat above the wall and never fired.
 ASK_HEADROOM = 50_000
-# A fresh session already holds ~46-71k (median floor 71k, 2026-10-28), so a hard tier below ASK_FLOOR would fire
-# at once and loop self-handoffs on a small configured window (adversary L1, PR 862). The hard and boundary tiers
-# therefore never sit below ASK_FLOOR; a wall at or under it has no handoff tiers at all (Claude Code compacts first).
+# A fresh session already holds ~46-71k (median floor 71k, 2026-10-28), so a hard tier below
+# ASK_FLOOR would fire at once and loop self-handoffs on a small configured window (adversary L1,
+# PR 862). The hard and boundary tiers therefore never sit below ASK_FLOOR; a wall at or under it
+# has no handoff tiers at all (Claude Code compacts first). When a small window (~114k-163k, wall
+# 81k-130k) clamps ask_total to ASK_FLOOR, also require ASK_MIN_GROWTH since the baseline so a
+# successor starting above 80k does not immediately re-hand-off on turn 1 (queue #98).
 ASK_FLOOR = 80_000
 NO_TIER = 10**15  # a tier that never fires (_tiers: a wall at or under ASK_FLOOR)
 # The boundary tier ("hand off at the next task completion") fires only near the limit
@@ -170,6 +181,7 @@ NO_TIER = 10**15  # a tier that never fires (_tiers: a wall at or under ASK_FLOO
 BOUNDARY_HEADROOM = 80_000
 BOUNDARY_FLOOR = 120_000
 TOOL_ROUND_TOKENS = 8_000    # a tool round costs 3-8k; a big file or log read costs more
+ASK_MIN_GROWTH = 2 * TOOL_ROUND_TOKENS  # 16k (~2 tool rounds) required on floor-clamped tiers
 HANDOFF_RESERVE = 15_000     # what the handoff skill itself needs before the wall
 REPEAT_EVERY = 100_000  # level 3, 4, ...: again per this much more
 PAGE_GROWTH_MIN = 300_000  # Hermes ping (once per climb), whichever comes first; scaled by _tiers
@@ -582,8 +594,9 @@ class Tiers(NamedTuple):
 def _tiers(wall):
     """The Tiers for one compaction wall.
 
-    ask = wall - ASK_HEADROOM, at least ASK_FLOOR (a wall at or under it has no handoff tiers: NO_TIER). boundary = wall - BOUNDARY_HEADROOM, never below BOUNDARY_FLOOR and never
-    above ask. Paging scales: at least PAGE_TOTAL_MIN, and no earlier than the hard tier."""
+    ask = wall - ASK_HEADROOM, at least ASK_FLOOR (a wall at or under it has no handoff tiers:
+    NO_TIER). boundary = wall - BOUNDARY_HEADROOM, never below BOUNDARY_FLOOR and never above ask.
+    Paging scales: at least PAGE_TOTAL_MIN, and no earlier than the hard tier."""
     if wall <= ASK_FLOOR:  # below a fresh session's own size: Claude Code compacts first; no handoff tiers
         return Tiers(wall, NO_TIER, NO_TIER, NO_TIER, NO_TIER)
     ask = max(wall - ASK_HEADROOM, ASK_FLOOR)
@@ -600,14 +613,21 @@ PAGE_TOTAL = _FALLBACK.page_total          # 400k
 PAGE_GROWTH = _FALLBACK.page_growth        # 300k
 
 
+def _handoff_growth_ok(growth, tiers):
+    """True when `growth` allows handoff tiers for `tiers`: always on normal walls, and at least
+    ASK_MIN_GROWTH when a small window (~114k-163k) clamped ask_total to ASK_FLOOR (queue #98)."""
+    return tiers.ask_total > ASK_FLOOR or growth >= ASK_MIN_GROWTH
+
+
 def _level(total, growth, tiers=None):
     """0 = quiet, 1 = early, 2+ = ask (one more per REPEAT_EVERY of total beyond the hard tier).
 
     Only the TOTAL fires the hard tier (2026-11-21): a growth trigger (ASK_GROWTH 140k, from the
-    floor) fired it at ~175k on a 267k wall, 90k before the wall had anything to say."""
-    ask_total = (tiers or _FALLBACK).ask_total
-    if total >= ask_total:
-        return 2 + (total - ask_total) // REPEAT_EVERY
+    floor) fired it at ~175k on a 267k wall, 90k before the wall had anything to say. On a small
+    window clamped to ASK_FLOOR, require ASK_MIN_GROWTH so a >80k successor does not re-hand-off."""
+    tiers = tiers or _FALLBACK
+    if total >= tiers.ask_total and _handoff_growth_ok(growth, tiers):
+        return 2 + (total - tiers.ask_total) // REPEAT_EVERY
     return 1 if growth >= EARLY_GROWTH else 0
 
 
@@ -959,7 +979,8 @@ def _check_state(data, event, session_id, transcript_path):
     session_state["level"] = max(level, fired)
 
     # Once per session id, not per compaction: a /new starts a new id.
-    if total >= tiers.boundary_total and not session_state.get("boundary"):
+    if (total >= tiers.boundary_total and _handoff_growth_ok(growth, tiers)
+            and not session_state.get("boundary")):
         session_state["boundary"] = True
         messages.append((_boundary_message(total, successor=_session_successor(transcript_path), wall=wall),
                          "boundary"))

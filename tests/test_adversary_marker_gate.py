@@ -776,3 +776,82 @@ def test_a_decoy_assignment_does_not_move_the_read_away_from_the_event_cwd(live,
     assert run(command, cwd=live)
     (live / "b.md").write_text("prose only")
     assert run(command, cwd=live) is None
+
+
+# ---- queue #117 (2026-11-24): single-quoted / ANSI-C prose and already-expanded shim argv ----------------------
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --title t --body 'see `docs/code-review.md` rule 1'",
+    "gh pr create --title t --body 'see $(cat docs/code-review.md) rule 1'",
+    "gh pr create --title t --body $'see `docs/code-review.md` and $(cat docs/code-review.md)'",
+    "gh pr create --title t --body $'escaped \\' quote `docs/code-review.md`'",
+    "gh pr create --title t --body 'it'\\''s `docs/code-review.md` rule 1'",
+    "gh pr create --title t --body 'it'\"'\"'s `docs/code-review.md` rule 1'",
+    'gh pr create --title t --body "escaped \\`docs/code-review.md\\` and \\$(cat docs/code-review.md)"',
+    'gh pr create --title t --body "a\\\\"\'`docs/code-review.md`\'',
+    "gh pr create --title t --body foo#bar'`docs/code-review.md`'",
+    "gh pr create --title t --body-file docs/code-review.md",
+])
+def test_q117_single_quoted_prose_mentioning_docs_passes(command):
+    assert run(command, cwd=ROOT) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    "gh pr create --title t --body 'see `live.md` and $(cat live.md) and `report.md`'",
+    "gh pr create --title t --body $'see $(cat live.md) and `grep adversary-verdict report.md`'",
+    "gh pr create --title t --body $'escaped \\' quote $(cat live.md)'",
+    "gh pr create --title t --body 'it'\\''s $(cat live.md)'",
+    'gh pr create --title t --body "escaped \\$(cat live.md) and \\`cat live.md\\`"',
+    'gh pr create --title t --body "a\\\\"\'$(cat live.md)\'',
+    "echo 'see `gh pr edit 41 --body-file live.md`'",
+])
+def test_q117_single_quoted_or_escaped_substitutions_never_read_live_files(report, command):
+    assert run(command, cwd=report) is None, command
+
+
+@pytest.mark.parametrize("command", [
+    'gh pr create --title t --body "$(cat live.md)"',
+    "gh pr create --title t --body $(cat live.md)",
+    'gh pr create --title t --body "`cat live.md`"',
+    "gh pr create --title t --body `cat live.md`",
+    "gh pr create --title t --body 'a'\"$(cat live.md)\"",
+    "gh pr create --title t --body 'a'$(cat live.md)",
+    "gh pr create --title t --body 'a'`cat live.md`",
+    "gh pr create --title t --body $'a\\''$(cat live.md)",
+    "gh pr create --title t --body $'a\\\\'$(cat live.md)",
+    'gh pr create --title t --body "see \'$(cat live.md)\'"',
+    'gh pr create --title t --body "see \'`grep adversary-verdict report.md`\'"',
+    'gh pr create --title t --body "escaped \\" quote $(cat live.md)"',
+    'gh pr create --title t --body "escaped \\\\"$(cat live.md)',
+    'gh pr create --title t --body "\\\\$(cat live.md)"',
+    "gh pr create --title t --body \\'$(cat live.md)\\'",
+    'gh pr create --title t --body "$(echo \')\' ; cat live.md)"',
+    'gh pr create --title t --body "$(echo "$(cat live.md)")"',
+    'gh pr create --title t --body "`echo \\"\\`cat live.md\\`\\"`"',
+    "# don't trip\ngh pr create --title t --body \"$(cat live.md)\"",
+    "gh pr create --title t --body-file - <<EOF\n'$(cat live.md)'\nEOF\n",
+    "echo it's broken && gh pr create --title t --body \"$(cat live.md)\"",
+    "gh pr create --title t --body-file live.md",
+    "gh pr create --title t --body " + q(APPROVE),
+])
+def test_q117_unquoted_and_double_quoted_substitutions_and_smuggling_are_still_denied(report, command):
+    assert run(command, cwd=report), command
+
+
+@pytest.mark.parametrize("command", [
+    'gh pr create --title t --body "`docs/code-review.md`"',
+    "gh pr create --title t --body `docs/code-review.md`",
+    'gh pr create --title t --body "$(grep adversary-verdict docs/code-review.md)"',
+    'gh pr create --title t --body "a"$(grep adversary-verdict docs/code-review.md)',
+])
+def test_q117_unquoted_and_double_quoted_backticks_on_docs_are_still_denied(command):
+    assert run(command, cwd=ROOT), command
+
+
+def test_q117_unclosed_ansi_c_and_backticks_stay_linear(live):
+    import time
+    t0 = time.time()
+    assert run("gh pr comment 1 --body-file live.md " + "$'\\'" * 4000, cwd=live)
+    assert run("gh pr comment 1 --body-file live.md " + "`" * 4000, cwd=live)
+    assert time.time() - t0 < 10

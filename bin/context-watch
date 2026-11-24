@@ -162,9 +162,10 @@ def nudge_band(tokens, ceiling, growth=None):
     if tokens >= ceiling:
         return "wall"
     tiers = hook._tiers(ceiling)
-    if tokens >= tiers.ask_total:
+    handoff_ok = hook._handoff_growth_ok(growth if isinstance(growth, int) else 0, tiers)
+    if handoff_ok and tokens >= tiers.ask_total:
         return "hard"
-    if tokens >= tiers.boundary_total:
+    if handoff_ok and tokens >= tiers.boundary_total:
         return "boundary"
     if isinstance(growth, int) and growth >= hook.EARLY_GROWTH:
         return "early"
