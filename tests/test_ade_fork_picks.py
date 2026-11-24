@@ -131,11 +131,12 @@ def test_shipped_registry_is_valid():
         assert by_id[pid]["branch"] == "trial/pi-8326-6643-on-fork2"
         assert by_id[pid]["expected_head"] == "43d4fa9584f7ca5ca9bf3e69fffbd61c98c69cb4"
         assert "b720fd6b6773b3036c59dd54a2efa89436a24f76" in by_id[pid]["notes"]
-    assert "hold" not in by_id["paseo-shift-drag-copy"] and by_id["paseo-shift-drag-copy"]["trial_required"] is False and by_id["paseo-sidebar-nav-divider"]["status"] == "carried"
+    assert "hold" not in by_id["paseo-shift-drag-copy"] and by_id["paseo-shift-drag-copy"]["trial_required"] is False
     assert by_id["paseo-android-fork-release"]["status"] == "landed:main"
     for pid in (
         "paseo-workspace-id-search",
         "desktop-app-dist-precompress",
+        "paseo-sidebar-nav-divider",
         "worktree-setup-sharp-global-libvips",
         "paseo-about-fork-marker",
         "paseo-shift-drag-copy",
