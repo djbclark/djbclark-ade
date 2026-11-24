@@ -470,3 +470,63 @@ def test_resolve_default_bm_store_and_skill_roots_and_checkout_names(tmp_path: P
     assert ops.resolve_ops_checkout_name(troot / ".worktrees" / "wt1", env_none) is None
     assert ops.resolve_ops_checkout_name(troot / "tendcf-private-acme-wt", env_none) is None
     assert ops.resolve_ops_checkout_name(home / "ops" / "site-private", env_none) == "site-private"
+
+
+def test_merge_skill_ledger_concurrent_and_refuses_symlinks(tmp_path: Path) -> None:
+    """Round 5 MED #2: flock-serialized delta merge preserves concurrent writes, applies del, refuses symlinks."""
+    import subprocess
+    import sys
+
+    ledger = tmp_path / "state" / "managed-links.tsv"
+    script = Path(__file__).resolve().parent.parent / "bin" / "ade_ops_paths.py"
+
+    # Launch 6 concurrent merge-ledger CLI invocations writing distinct entries.
+    procs = []
+    for idx in range(6):
+        payload = (
+            f"set\tlink\t/dest/skill-{idx}\t/src/skill-{idx}\n"
+            f"set\tcopy\t/grok/ade-skill-{idx}\tsite-private/skills/skill-{idx}\n"
+        )
+        p = subprocess.Popen(
+            [sys.executable, str(script), "merge-ledger", str(ledger)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert p.stdin is not None
+        p.stdin.write(payload)
+        p.stdin.close()
+        procs.append(p)
+
+    for p in procs:
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 0, out + err
+
+    lines = set(ledger.read_text(encoding="utf-8").splitlines())
+    for idx in range(6):
+        assert f"link\t/dest/skill-{idx}\t/src/skill-{idx}" in lines
+        assert f"copy\t/grok/ade-skill-{idx}\tsite-private/skills/skill-{idx}" in lines
+    assert (tmp_path / "state" / "managed-links.lock").exists()
+
+    # Delete deltas remove only targeted entries.
+    ops.merge_skill_ledger(
+        ledger,
+        [
+            ("del", "link", "/dest/skill-2", ""),
+            ("del", "copy", "/grok/ade-skill-3", ""),
+        ],
+    )
+    after = set(ledger.read_text(encoding="utf-8").splitlines())
+    assert "link\t/dest/skill-2\t/src/skill-2" not in after
+    assert "copy\t/grok/ade-skill-3\tsite-private/skills/skill-3" not in after
+    assert "link\t/dest/skill-0\t/src/skill-0" in after
+
+    # Symlinked ledger or lock file MUST be refused fail-closed.
+    sym_ledger = tmp_path / "sym" / "managed-links.tsv"
+    sym_ledger.parent.mkdir(parents=True)
+    target = tmp_path / "outside.tsv"
+    target.write_text("", encoding="utf-8")
+    sym_ledger.symlink_to(target)
+    with pytest.raises(ops.OpsPathError):
+        ops.merge_skill_ledger(sym_ledger, [("set", "link", "/a", "/b")])

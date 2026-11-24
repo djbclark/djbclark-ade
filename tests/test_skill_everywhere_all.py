@@ -1027,18 +1027,193 @@ def test_named_ade_run_and_manual_links_under_previously_selected_root_are_prese
 
     # 3. Switch to acme:
     #    - `managed-legacy` (in ledger) IS flagged/removed;
-    #    - `manual-before-switch` (under same legacy root, NOT in ledger) IS preserved silently;
-    #    - `shared-manual` (same name as acme skill, NOT in ledger) stays `other link -> ...`, left alone!
+    #    - `manual-before-switch` (under same legacy root, NOT in ledger) IS preserved (plain --all);
+    #    - `shared-manual` (same name as acme skill, NOT in ledger) is reported as an unrecorded legacy link and left alone!
     active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
     active_cfg.parent.mkdir(parents=True)
     active_cfg.write_text("acme\n", encoding="utf-8")
 
     r_switch = run(catalog, "--all")
-    assert r_switch.returncode == 1  # only because `shared-manual` is a foreign manual link collision
-    assert "other link ->" in r_switch.stdout
+    assert r_switch.returncode == 1  # `shared-manual` is unrecorded and left alone without --adopt-legacy-links
+    assert "unrecorded legacy link ->" in r_switch.stdout
+    assert "--adopt-legacy-links" in r_switch.stdout
     assert "migrating from" not in r_switch.stdout
     assert not os.path.lexists(links / "managed-legacy")
     assert (links / "acme-only").readlink() == tpriv_only.resolve()
     assert (links / "manual-before-switch").readlink() == manual_before_src
     assert (links / "shared-manual").readlink() == manual_collide_src
+
+
+def test_pre_ledger_installed_base_adoption_and_explicit_migration(catalog, tmp_path):
+    """Round 5 MED #1: pre-ledger installations seed on normal runs AND support explicit --adopt-legacy-links migration."""
+    home, _, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex,grokbot"
+
+    lpriv = home / "ops" / "site-private" / "skills"
+    lsite = home / "ops" / "site-public-djbclark" / "skills"
+    lpriv.mkdir(parents=True)
+    lsite.mkdir(parents=True)
+    lpriv_only = skill(lpriv, "legacy-priv-only")
+    lsite_only = skill(lsite, "legacy-site-only")
+    lshared = skill(lsite, "shared-site")
+
+    tpriv = home / "tendcf-ops" / "tendcf-private-acme" / "skills"
+    tpub = home / "tendcf-ops" / "tendcf-public-acme" / "skills"
+    tpriv.mkdir(parents=True)
+    tpub.mkdir(parents=True)
+    tpriv_only = skill(tpriv, "acme-priv")
+    tshared = skill(tpub, "shared-site")
+
+    # Manual links that MUST ALWAYS be preserved (inactive valid tendcf site + unrelated external path).
+    inactive_pub = home / "tendcf-ops" / "tendcf-public-other" / "skills"
+    inactive_pub.mkdir(parents=True)
+    manual_inactive = skill(inactive_pub, "manual-inactive")
+    ext_root = tmp_path / "external-skills"
+    ext_root.mkdir(parents=True)
+    manual_ext = skill(ext_root, "manual-ext")
+
+    links = home / ".agents" / "skills"
+    grok_dir = home / "agent-data" / "workflows"
+    grok_dir.mkdir(parents=True)
+    ledger = tmp_path / "state" / "skill-everywhere" / "managed-links.tsv"
+    active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
+
+    def _seed_pre_ledger_legacy_state() -> None:
+        # Install legacy skills authentically, then delete managed-links.tsv to simulate a pre-ledger machine.
+        if active_cfg.exists():
+            active_cfg.unlink()
+        for child in list(links.iterdir()):
+            if child.name == "paseo":
+                continue
+            if child.is_symlink() or child.is_file():
+                child.unlink()
+        for child in list(grok_dir.iterdir()):
+            shutil.rmtree(child)
+        if ledger.exists():
+            ledger.unlink()
+        r_init = run(catalog, "--all")
+        assert r_init.returncode == 0, r_init.stdout + r_init.stderr
+        assert ledger.exists()
+        ledger.unlink()
+        (links / "manual-inactive").symlink_to(manual_inactive)
+        (links / "manual-ext").symlink_to(manual_ext)
+
+    # --- Path A: Pre-upgrade seeding on normal legacy `--all` run -> seamless subsequent switch ---
+    _seed_pre_ledger_legacy_state()
+    assert not ledger.exists()
+    r_seed = run(catalog, "--all")
+    assert r_seed.returncode == 0, r_seed.stdout + r_seed.stderr
+    assert "already linked" in r_seed.stdout
+    assert "already copied" in r_seed.stdout
+    assert ledger.exists()
+    seeded_text = ledger.read_text(encoding="utf-8")
+    assert f"link\t{links / 'legacy-priv-only'}\t{lpriv_only}" in seeded_text
+    assert f"link\t{links / 'legacy-site-only'}\t{lsite_only}" in seeded_text
+    assert f"link\t{links / 'shared-site'}\t{lshared}" in seeded_text
+    assert f"copy\t{grok_dir / 'ade-legacy-site-only'}\tsite-djbclark/skills/legacy-site-only" in seeded_text
+    assert "manual-inactive" not in seeded_text
+    assert "manual-ext" not in seeded_text
+
+    active_cfg.parent.mkdir(parents=True, exist_ok=True)
+    active_cfg.write_text("acme\n", encoding="utf-8")
+
+    r_after_seed = run(catalog, "--all")
+    assert r_after_seed.returncode == 0, r_after_seed.stdout + r_after_seed.stderr
+    assert (links / "shared-site").readlink() == tshared.resolve()
+    assert (links / "acme-priv").readlink() == tpriv_only.resolve()
+    assert not os.path.lexists(links / "legacy-priv-only")
+    assert not os.path.lexists(links / "legacy-site-only")
+    assert not (grok_dir / "ade-legacy-site-only").exists()
+    assert (links / "manual-inactive").readlink() == manual_inactive
+    assert (links / "manual-ext").readlink() == manual_ext
+    assert run(catalog, "--check", "--all").returncode == 0
+
+    # --- Path B: Direct switch WITHOUT a prior ledger -> --check warns, plain --all preserves, --adopt-legacy-links migrates ---
+    _seed_pre_ledger_legacy_state()
+    assert not ledger.exists()
+    active_cfg.parent.mkdir(parents=True, exist_ok=True)
+    active_cfg.write_text("acme\n", encoding="utf-8")
+
+    # 1. --check --all MUST fail and report unrecorded legacy same-name + old-only link & copy warnings.
+    r_chk = run(catalog, "--check", "--all")
+    assert r_chk.returncode == 1
+    assert "unrecorded legacy link ->" in r_chk.stdout
+    assert "unrecorded legacy site skill link still present" in r_chk.stderr
+    assert "unrecorded legacy site skill copy still present" in r_chk.stderr
+    assert "manual-inactive" not in r_chk.stderr
+    assert "manual-ext" not in r_chk.stderr
+
+    # 2. Plain --all (without --adopt-legacy-links) preserves unrecorded legacy links & old-only copies.
+    r_plain = run(catalog, "--all")
+    assert r_plain.returncode == 1
+    assert (links / "shared-site").readlink() == lshared
+    assert (links / "legacy-priv-only").readlink() == lpriv_only
+    assert (links / "legacy-site-only").readlink() == lsite_only
+    assert (grok_dir / "ade-legacy-site-only").exists()
+    assert (links / "manual-inactive").readlink() == manual_inactive
+    assert (links / "manual-ext").readlink() == manual_ext
+
+    # 3. Explicit --adopt-legacy-links --all migrates canonical legacy links & removes old-only links/copies,
+    #    while preserving both manual-inactive and manual-ext!
+    r_adopt = run(catalog, "--adopt-legacy-links", "--all")
+    assert r_adopt.returncode == 0, r_adopt.stdout + r_adopt.stderr
+    assert (links / "shared-site").readlink() == tshared.resolve()
+    assert (links / "acme-priv").readlink() == tpriv_only.resolve()
+    assert not os.path.lexists(links / "legacy-priv-only")
+    assert not os.path.lexists(links / "legacy-site-only")
+    assert not (grok_dir / "ade-legacy-site-only").exists()
+    assert (grok_dir / "ade-shared-site" / ".skill-everywhere").read_text().startswith(
+        "source=tendcf-public-acme/skills/shared-site\n"
+    )
+    assert (links / "manual-inactive").readlink() == manual_inactive
+    assert (links / "manual-ext").readlink() == manual_ext
+    assert run(catalog, "--check", "--all").returncode == 0
+
+
+def test_concurrent_skill_installs_preserve_all_ledger_entries(catalog, tmp_path):
+    """Round 5 MED #2: concurrent skill-everywhere runs installing distinct skills merge into managed-links.tsv cleanly."""
+    home, _, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+    env["SKILL_EVERYWHERE_NO_COPY"] = "1"
+
+    lpriv = home / "ops" / "site-private" / "skills"
+    lpriv.mkdir(parents=True)
+    names = [f"concurrent-{i}" for i in range(4)]
+    srcs = {n: skill(lpriv, n) for n in names}
+
+    procs = [
+        subprocess.Popen(
+            [str(SCRIPT), n],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for n in names
+    ]
+    for p in procs:
+        out, err = p.communicate(timeout=30)
+        assert p.returncode == 0, out + err
+
+    links = home / ".agents" / "skills"
+    ledger = tmp_path / "state" / "skill-everywhere" / "managed-links.tsv"
+    assert ledger.exists()
+    lines = set(ledger.read_text(encoding="utf-8").splitlines())
+    for n in names:
+        assert (links / n).readlink() == srcs[n]
+        assert f"link\t{links / n}\t{srcs[n]}" in lines
 

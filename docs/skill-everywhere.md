@@ -45,17 +45,20 @@ churn can no longer break skill loading):
 
 **Site-root transition reconciliation & per-entry provenance ledger (2026-11-24).** Link runs
 record each individual site/private symlink (`link\t<dest>\t<target>`) and Grok Bot copy
-(`copy\t<dest>\t<source>`) that `skill-everywhere` itself installs in
-`${XDG_STATE_HOME:-~/.local/state}/skill-everywhere/managed-links.tsv` (`--check` and `--dry-run`
-never write it, and ADE-only runs never claim ownership of site links). Switching active roots
-reconciles only entries whose exact `(dest, target)` or `(dest, source)` matches a recorded
-ledger entry: same-name managed links are classified as `migrating from ...` (`--check --all`
-exits 1) and atomically relinked to the active root in link mode (and Grok Bot copies are
-re-rendered); old-root-only managed links and Grok Bot copies are flagged by `--check --all` and
-removed by `--all`. Manually installed symlinks — even ones pointing into a previously selected
-site root or another syntactically valid inactive site layout — and foreign directories are
-always left untouched. Shared path/slug helpers live in `bin/ade_ops_paths.py` (CLI verbs:
-`python3 bin/ade_ops_paths.py {skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store}`).
+(`copy\t<dest>\t<source>`) that `skill-everywhere` installs (or sees already linked/copied to
+the active site/private root on a normal run, seeding pre-upgrade installations into the ledger)
+in `${XDG_STATE_HOME:-~/.local/state}/skill-everywhere/managed-links.tsv` (`--check` and `--dry-run`
+never write it, ADE-only runs never claim ownership of site links, and concurrent runs merge
+deltas safely under an exclusive `flock` lock via `ade_ops_paths.py merge-ledger`). Switching
+active roots reconciles entries whose exact `(dest, target)` or `(dest, source)` matches the
+ledger: same-name managed links are classified `migrating from ...` (`--check --all` exits 1)
+and atomically relinked in link mode; old-root-only managed links and Grok Bot copies are
+flagged by `--check --all` and removed by `--all`. Unrecorded pre-ledger links/copies pointing
+into the canonical legacy defaults (`~/ops/site-{private,public-djbclark}/skills`) are reported
+by `--check --all` and preserved by default on plain `--all`; pass `--adopt-legacy-links --all`
+to explicitly migrate/clean them while still preserving manually installed symlinks to unrelated
+or inactive site layouts. Shared path/slug helpers live in `bin/ade_ops_paths.py` (CLI verbs:
+`python3 bin/ade_ops_paths.py {skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store | merge-ledger PATH}`).
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/self-handoff` is a symlink to the git

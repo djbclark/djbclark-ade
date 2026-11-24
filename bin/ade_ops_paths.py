@@ -22,17 +22,20 @@ CLI usage (for shell callers such as `bin/skill-everywhere`; library module, no 
   python3 bin/ade_ops_paths.py managed-root-bases     # print tendcf ops root then legacy ops root
   python3 bin/ade_ops_paths.py find-bgrun [--include-bg]
   python3 bin/ade_ops_paths.py default-bm-store       # print active or legacy Basic Memory store
+  python3 bin/ade_ops_paths.py merge-ledger PATH      # apply tab-delimited set/del deltas under flock
 
 Python 3.9+ stdlib only.
 """
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import pwd
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -57,7 +60,7 @@ LEGACY_SITE_NAMES = (
 _HOME_PREFIXES = ("~/", "$HOME/", "${HOME}/")
 _CLI_USAGE = (
     "usage: python3 bin/ade_ops_paths.py "
-    "{skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store}\n"
+    "{skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store | merge-ledger PATH}\n"
 )
 
 
@@ -762,6 +765,64 @@ def resolve_ops_checkout_name(
     return None
 
 
+def merge_skill_ledger(ledger_path: Path, deltas: list[tuple[str, str, str, str]]) -> None:
+    """Apply `(op, kind, dest, target)` deltas to `ledger_path` under an exclusive `flock` lock.
+
+    Uses a sibling `.lock` file that is never unlinked so concurrent `bin/skill-everywhere` runs
+    serialize cleanly, merge their distinct deltas against the latest on-disk snapshot, and replace
+    `ledger_path` atomically. Refuses to write through a symlinked ledger or lock file.
+    """
+    if not deltas:
+        return
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = ledger_path.parent / f"{ledger_path.stem}.lock"
+    if lock_path.is_symlink() or ledger_path.is_symlink():
+        raise OpsPathError(f"refusing symlinked skill ledger or lock file: {ledger_path}")
+
+    lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    lock_fd = os.open(lock_path, lock_flags, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if ledger_path.is_symlink():
+            raise OpsPathError(f"refusing symlinked skill ledger: {ledger_path}")
+        entries: dict[tuple[str, str], str] = {}
+        if ledger_path.is_file():
+            for raw in ledger_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = raw.split("\t", 2)
+                if len(parts) == 3 and parts[0] in ("link", "copy") and parts[1] and parts[2]:
+                    entries[(parts[0], parts[1])] = parts[2]
+        for op, kind, dest, target in deltas:
+            if kind not in ("link", "copy") or not dest:
+                continue
+            if op == "set" and target:
+                entries[(kind, dest)] = target
+            elif op == "del":
+                entries.pop((kind, dest), None)
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(ledger_path.parent),
+            prefix=f".{ledger_path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for (kind, dest), target in sorted(entries.items()):
+                    fh.write(f"{kind}\t{dest}\t{target}\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, ledger_path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
 def _cli(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         stream = sys.stdout if argv and argv[0] in ("-h", "--help") else sys.stderr
@@ -786,6 +847,26 @@ def _cli(argv: list[str]) -> int:
         return 0
     if cmd == "default-bm-store":
         sys.stdout.write(f"{resolve_default_bm_store()}\n")
+        return 0
+    if cmd == "merge-ledger":
+        if len(argv) != 2 or not argv[1]:
+            sys.stderr.write(_CLI_USAGE)
+            return 2
+        deltas: list[tuple[str, str, str, str]] = []
+        for line in sys.stdin.read().splitlines():
+            if not line:
+                continue
+            parts = line.split("\t", 3)
+            if len(parts) < 3:
+                continue
+            op, kind, dest = parts[0], parts[1], parts[2]
+            target = parts[3] if len(parts) > 3 else ""
+            deltas.append((op, kind, dest, target))
+        try:
+            merge_skill_ledger(Path(argv[1]), deltas)
+        except (OSError, OpsPathError) as exc:
+            sys.stderr.write(f"ade_ops_paths: {exc}\n")
+            return 1
         return 0
     sys.stderr.write(_CLI_USAGE)
     return 2
