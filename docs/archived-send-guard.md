@@ -171,6 +171,59 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    is judged like any other, and a live replaced target is redirected to its successor), and `ade_self_session` (it messages its own live
    predecessor before the archive).
 
+## Supported revive: `bin/ade-revive` (queue #97, 2026-11-24)
+
+Idle-archiving sweeps can archive sleeping agents freely only when reviving a legitimate sleeping agent has a clean,
+audited route that does not weaken `bin/ade_send_guard.py`'s refusals for careless `paseo send` calls. `bin/ade-revive`
+is that route:
+
+```
+bin/ade-revive ID [--reason TEXT] [--message TEXT] [--allow-any] [--dry-run] [--json] [--timeout S] [--paseo PATH]
+```
+
+**Verified Paseo un-archive mechanism (2026-11-24):** Paseo exposes no standalone `paseo agent unarchive` CLI command or
+HTTP endpoint, but `paseo agent reload --json -- ID` (`packages/cli/src/commands/agent/reload.ts`, confirmed present in
+installed `/Applications/Paseo.app/Contents/Resources/app.asar`) sends the daemon RPC `refresh_agent_request`. In
+`packages/server/src/server/session.ts` (`handleRefreshAgentRequest`), the daemon calls `unarchiveAgentState` (clearing
+`archivedAt` via `agentManager.unarchiveSnapshot`) and reloads/resumes the persisted session from disk without sending a
+prompt or starting a paid model turn (the same RPC used by the installed `reopen-archived` plugin). `bin/ade-revive`
+uses `paseo agent reload --json -- ID` to un-archive, polls a fresh `paseo agent inspect ID --json` until `Archived:
+false` (up to `--timeout`, default `15` s) to prove the agent is live, and delivers `--message TEXT` via `paseo send
+--json --no-wait -- ID TEXT` only after live proof succeeds.
+
+**Safety invariants:**
+
+1. **Strict UUID validation:** `ID` must be a full lowercase UUID (`ade_lead_succession.UUID_RE`). Prefixes, names,
+   empty strings, and flag-like inputs (`--host`, `--home`) are rejected with exit `2`.
+2. **Fail-closed inspect:** unlike `ade_send_guard.decide()` (which fails open on a Paseo outage so ordinary sends are
+   not blocked), `ade-revive` requires a valid `paseo agent inspect ID --json` response with matching `Id` and boolean
+   `Archived`; an unknown agent or unreadable Paseo fails closed with exit `1`.
+3. **Never revives a replaced or handed-off agent:** checks `ade_coord.current_role(ID)` and runs
+   `ade_send_guard.decide(...)` with `allow_replaced=None`. Any completed or fresh `acknowledged` handoff redirect,
+   archived successor, enrolled role replacement, or cyclic succession ledger is refused with exit `4` naming the
+   successor — even when the agent is currently live (`Archived: false`) and even if `--allow-any`,
+   `ADE_ALLOW_ARCHIVED_SEND=<id>`, or `ADE_ALLOW_REPLACED_SEND=<id>` is set.
+4. **Idempotent when already live:** if `Archived: false` and not replaced, exits `0` immediately (`status:
+   "already_live"`), reloads nothing, sends nothing (even when `--message` is passed), and writes no log line.
+5. **Authorization for archived agents:** allowed when the caller (`PASEO_AGENT_ID`) provably owns the agent via
+   `ade_send_guard.owner_proof(...)` (2026-11-21 ruling: `label:ade.lead=<x>` or `parent:<x>` for `x` in the caller's
+   live lineage), or when the operator explicitly authorizes via `ADE_ALLOW_ARCHIVED_SEND=<full id>` or `--allow-any`.
+   Every other archived target is refused with exit `4`.
+6. **Audit log:** every non-dry-run revive appends one JSON line via `ade_send_guard.log_revive` (`event: "revive"`,
+   `target`, `sender`, `proof`, `reason`, `source: "ade-revive"`, UTC `ts`, `pid`, `ppid`, `argv0`; no message text) to
+   `$ADE_SEND_GUARD_LOG`, else `~/.local/state/djbclark-ade/send-guard-overrides.jsonl` (atomic `O_APPEND`, `0700`/`0600`,
+   `O_NOFOLLOW | O_NONBLOCK`).
+7. **`--dry-run`:** runs all validation, inspect, succession, and authorization checks and reports the outcome without
+   reloading, sending, or logging (exits `0` if already live or authorized, `4` if refused, `1` if inspect failed).
+8. **Environment / test injection:** `--paseo PATH` (or `ADE_REVIVE_PASEO`) selects the `paseo` binary explicitly
+   without `PATH` reordering; `ADE_REVIVE_POLL_INTERVAL` overrides the default `0.25` s inspect poll interval.
+
+**Exit codes:** `0` revived and proven live, already live, or `--dry-run` authorized; `1` runtime failure (`not_found`,
+`error`, `timeout` waiting for `Archived: false`, or `message_failed` after revive); `2` usage / argument validation
+error; `4` refused / blocked (replaced/handed-off, cyclic ledger, archived successor, or unauthorized).
+
+`bin/ade_send_guard.py`'s existing refusals for careless `paseo send` calls remain completely unchanged.
+
 ## Limits
 
 1. The hook sees only the target text. A name or id prefix is resolved by `paseo agent inspect`; a target Paseo cannot resolve
@@ -182,8 +235,9 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    directly. A refusal in the shim and a denial in the hook are the same decision; the hook stays as the early warning.
 3. A send racing a `finish` can still reach the predecessor; the next send is redirected.
 4. Only a **send** is guarded. Paseo also un-archives on `paseo agent reload`, a resume request and an import
-   (`agent-prompt.ts`, `session.ts` resume/refresh handlers); none of those is checked here. `paseo agent inspect` itself does not
-   un-archive, so the guard's probe is safe.
+   (`agent-prompt.ts`, `session.ts` resume/refresh handlers); `bin/ade-revive` is the supported guarded wrapper around
+   `paseo agent reload`, while bare `paseo agent reload`, resume, and import are not blocked by the send guard.
+   `paseo agent inspect` itself does not un-archive, so the guard's probe is safe.
 5. The hook strips shell comments (a `#` that starts a word, outside quotes: not after an escaped blank, a continuation or a
    closing quote) before it looks for a send, so a leading comment line never hides a later send. A `$(...)` or backtick is a
    command outside quotes and inside double quotes (`"x $(paseo send A)"` is a send) but text inside single quotes (a markdown
@@ -207,10 +261,14 @@ CLI: `python3 bin/ade_send_guard.py TARGET` prints the decision as JSON and exit
    text after `printf`) and `source FILE` / `. FILE` of a file that holds a send are not seen (`sh FILE` is); an fd-numbered redirect before the agent (`2>x`) is skipped, but an agent prefix of one or two digits directly followed by a redirect word is taken for the fd (`paseo send 2 >x A` judges `A`, the shell sends to `2`), as is a quoted `'>'` for a redirect (the lexer drops the quotes; `paseo send '>' A hi` judges `hi`): both read the wrong word in the false-deny direction. A redirect after `--` is skipped like one before it (in the hook only: the shim reads a real argv, where `>` is a word). In an ANSI-C `$'...'` list of ids, `\n \t \r \v \f`, `\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\cX` (`\cJ`) and octal escapes that make a blank (`\x0a`, `\012`) split the ids; any other escape leaves the string masked.
 6. Upstream: Paseo itself should not un-archive on a message (getpaseo/paseo/issues/9684).
 
-Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`) and
+Tests: `tests/test_archived_send_guard.py` (decision table, parser, hook end to end against a fake `paseo`),
 `tests/test_ade_paseo_guard.py` (the shim and helper end to end, including a Python `subprocess.run(["paseo", "send", ...])`
 with the shim directory first on PATH, the `BASH_ENV` case (kept on purpose, with the documented result), two shim copies on one PATH,
-the re-entry cap, option placement, the recursion probe, fail-open and both overrides). The 2026-11-21 own-worker tests
+the re-entry cap, option placement, the recursion probe, fail-open and both overrides), and `tests/test_ade_revive.py`
+(`bin/ade-revive` end to end with explicit `--paseo` / `ADE_REVIVE_PASEO` injection: UUID validation, idempotent `already_live`,
+replaced/handed-off/acknowledged/archived-successor/cyclic/enrolled refusals even with `--allow-any` and env overrides,
+owner-proven and operator-authorized revives, audit logging without message text, `--dry-run`, live-proof polling, timeout,
+and reload/send failure handling). The 2026-11-21 own-worker tests
 (each fails with its branch reverted): the label proof, a predecessor's label, a parent chain and its hop cap, every fail-closed
 case above, the log lines, the hook's reading of the sender (`test_the_hook_reads_the_sender_from_its_environment_never_from_the_command_text`:
 a `PASEO_AGENT_ID=<owner>` written in the command is denied for a stranger's or an absent sender), that ownership never opens a
