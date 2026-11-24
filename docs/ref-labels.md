@@ -67,33 +67,37 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    post of 200+ characters with no `Ref:` last line — blocks the stop once and
    auto-mints a fresh `Ref: <BOT>-<id>` (`ADE_REF_BOT` / `REF_BOT`, else
    `CLAUDE` for Claude Code) directly into the block reason via `bin/ref`
-   (passing `--skip-id` when rejecting a syntactically valid Ref so a hand-typed
-   id is never registered as issued), so the model can paste it verbatim without
-   an extra Bash round (if `bin/ref` is unavailable, fails, or emits undecodable
-   or unexpected output, the reason falls back to naming `ref CLAUDE`
-   explicitly). A short progress note under 200 chars without a `Ref:` line is
-   exempt (item 1). On `SessionStart` (which fires on `startup`, `resume`,
-   `clear`, `compact`, and `fork`) and on `UserPromptSubmit` (once per
-   compaction epoch, keyed by the latest main-thread `compact_boundary`
-   identity and persisted atomically), the hook injects a crisp one-line
-   `additionalContext` reminder so auto-compaction cannot drop the rule. The
-   hook never loops: it allows the stop when Claude Code reports
-   `stop_hook_active`, blocks a given message once per session (recording its
-   digest in `<session>.blocked` under a file lock), skips sub-agents
-   (`agent_id`), makes no network call, fails open on an error (an `issued.log`
-   that exists but cannot be read is allowed and logged; an absent one, or one
-   without the id, is "never issued" and blocks) and is switched off with
-   `REF_GATE_OFF=1`. Every in-scope top-level `Stop` decision (`allowed-empty`,
-   `allowed-short`, `allowed-valid`, `allowed-unreadable-log`,
-   `allowed-stop-hook-active`, `allowed-already-blocked`, `blocked-no-ref`, and
-   `blocked`) writes a content-free audit row (structured `ref_kind`, `post_len`,
-   `stop_hook_active`, `session_id`, `reason`, and `minted_ref` only when a Ref
-   was minted; raw reply text and malformed `Ref:` text are never persisted) to
-   `~/.local/state/ade/ref-gate/decisions.log` (`0700` dir / `0600` files);
-   sub-agents (`agent_id`), non-`Stop` events, unparseable stdin JSON, and
-   `REF_GATE_OFF=1` are excluded. Other TUIs (Codex, Pi, Cursor, Hermes) have no
-   such hook yet and rely on this page. Never end a post with any other `Ref:`
-   line (a URL, `#861`): the hook blocks it as not of the form.
+   (passing `--skip-id` when rejecting a syntactically valid Ref so this mint
+   skips an immediate counter collision without registering the rejected id as
+   issued; larger unreached ids remain eligible for later independent
+   issuance), so the model can paste it verbatim without an extra Bash round
+   (if `bin/ref` is unavailable, fails, or emits undecodable or unexpected
+   output, the reason falls back to naming `ref CLAUDE` explicitly). A short
+   progress note under 200 chars without a `Ref:` line is exempt (item 1). On
+   `SessionStart` (which fires on `startup`, `resume`, `clear`, `compact`, and
+   `fork`) and on `UserPromptSubmit` (once per compaction epoch, keyed by the
+   latest main-thread `compact_boundary` identity and persisted atomically,
+   preserving the known epoch on bounded tail scans or transient read
+   failures), the hook injects a crisp one-line `additionalContext` reminder so
+   auto-compaction cannot drop the rule. The hook never loops: it allows the
+   stop when Claude Code reports `stop_hook_active`, blocks a given message
+   once per session (recording its digest in `<session>.blocked` under a single
+   permanent `.state.lock`), skips sub-agents (`agent_id`), makes no network
+   call, fails open on an error (an `issued.log` that exists but cannot be read
+   is allowed and logged; an absent one, or one without the id, is "never
+   issued" and blocks) and is switched off with `REF_GATE_OFF=1`. Every
+   in-scope top-level `Stop` decision (`allowed-empty`, `allowed-short`,
+   `allowed-valid`, `allowed-unreadable-log`, `allowed-stop-hook-active`,
+   `allowed-already-blocked`, `blocked-no-ref`, and `blocked`) writes a
+   strictly categorical, content-free audit row (structured `ref_kind`,
+   `post_len`, `stop_hook_active`, `session_id`, categorical `reason`/`problem`,
+   and `minted_ref` only when a Ref was minted; no assistant-supplied reply or
+   Ref text is ever persisted) to `~/.local/state/ade/ref-gate/decisions.log`
+   (`0700` dir / `0600` files); sub-agents (`agent_id`), non-`Stop` events,
+   unparseable stdin JSON, and `REF_GATE_OFF=1` are excluded. Other TUIs
+   (Codex, Pi, Cursor, Hermes) have no such hook yet and rely on this page.
+   Never end a post with any other `Ref:` line (a URL, `#861`): the hook blocks
+   it as not of the form.
 7. **If the hook blocks you**, its reason names the problem and already includes
    a freshly minted `Ref: <BOT>-<id>` line ready to paste. Send the post again
    with that exact line appended (on missing Ref) or replacing the bad last line
@@ -122,7 +126,7 @@ all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/a
 
 ## Install
 
-- `bin/ref` (issues, with optional `--skip-id ID` to skip an excluded counter value without recording it; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
+- `bin/ref` (issues, with optional `--skip-id ID` to skip an excluded counter value during that issuance without recording it; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
   `ade-update` reports a missing `~/.claude/hooks/` link with its `ln -sfn` fix (the template's
   `[ -f ] || exit 0` guard leaves an unlinked hook silently off); the `Stop`, `SessionStart`,
   and `UserPromptSubmit` entries of `agents/claude/settings.json.tmpl` wire

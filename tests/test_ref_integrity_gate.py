@@ -111,11 +111,15 @@ def test_hand_typed_git_hash_blocks_with_auto_minted_ref(tmp_path):
 
 
 def test_secret_sentinel_never_persisted_in_reason_or_log_and_modes_are_private(tmp_path):
-    """Rule 3 (MED #1): raw reply text and malformed Ref text are never written to decisions.log
+    """Rule 3 (MED #1 + LOW #1): no assistant-supplied text (raw reply lines, malformed Ref text,
+    or syntactically valid never-issued / wrong-bot Ref substrings) is ever written to decisions.log
     or .blocked, and state directory/files enforce 0700/0600 permissions."""
     e = Env(tmp_path)
+    e.issue("ADE")  # id 1 issued to ADE (used below for wrong-bot sentinel check)
     sentinel_reply = "SECRET_SENTINEL_REPLY_9a8b7c6d5e"
     sentinel_ref = "SECRET_SENTINEL_REF_1f2e3d4c5b"
+    sentinel_hex_id = "deadbeef1234"
+    sentinel_bot = "SECRETPFX"
 
     out1 = e.run(f"{LONG}\nexport API_TOKEN={sentinel_reply}", session="sec1")
     assert blocked(out1)
@@ -128,18 +132,25 @@ def test_secret_sentinel_never_persisted_in_reason_or_log_and_modes_are_private(
     # Loop-guarded allow also must not persist the secret sentinel.
     assert e.run(f"{LONG}\nexport API_TOKEN={sentinel_reply}", session="sec3", stop_hook_active=True) is None
 
+    # LOW #1: Syntactically valid never-issued and wrong-bot Ref strings must not leak into decisions.log.
+    out4 = e.run(f"{LONG}\nRef: CLAUDE-{sentinel_hex_id}", session="sec4")
+    assert blocked(out4)
+    out5 = e.run(f"{LONG}\nRef: {sentinel_bot}-1", session="sec5")
+    assert blocked(out5)
+
     log_path = e.state / "decisions.log"
     raw_log = log_path.read_text()
-    assert sentinel_reply not in raw_log
-    assert sentinel_ref not in raw_log
+    for needle in (sentinel_reply, sentinel_ref, sentinel_hex_id, sentinel_bot):
+        assert needle not in raw_log, needle
     for rec in e.decisions():
         assert "line" not in rec
         assert rec["reason"]
 
-    for marker in (e.state / "sec1.blocked", e.state / "sec2.blocked"):
+    for marker in (e.state / "sec1.blocked", e.state / "sec2.blocked", e.state / "sec4.blocked", e.state / "sec5.blocked"):
         assert marker.is_file()
         raw_marker = marker.read_text()
-        assert sentinel_reply not in raw_marker and sentinel_ref not in raw_marker
+        for needle in (sentinel_reply, sentinel_ref, sentinel_hex_id, sentinel_bot):
+            assert needle not in raw_marker
         assert stat.S_IMODE(marker.stat().st_mode) == 0o600
 
     assert stat.S_IMODE(e.state.stat().st_mode) == 0o700
@@ -234,6 +245,38 @@ def test_current_entry_written_twice_is_not_an_earlier_use(tmp_path):
     msg = f"{LONG}\n{ref}"
     assert e.run(msg, e.transcript(("cur", msg), ("cur", msg))) is None
     assert blocked(e.run(msg, e.transcript(("old", f"x\n{ref}"), ("cur", msg), ("cur", msg)), session="s2"))
+
+
+def test_duplicate_split_records_do_not_make_fresh_ref_look_reused(tmp_path):
+    """MED #1 (Round 2): One current message ID with distinct streamed text blocks A and B (ending
+    in a fresh issued Ref) written twice as A/B/A/B must NOT be misclassified as an earlier use."""
+    e = Env(tmp_path)
+    r1 = e.issue()
+    part_a = "First streamed paragraph of the reply."
+    part_b = f"{LONG}\n{r1}"
+    full_msg = f"{part_a}\n{part_b}"
+
+    # Case 1: duplicate physical records carrying the same record uuid.
+    t_same_uuid = tmp_path / "dup_same_uuid.jsonl"
+    rec_a = {"type": "assistant", "uuid": "u-a", "isSidechain": False, "message": {
+        "id": "cur", "role": "assistant", "content": [{"type": "text", "text": part_a}],
+    }}
+    rec_b = {"type": "assistant", "uuid": "u-b", "isSidechain": False, "message": {
+        "id": "cur", "role": "assistant", "content": [{"type": "text", "text": part_b}],
+    }}
+    t_same_uuid.write_text("\n".join(json.dumps(r) for r in (rec_a, rec_b, rec_a, rec_b)) + "\n")
+    assert e.run(full_msg, t_same_uuid, session="split-same-uuid") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-valid"
+
+    # Case 2: duplicate split sequence under the same message.id with distinct record uuids.
+    t_diff_uuid = e.transcript(("cur", part_a), ("cur", part_b), ("cur", part_a), ("cur", part_b), name="dup_diff_uuid.jsonl")
+    assert e.run(full_msg, t_diff_uuid, session="split-diff-uuid") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-valid"
+
+    # Case 3: genuine earlier reuse (earlier message `old` ended in r1, new message `cur` reuses r1).
+    t_reuse = e.transcript(("old", part_a), ("old", part_b), ("cur", part_a), ("cur", part_b), name="split_reuse.jsonl")
+    out = e.run(full_msg, t_reuse, session="split-reuse")
+    assert blocked(out) and "already ended an earlier post" in out["reason"]
 
 
 def test_historical_streamed_multi_block_message_grouped_by_message_id(tmp_path):
@@ -517,15 +560,21 @@ def test_no_ref_line_respects_stop_hook_active_and_already_blocked(tmp_path):
 
 
 def test_concurrent_stop_invocations_do_not_double_block_or_double_mint(tmp_path):
-    """LOW #2: Overlapping Stop calls for the same session and message block/mint exactly once."""
+    """LOW #2 + MED #2 (Round 2): Truly overlapping Stop calls for the same session and message
+    block/mint exactly once, and the single permanent .state.lock serializes concurrent runs."""
+    import concurrent.futures
+    import threading
+
     e = Env(tmp_path)
     payload = json.dumps({
         "hook_event_name": "Stop",
         "session_id": "race-session",
         "last_assistant_message": LONG,
     })
-    procs = [
-        subprocess.Popen(
+    barrier = threading.Barrier(4)
+
+    def invoke(_idx):
+        p = subprocess.Popen(
             [sys.executable, str(HOOK)],
             env=e.env,
             stdin=subprocess.PIPE,
@@ -533,13 +582,14 @@ def test_concurrent_stop_invocations_do_not_double_block_or_double_mint(tmp_path
             stderr=subprocess.PIPE,
             text=True,
         )
-        for _ in range(4)
-    ]
-    outs = []
-    for p in procs:
+        barrier.wait(timeout=10)
         stdout, stderr = p.communicate(payload, timeout=30)
         assert p.returncode == 0, stderr
-        outs.append(json.loads(stdout) if stdout.strip() else None)
+        return json.loads(stdout) if stdout.strip() else None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        outs = list(pool.map(invoke, range(4)))
+
     blocked_outs = [o for o in outs if blocked(o)]
     assert len(blocked_outs) == 1
     assert len([o for o in outs if o is None]) == 3
@@ -547,6 +597,39 @@ def test_concurrent_stop_invocations_do_not_double_block_or_double_mint(tmp_path
     assert len(issued_lines) == 1
     outcomes = sorted(d["outcome"] for d in e.decisions())
     assert outcomes == ["allowed-already-blocked"] * 3 + ["blocked-no-ref"]
+
+
+def test_stale_state_pruning_preserves_lock_inode_and_expires_old_session_files(tmp_path):
+    """MED #2 (Round 2): Pruning stale .blocked/.reminded files runs under the permanent
+    .state.lock and NEVER unlinks .state.lock (even when its mtime is > STATE_MAX_AGE)."""
+    import time
+
+    e = Env(tmp_path)
+    e.state.mkdir(mode=0o700, exist_ok=True)
+    lock_file = e.state / ".state.lock"
+    lock_file.write_text("")
+    lock_file.chmod(0o600)
+    old_blocked = e.state / "stale-sess.blocked"
+    old_blocked.write_text("deadbeef\n")
+    old_reminded = e.state / "stale-sess.reminded"
+    old_reminded.write_text("initial\n")
+    fresh_blocked = e.state / "fresh-sess.blocked"
+    fresh_blocked.write_text("cafebabe\n")
+
+    old_ts = time.time() - (30 * 86400)
+    for p in (lock_file, old_blocked, old_reminded):
+        os.utime(p, (old_ts, old_ts))
+    lock_ino_before = lock_file.stat().st_ino
+
+    out = e.run(LONG, session="active-sess")
+    assert blocked(out)
+    assert not old_blocked.exists()
+    assert not old_reminded.exists()
+    assert fresh_blocked.exists()
+    assert (e.state / "active-sess.blocked").exists()
+    assert (e.state / "decisions.log").exists()
+    assert lock_file.exists()
+    assert lock_file.stat().st_ino == lock_ino_before
 
 
 def test_short_post_without_ref_is_silent_and_logs_allowed_short(tmp_path):
@@ -759,6 +842,55 @@ def test_compact_epoch_identity_does_not_regress_when_older_boundaries_roll_out(
         fh.write(b2)
     id_next = mod.compact_epoch_id(str(t))
     assert id_next != id_after
+
+
+def test_epoch_preserved_when_boundary_rolls_past_tail_or_read_fails(tmp_path, monkeypatch):
+    """MED #3 (Round 2): When the latest boundary A rolls completely past TRANSCRIPT_TAIL without a
+    new boundary, or when reading the transcript fails transiently, the persisted epoch is
+    preserved and NO duplicate reminder is emitted."""
+    spec = importlib.util.spec_from_file_location("ref_gate_epoch_test", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr(mod, "TRANSCRIPT_TAIL", 256)
+    monkeypatch.setenv("REF_GATE_STATE_DIR", str(tmp_path / "state"))
+
+    t = tmp_path / "rolling_past.jsonl"
+    b_a = json.dumps({"type": "system", "subtype": "compact_boundary", "uuid": "cb-a", "isSidechain": False}) + "\n"
+    t.write_text(b_a)
+
+    # First reminder records boundary A.
+    ep_a = mod.compact_epoch_id(str(t))
+    assert ep_a == "uuid:cb-a"
+    assert mod.should_remind_epoch("ep-roll", ep_a) is True
+    assert mod.should_remind_epoch("ep-roll", ep_a) is False
+
+    # Append > 256 bytes of ordinary records so boundary A rolls completely outside TRANSCRIPT_TAIL.
+    with t.open("a") as fh:
+        for i in range(6):
+            fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": f"pad-{i}-" + "x" * 60}}) + "\n")
+    ep_bounded = mod.compact_epoch_id(str(t))
+    assert ep_bounded is None  # bounded tail scan without boundary is indeterminate, not "initial"
+    assert mod.should_remind_epoch("ep-roll", ep_bounded) is False
+    assert (tmp_path / "state" / "ep-roll.reminded").read_text().strip() == "uuid:cb-a"
+
+    # Transient read failure also returns None and preserves the persisted epoch.
+    assert mod.compact_epoch_id(str(tmp_path / "missing.jsonl")) is None
+    assert mod.should_remind_epoch("ep-roll", None) is False
+    assert (tmp_path / "state" / "ep-roll.reminded").read_text().strip() == "uuid:cb-a"
+
+    # A fresh session with no persisted epoch yet still gets its initial reminder on missing file.
+    assert mod.should_remind_epoch("brand-new", None) is True
+    assert (tmp_path / "state" / "brand-new.reminded").read_text().strip() == "initial"
+    assert mod.should_remind_epoch("brand-new", None) is False
+
+    # Once a new boundary B is appended, ep-roll reminds once for B.
+    b_b = json.dumps({"type": "system", "subtype": "compact_boundary", "uuid": "cb-b", "isSidechain": False}) + "\n"
+    with t.open("a") as fh:
+        fh.write(b_b)
+    ep_b = mod.compact_epoch_id(str(t))
+    assert ep_b == "uuid:cb-b"
+    assert mod.should_remind_epoch("ep-roll", ep_b) is True
+    assert mod.should_remind_epoch("ep-roll", ep_b) is False
 
 
 def test_subagents_other_events_garbage_and_kill_switch_pass_and_are_excluded_from_log(tmp_path):

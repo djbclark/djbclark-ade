@@ -13,38 +13,42 @@ post (docs/ref-labels.md Part B): `ref <BOT>` prints `Ref: <BOT>-<base36>` and l
     else `CLAUDE` for Claude Code), runs `bin/ref [--skip-id <id>] <BOT>` directly, and hands the
     freshly minted `Ref: <BOT>-<id>` line directly in the block reason so the model needs no extra
     Bash round (graceful fallback to naming `ref <BOT>` explicitly if `bin/ref` is unavailable,
-    fails, or emits undecodable/unexpected output). Passing `--skip-id` skips any rejected numeric
-    id inside `bin/ref`'s lock before committing, so a hand-typed Ref is never registered as issued.
+    fails, or emits undecodable/unexpected output). Passing `--skip-id` skips an immediate counter
+    collision during this mint inside `bin/ref`'s lock before committing, without registering the
+    rejected id as issued.
   - Every in-scope top-level `Stop` decision (`allowed-empty`, `allowed-short`, `allowed-valid`,
     `allowed-unreadable-log`, `allowed-stop-hook-active`, `allowed-already-blocked`,
-    `blocked-no-ref`, `blocked`) writes a content-free audit row to `decisions.log` (`0700` dir /
-    `0600` files) with `session_id`, `outcome`, `ref_kind`, `post_len`, `stop_hook_active`,
-    `reason`, and optional `problem` / `minted_ref`. Raw reply text and malformed `Ref:` text are
-    never persisted. Exclusions (not logged): sub-agents (`agent_id`), non-`Stop` events,
-    unparseable stdin JSON, and `REF_GATE_OFF=1`.
+    `blocked-no-ref`, `blocked`) writes a strictly categorical, content-free audit row to
+    `decisions.log` (`0700` dir / `0600` files) with `session_id`, `outcome`, `ref_kind`,
+    `post_len`, `stop_hook_active`, `reason`, and optional categorical `problem` / `minted_ref`.
+    No assistant-supplied text (raw reply lines, malformed Ref text, or unissued/wrong-bot Ref
+    substrings) is ever written to `decisions.log`. Exclusions (not logged): sub-agents
+    (`agent_id`), non-`Stop` events, unparseable stdin JSON, and `REF_GATE_OFF=1`.
   - On `SessionStart` (fires on startup, resume, clear, compact, fork) and `UserPromptSubmit`
     (once per compaction epoch, keyed by latest main-thread `compact_boundary` identity and
-    persisted atomically with `0600` mode), emits a crisp one-line `additionalContext` reminder so
-    auto-compaction cannot drop the Ref rule.
+    persisted atomically with `0600` mode; bounded tail scans or transient read failures preserve
+    the last known epoch instead of resetting to `initial`), emits a crisp one-line
+    `additionalContext` reminder so auto-compaction cannot drop the Ref rule.
 
 When the last non-blank line of the final assistant message starts with `Ref:` it must:
   (a) have the form `Ref: <BOT>-<base36>` (BOT has no spaces or hyphens);
   (b) name an id that is in issued.log;
   (c) carry the bot prefix the log recorded for that id;
-  (d) not have been used by an earlier post of the same transcript (grouped by `message.id`).
+  (d) not have been used by an earlier post of the same transcript (grouped by `message.id` with
+      duplicate physical records deduplicated).
 Any failure, or a 200+ char post with no `Ref:` last line, returns {"decision": "block", "reason": ...}
 with a freshly minted `Ref: <BOT>-<id>` line ready to paste. Short progress notes under 200 chars
 without a `Ref:` line are exempt (docs/ref-labels.md Part B item 1).
 
 Never loops: nothing is blocked when `stop_hook_active` is set, and a message (by hash) is blocked
-at most once per session (guarded by a file lock across check-and-record). Sub-agents (`agent_id`
-in the payload) are skipped: their final message goes to the parent, not the operator. Local and
-fast: it reads issued.log and the transcript tail, no network. Fails open on any error, including
-an issued.log that exists but cannot be read (logged `allowed-unreadable-log`); an absent log or
-one without the id is "never issued" and blocks. REF_GATE_OFF=1 disables it. The log is read as
-`ref lookup` (bin/ref) reads it; the form check here is stricter (upper-case BOT, lower-case id)
-and the block reason never repeats text from the post, so a Ref line cannot smuggle an instruction
-into it. tests/test_ref_integrity_gate.py keeps the two in step.
+at most once per session (guarded by a single stable `.state.lock` file that is never unlinked).
+Sub-agents (`agent_id` in the payload) are skipped: their final message goes to the parent, not the
+operator. Local and fast: it reads issued.log and the transcript tail, no network. Fails open on
+any error, including an issued.log that exists but cannot be read (logged `allowed-unreadable-log`);
+an absent log or one without the id is "never issued" and blocks. REF_GATE_OFF=1 disables it. The
+log is read as `ref lookup` (bin/ref) reads it; the form check here is stricter (upper-case BOT,
+lower-case id) and the block reason never repeats untrusted text from the post, so a Ref line
+cannot smuggle an instruction into it. tests/test_ref_integrity_gate.py keeps the two in step.
 
 Environment: REFS_DIR (issued.log directory), REF_GATE_STATE_DIR (once-per-message state, reminder
 epoch state and decisions.log, default ~/.local/state/ade/ref-gate), ADE_REF_BOT / REF_BOT (bot
@@ -65,10 +69,11 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 
 DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
 REF_LINE = re.compile(r"^Ref:")
-# The form is closed on purpose: nothing outside it is ever echoed into the block reason or log (a
+# The form is closed on purpose: nothing outside it is ever echoed into the block reason (a
 # Ref line can carry text from untrusted content or secrets, and the reason reads like a harness order).
 REF_FORM = re.compile(r"^Ref: ([A-Z0-9_]{1,32})-([0-9a-z]{1,13})$")
 SAFE_BOT = re.compile(r"[A-Z0-9_]{1,32}")
@@ -79,6 +84,17 @@ REF_MINT_TIMEOUT = 3.0  # seconds to wait for `bin/ref <BOT>` before falling bac
 SHORT_POST = 200  # docs/ref-labels.md Part B item 1: a progress note under 200 chars is exempt
 TRANSCRIPT_TAIL = 64 * 1024 * 1024
 STATE_MAX_AGE = 14 * 86400
+STATE_LOCK_NAME = ".state.lock"
+
+# Strictly categorical audit descriptions written to decisions.log (zero assistant-supplied text).
+_AUDIT_PROBLEM: dict[str, str] = {
+    "none": f"no Ref: last line on a {SHORT_POST}+ char post",
+    "malformed": "Ref: last line is not of the form Ref: <BOT>-<base36 id>",
+    "never-issued": "Ref id was never issued by ref",
+    "wrong-bot": "Ref id was issued to a different bot prefix",
+    "reused": "Ref already ended an earlier post of this session",
+    "unreadable-log": "issued.log exists but could not be read",
+}
 
 
 def refs_dir() -> str:
@@ -124,6 +140,22 @@ def _atomic_write_private(path: str, data: str) -> None:
                 os.unlink(tmp)
             except OSError:
                 pass
+
+
+@contextmanager
+def _state_lock(root: str):
+    """Hold an exclusive flock on a single permanent `.state.lock` file that is never unlinked.
+
+    Keeping one stable lock inode prevents the unlink-while-held race where pruning replaces a
+    lock pathname out from under an active session.
+    """
+    lock_path = os.path.join(root, STATE_LOCK_NAME)
+    lock_fd = _open_private(lock_path, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(lock_fd)
 
 
 def normalize_bot(name: str) -> str:
@@ -293,12 +325,33 @@ def _entry_texts(msg: dict) -> list[str]:
     return []
 
 
+def _record_key(entry: dict, raw_line: bytes) -> tuple[str, object]:
+    """Identity of one physical transcript record within a message ID."""
+    uid = entry.get("uuid")
+    if isinstance(uid, str) and uid.strip():
+        return ("uuid", uid.strip())
+    return ("line", hashlib.sha256(raw_line).digest())
+
+
+def _collapse_repeated_sequence(blocks: list[str]) -> list[str]:
+    """If `blocks` is an exact whole-sequence repetition (e.g. [A, B, A, B] -> [A, B]), return the
+    shortest repeating unit; otherwise return `blocks` unchanged."""
+    n = len(blocks)
+    if n < 2:
+        return blocks
+    for unit in range(1, n // 2 + 1):
+        if n % unit == 0 and blocks[:unit] * (n // unit) == blocks:
+            return blocks[:unit]
+    return blocks
+
+
 def assistant_messages(path: str) -> list[tuple[str, str, list[str]]]:
     """[(message id, complete joined text, individual text blocks)] for main-thread assistant
-    messages in the transcript tail, oldest first, grouped by `message.id` so multi-block streamed
-    responses are evaluated as one post rather than per block."""
+    messages in the transcript tail, oldest first, grouped by `message.id` with repeated physical
+    records deduplicated by record `uuid` (or line digest when `uuid` is absent)."""
     order: list[str | None] = []
     by_id: dict[str, list[str]] = {}
+    seen_records: dict[str, set[tuple[str, object]]] = {}
     anonymous: list[tuple[int, list[str]]] = []
     try:
         size = os.path.getsize(path)
@@ -326,7 +379,12 @@ def assistant_messages(path: str) -> list[tuple[str, str, list[str]]]:
         if mid:
             if mid not in by_id:
                 by_id[mid] = []
+                seen_records[mid] = set()
                 order.append(mid)
+            rkey = _record_key(entry, line)
+            if rkey in seen_records[mid]:
+                continue
+            seen_records[mid].add(rkey)
             by_id[mid].extend(texts)
         else:
             anonymous.append((len(order), texts))
@@ -346,10 +404,10 @@ def assistant_messages(path: str) -> list[tuple[str, str, list[str]]]:
 def last_transcript_text(path: str) -> str:
     """Text of the final main-thread assistant message in the transcript (fallback when the payload
     has no `last_assistant_message`). Collects all text blocks sharing the newest assistant
-    `message.id` (Claude Code streams thinking/text/tool_use as separate JSONL records with the
-    same id), skips sidechain records, stops immediately at any newer main-thread `user` /
-    task-notification or `compact_boundary` boundary (so a textless wake-up tail never reaches back
-    to an earlier reply), and returns "" when that newest turn has no text."""
+    `message.id` (deduplicating repeated physical records), skips sidechain records, stops
+    immediately at any newer main-thread `user` / task-notification or `compact_boundary` boundary
+    (so a textless wake-up tail never reaches back to an earlier reply), and returns "" when that
+    newest turn has no text."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -359,6 +417,7 @@ def last_transcript_text(path: str) -> str:
         return ""
     target_mid: str | None = None
     chunks: list[str] = []
+    seen_keys: set[tuple[str, object]] = set()
     for line in reversed(raw.split(b"\n")):
         has_assistant = b'"assistant"' in line
         has_user = b'"user"' in line
@@ -387,21 +446,33 @@ def last_transcript_text(path: str) -> str:
             if not mid:
                 return "\n".join(texts)
             target_mid = mid
+            rkey = _record_key(entry, line)
+            seen_keys.add(rkey)
             if texts:
                 chunks.append("\n".join(texts))
         else:
             if mid != target_mid:
                 break
+            rkey = _record_key(entry, line)
+            if rkey in seen_keys:
+                continue
+            seen_keys.add(rkey)
             if texts:
                 chunks.append("\n".join(texts))
     return "\n".join(reversed(chunks))
 
 
-def compact_epoch_id(path: str) -> str:
-    """Stable identity of the latest main-thread compact_boundary in the transcript tail, or
-    "initial" when none exists. Uses the boundary's uuid (if present) else its absolute file byte
-    offset + line digest, so rolling out older boundaries past TRANSCRIPT_TAIL never resets or
-    repeats an already-reminded epoch."""
+def compact_epoch_id(path: str) -> str | None:
+    """Stable identity of the latest main-thread compact_boundary in the transcript tail.
+
+    Returns:
+      - `"uuid:<id>"` or `"off:<offset>:<digest>"` when a main-thread boundary is found;
+      - `"initial"` ONLY when no transcript path is given OR a complete scan from byte 0 succeeded
+        with no boundary;
+      - `None` (indeterminate) when reading the transcript failed or the scan was bounded to the
+        last `TRANSCRIPT_TAIL` bytes (`base > 0`) without finding a boundary, so callers preserve
+        any already-persisted epoch rather than resetting to `"initial"`.
+    """
     if not path:
         return "initial"
     try:
@@ -411,7 +482,7 @@ def compact_epoch_id(path: str) -> str:
             fh.seek(base)
             raw = fh.read()
     except OSError:
-        return "initial"
+        return None
     end = len(raw)
     while end > 0:
         nl = raw.rfind(b"\n", 0, end)
@@ -435,14 +506,15 @@ def compact_epoch_id(path: str) -> str:
                 return f"uuid:{uid.strip()[:128]}"
             digest = hashlib.sha256(line).hexdigest()[:16]
             return f"off:{base + start}:{digest}"
-    return "initial"
+    return "initial" if base == 0 else None
 
 
 def used_earlier(path: str, ref_line: str, message: str) -> bool:
     """True when an earlier main-thread assistant message of this transcript already ended with
     `ref_line` (evaluated on each message's complete grouped text). The current message is normally
     already in the transcript, so the newest match is dropped when it corresponds to the message
-    being checked; a transcript that lags is then not miscounted."""
+    being checked (including when split records were written more than once); a transcript that
+    lags is then not miscounted."""
     ends: list[tuple[str, str, list[str]]] = []
     for mid, full_text, blocks in assistant_messages(path):
         if last_line(full_text) == ref_line:
@@ -450,16 +522,19 @@ def used_earlier(path: str, ref_line: str, message: str) -> bool:
     if ends:
         cur_mid, cur_text, cur_blocks = ends[-1]
         norm_msg = message.rstrip()
-        if norm_msg.endswith(cur_text.rstrip()) or (
-            cur_blocks and all(b.rstrip() == norm_msg for b in cur_blocks)
+        collapsed_text = "\n".join(_collapse_repeated_sequence(cur_blocks)).rstrip()
+        if (
+            norm_msg.endswith(cur_text.rstrip())
+            or norm_msg.endswith(collapsed_text)
+            or (cur_blocks and all(b.rstrip() == norm_msg for b in cur_blocks))
         ):
             ends = [e for e in ends if e[0] != cur_mid] if cur_mid else ends[:-1]
     return bool(ends)
 
 
 def check(message: str, transcript: str) -> tuple[str, str] | None:
-    """None when the post is fine; else (ref_kind, problem), built only from fixed text and from
-    values that matched REF_FORM (or the log's bot, when it is a plain prefix)."""
+    """None when the post is fine; else (ref_kind, interactive_problem), built only from fixed text
+    and from values that matched REF_FORM (or the log's bot, when it is a plain prefix)."""
     line = last_line(message)
     form = REF_FORM.match(line)
     if not form:
@@ -499,10 +574,10 @@ def log_decision(
     problem: str = "",
     minted_ref: str | None = None,
 ) -> None:
-    """Append one content-free structured telemetry row to decisions.log (0600).
+    """Append one strictly categorical, content-free structured telemetry row to decisions.log (0600).
 
-    Never logs raw reply text or malformed Ref text; records only classifications, lengths,
-    fixed-template reasons/problems, and valid minted Ref IDs.
+    Never logs raw reply text, malformed Ref text, or assistant-supplied Ref substrings; records
+    only classifications, lengths, categorical reasons/problems, and valid minted Ref IDs.
     """
     try:
         rec: dict[str, object] = {
@@ -531,18 +606,25 @@ def _safe_session_name(session: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", session)[:120]
 
 
-def _prune_state_files(root: str) -> None:
+def _prune_state_files_locked(root: str, keep: set[str] | None = None) -> None:
+    """Expire old `.blocked` / `.reminded` session files while holding `.state.lock`.
+
+    NEVER unlinks `.state.lock` (or any `.lock` file) or `decisions.log`.
+    """
+    keep_names = keep or set()
     cutoff = time.time() - STATE_MAX_AGE
     try:
         for name in os.listdir(root):
+            if name in keep_names or name == STATE_LOCK_NAME or name.endswith(".lock"):
+                continue
+            if not (name.endswith(".blocked") or name.endswith(".reminded")):
+                continue
             full = os.path.join(root, name)
-            if (
-                name.endswith(".blocked")
-                or name.endswith(".reminded")
-                or name.endswith(".blocked.lock")
-                or name.endswith(".reminded.lock")
-            ) and os.path.getmtime(full) < cutoff:
-                os.unlink(full)
+            try:
+                if os.path.getmtime(full) < cutoff:
+                    os.unlink(full)
+            except OSError:
+                pass
     except OSError:
         pass
 
@@ -550,16 +632,14 @@ def _prune_state_files(root: str) -> None:
 def already_blocked(session: str, digest: str) -> bool:
     """Record that this message was blocked; True when it had been (so it is never blocked twice).
 
-    Guarded by an exclusive flock across check-and-append so overlapping Stop invocations for the
-    same session and digest cannot double-block or double-mint.
+    Guarded by the permanent `.state.lock` flock across check-and-append (and stale-file pruning)
+    so overlapping Stop invocations for the same session and digest cannot double-block or
+    double-mint.
     """
     root = state_dir()
-    base = os.path.join(root, _safe_session_name(session))
-    path = base + ".blocked"
-    lock_path = base + ".blocked.lock"
-    lock_fd = _open_private(lock_path, os.O_RDWR | os.O_CREAT)
-    try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    fname = _safe_session_name(session) + ".blocked"
+    path = os.path.join(root, fname)
+    with _state_lock(root):
         try:
             with open(path, encoding="utf-8") as fh:
                 if digest in fh.read().split():
@@ -571,35 +651,43 @@ def already_blocked(session: str, digest: str) -> bool:
             fh.write(digest + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-    finally:
-        os.close(lock_fd)
-    _prune_state_files(root)
+        _prune_state_files_locked(root, keep={fname})
     return False
 
 
-def should_remind_epoch(session: str, epoch: str) -> bool:
-    """True once per (session, compaction epoch identity), persisted atomically with 0600 mode."""
+def should_remind_epoch(session: str, epoch: str | None) -> bool:
+    """True once per (session, compaction epoch identity), persisted atomically with 0600 mode.
+
+    When `epoch` is `None` (bounded tail scan found no boundary or transient transcript read
+    failure), any already-persisted epoch is preserved untouched and False is returned so the
+    session does not emit a duplicate reminder; if no epoch has been persisted yet, `"initial"`
+    is recorded and True is returned.
+    """
     root = state_dir()
-    base = os.path.join(root, _safe_session_name(session))
-    path = base + ".reminded"
-    lock_path = base + ".reminded.lock"
-    lock_fd = None
+    fname = _safe_session_name(session) + ".reminded"
+    path = os.path.join(root, fname)
     try:
-        lock_fd = _open_private(lock_path, os.O_RDWR | os.O_CREAT)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        try:
-            with open(path, encoding="utf-8") as fh:
-                if fh.read().strip() == epoch:
+        with _state_lock(root):
+            prev: str | None = None
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    val = fh.read().strip()
+                    if val:
+                        prev = val
+            except OSError:
+                pass
+            if epoch is None:
+                if prev is not None:
                     return False
-        except OSError:
-            pass
-        _atomic_write_private(path, epoch + "\n")
+                target = "initial"
+            else:
+                if prev == epoch:
+                    return False
+                target = epoch
+            _atomic_write_private(path, target + "\n")
+            _prune_state_files_locked(root, keep={fname})
     except OSError:
         return True
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-    _prune_state_files(root)
     return True
 
 
@@ -631,6 +719,13 @@ def _invalid_ref_block_reason(why: str, bot: str, minted: str | None) -> str:
         f"{prefix} Run `ref {bot}` with Bash, then send the post again with its last line replaced "
         "by the exact line `ref` printed."
     )
+
+
+def _audit_block_reason(ref_kind: str, bot: str, minted: str | None) -> str:
+    cat = _AUDIT_PROBLEM.get(ref_kind, "invalid Ref: last line")
+    if minted:
+        return f"blocked: {cat} (auto-minted {minted})"
+    return f"blocked: {cat} (fallback: ref {bot})"
 
 
 def handle_session_start(data: dict) -> int:
@@ -690,20 +785,20 @@ def handle_stop(data: dict) -> int:
                 post_len=post_len, stop_hook_active=stop_active,
             )
             return 0
-        why = f"no Ref: last line on a {post_len}-char post (posts of {SHORT_POST}+ chars require a fresh Ref)"
+        cat_problem = _AUDIT_PROBLEM["none"]
         digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
         if stop_active:
             log_decision(
                 session, "allowed-stop-hook-active", "none",
-                reason=f"loop-guard: stop_hook_active is true ({why})",
-                problem=why, post_len=post_len, stop_hook_active=True,
+                reason=f"loop-guard: stop_hook_active is true ({cat_problem})",
+                problem=cat_problem, post_len=post_len, stop_hook_active=True,
             )
             return 0
         if already_blocked(session, digest):
             log_decision(
                 session, "allowed-already-blocked", "none",
-                reason=f"loop-guard: message already blocked once in this session ({why})",
-                problem=why, post_len=post_len, stop_hook_active=False,
+                reason=f"loop-guard: message already blocked once in this session ({cat_problem})",
+                problem=cat_problem, post_len=post_len, stop_hook_active=False,
             )
             return 0
         bot = infer_bot()
@@ -711,18 +806,20 @@ def handle_stop(data: dict) -> int:
         reason = _no_ref_block_reason(post_len, bot, minted)
         log_decision(
             session, "blocked-no-ref", "none",
-            reason=reason, problem=why, minted_ref=minted,
+            reason=_audit_block_reason("none", bot, minted),
+            problem=cat_problem, minted_ref=minted,
             post_len=post_len, stop_hook_active=False,
         )
         print(json.dumps({"decision": "block", "reason": reason}))
         return 0
     try:
         finding = check(message, transcript)
-    except LogUnreadable as exc:
+    except LogUnreadable:
+        cat_problem = _AUDIT_PROBLEM["unreadable-log"]
         log_decision(
             session, "allowed-unreadable-log", "unreadable-log",
-            reason=f"fail-open: issued.log unreadable ({exc})",
-            problem=str(exc), post_len=post_len, stop_hook_active=stop_active,
+            reason=f"fail-open: {cat_problem}",
+            problem=cat_problem, post_len=post_len, stop_hook_active=stop_active,
         )
         return 0
     if finding is None:
@@ -732,28 +829,30 @@ def handle_stop(data: dict) -> int:
             post_len=post_len, stop_hook_active=stop_active,
         )
         return 0
-    ref_kind, why = finding
+    ref_kind, interactive_why = finding
+    cat_problem = _AUDIT_PROBLEM.get(ref_kind, "invalid Ref: last line")
     digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
     if stop_active:
         log_decision(
             session, "allowed-stop-hook-active", ref_kind,
-            reason=f"loop-guard: stop_hook_active is true ({why})",
-            problem=why, post_len=post_len, stop_hook_active=True,
+            reason=f"loop-guard: stop_hook_active is true ({cat_problem})",
+            problem=cat_problem, post_len=post_len, stop_hook_active=True,
         )
         return 0
     if already_blocked(session, digest):
         log_decision(
             session, "allowed-already-blocked", ref_kind,
-            reason=f"loop-guard: message already blocked once in this session ({why})",
-            problem=why, post_len=post_len, stop_hook_active=False,
+            reason=f"loop-guard: message already blocked once in this session ({cat_problem})",
+            problem=cat_problem, post_len=post_len, stop_hook_active=False,
         )
         return 0
     bot = infer_bot()
     minted = mint_ref(bot, session, exclude=line)
-    reason = _invalid_ref_block_reason(why, bot, minted)
+    reason = _invalid_ref_block_reason(interactive_why, bot, minted)
     log_decision(
         session, "blocked", ref_kind,
-        reason=reason, problem=why, minted_ref=minted,
+        reason=_audit_block_reason(ref_kind, bot, minted),
+        problem=cat_problem, minted_ref=minted,
         post_len=post_len, stop_hook_active=False,
     )
     print(json.dumps({"decision": "block", "reason": reason}))
