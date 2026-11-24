@@ -122,8 +122,8 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    bold-italic numbers, restarting per section; quoted sub-items use bold-italic
    lowercase letters (skip i), then nested lowercase Roman numerals. Separate
    labels with blank lines; no plain bullets. Question-card options stay `1.`,
-   `2.`, … . End each post with a fresh script-issued `Ref: <BOT>-<id>` from
-   `ref <BOT>` or `ref-append <BOT> FILE`; never invent or reuse an id (the Claude Code
+   `2.`, … . End each post with a fresh script-issued base-36 `Ref: <BOT>-<id>` from
+   `ref <BOT>` (one `<BOT>` arg only, never a Paseo UUID) or `ref-append <BOT> FILE`; never invent or reuse an id (the Claude Code
    Stop hook `claude/hooks/ref_integrity_gate.py` checks it; `ref lookup ID` reads one). Follow
    the document's short-progress/emoji exceptions (operator, 2026-11-17).
    **Full Paseo agent/tab references (operator ruling 2026-11-23):** whenever referencing a
