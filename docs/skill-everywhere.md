@@ -33,7 +33,7 @@ churn can no longer break skill loading):
   same-named ADE skill wins over a chrome-use one.
 
 Editing the git copy updates every agent. Never copy: a
-copy drifts silently. `~/.agents/skills/handoff` is a symlink to the git
+copy drifts silently. `~/.agents/skills/self-handoff` is a symlink to the git
 copy. The stale copy is `~/.agents/skills/.trash/`.
 
 ## 1. Link it
@@ -106,7 +106,17 @@ whose readlink differs is replaced with the direct link.
 it by name (Hermes `skill-slash` handlers, Claude command wrappers)
 before deleting its directory. `--remove` also works
 after the directory is gone: it removes only links whose target is exactly
-`<root>/<name>` for one of the three roots.
+`<root>/<name>` for one of the four roots. Skills added to `retired_skills` in
+`bin/skill-everywhere` (since 2026-11-24: `old-handoff-use-paseo-handoff`,
+`old-hand-use-paseo-handoff`) are also cleaned automatically on link-mode runs
+(across every active target dir, Grok Bot managed copies with a regular-file
+non-symlink `.skill-everywhere` marker, and legacy
+`~/.gemini/skills` when not excluded by `SKILL_EVERYWHERE_ONLY`), leaving
+foreign links and real directories untouched and skipping any name that still
+ships a `SKILL.md` in a root; `--check --all` warns on stderr and exits 1 while
+any retired symlink or managed copy remains. Set `SKILL_EVERYWHERE_BIN_DIR` in
+isolated tests to override client binary availability checks without mutating
+`PATH`.
 
 ## 2. Where each TUI looks (verified 2026-10-03)
 
@@ -193,8 +203,9 @@ links were overwritten, getpaseo/paseo#7700, and the repo copies were renamed `a
    (`{"mode":"all"}` is the default; the persisted path is `agents.skills.selection`, a top-level `"skills"` key is
    rejected by `paseo reload`). Remove any leftover `~/.agents/skills/ade-paseo*` and `~/.claude/skills/ade-paseo*`
    links that now dangle.
-2. Their broad triggers ("handoff", "second opinion", "stuck") compete with this repo's `handoff` and `dialogue` skills until
-   the D3 native-resume trial (operator batch A6) settles `handoff` (E6 landed 2026-11-07 and kept `dialogue`); if they steal requests, narrow the selection to `paseo`,
+2. Since the 2026-11-24 split, `handoff` and `hand` are thin deprecated aliases to `paseo-handoff`, while whole-session
+   ADE self-handoff lives at `self-handoff` (no trigger collision with `paseo-handoff`). If Paseo's `paseo-advisor` /
+   `paseo-committee` triggers compete with `dialogue` (kept by E6 on 2026-11-07), narrow the selection to `paseo`,
    `paseo-help` and `paseo-plugin` rather than editing a copy.
 3. No re-vendoring: the three local patches of the old `skills/ade-paseo/UPSTREAM.md` (narrowed triggers, an interim
    worktree-isolation line, the `ade-` prefix) are gone with it (version control has it).

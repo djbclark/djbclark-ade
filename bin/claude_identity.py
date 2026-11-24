@@ -4,7 +4,7 @@ dispatch path (in bin/ since 2026-11-06, docs/slim E3; fleet.py and autorename, 
 same day). Prefer callers via claims / Paseo (acp-dispatch was deleted 2026-11-14).
 
 `CLAUDE_CODE_SESSION_ID` in a tool shell is not reliable (2026-11-02, PR 259; upstream issue 81304): a session started from another session's
-environment (a /baton or /handoff successor, a Paseo agent launched from a shell inside the predecessor, `--fork-session`) keeps the PREDECESSOR's
+environment (a /baton or /self-handoff successor, a Paseo agent launched from a shell inside the predecessor, `--fork-session`) keeps the PREDECESSOR's
 id there, and a non-Claude agent started from a Claude shell inherits that shell's CLAUDE_PID. Taking the env var at its word resolves a successor to
 its predecessor: its relays go out under the predecessor's label, and every reply goes to the wrong session.
 
@@ -142,7 +142,7 @@ def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> st
 
 
 if __name__ == "__main__":
-    # `python3 claude_identity.py`: the owner id for a shell script (skills/baton, skills/handoff), "" and exit 1 when there is none.
+    # `python3 claude_identity.py`: the owner id for a shell script (skills/baton, skills/self-handoff), "" and exit 1 when there is none.
     _sid = owner_session_id()
     print(_sid)
     raise SystemExit(0 if _sid else 1)

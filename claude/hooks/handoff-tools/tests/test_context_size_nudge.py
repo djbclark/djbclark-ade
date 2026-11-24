@@ -194,7 +194,7 @@ def test_boundary_note_once_near_the_wall(hook, tmp_path):
     assert "80,000 tokens left before Claude Code compacts this session at 267,000" in out
     assert "a finished task alone is no reason to hand off or compact" in out
     assert "never hand the operator a /new" in out and "when handing off, do it yourself" in out
-    assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
+    assert "self-handoff Step 9 yourself" in out and "ade-self-session handoff" in out
     assert "/new is ready" not in out and "self-slash" not in out
     assert "Do not compact mid-task" in out
     assert hook.state()["s-bound"]["boundary"] is True
@@ -222,7 +222,7 @@ def test_ask_message_at_the_hard_tier_bare(hook, tmp_path):
     assert "Context is large" in out
     expected = f"{nudge.AUTO_COMPACT_WINDOW - nudge.AUTO_COMPACT_BUFFER:,}"
     assert f"by itself at about {expected} tokens" in out
-    assert "handoff Step 9 yourself" in out and "ade-self-session handoff" in out
+    assert "self-handoff Step 9 yourself" in out and "the `self-handoff` skill's Tier 2 document" in out and "ade-self-session handoff" in out
     assert "/new is ready" not in out and "never hand the operator a /new" in out
     assert "self-slash" not in out
     assert f"{nudge.AUTO_COMPACT_WALL - nudge.ASK_TOTAL:,} from now" in out
@@ -681,7 +681,7 @@ def test_page_once_at_plus_300k(hook, tmp_path):
     _, pings = hook("s-page", path)
     assert len(pings) == 1
     assert pings[0][0] == str(nudge.PING_BIN)
-    assert "/handoff then /new" in pings[0][1]
+    assert "/self-handoff then /new" in pings[0][1]
     _append(path, _usage(40_000 + nudge.PAGE_GROWTH + 10_000))
     _, pings = hook("s-page", path)
     assert pings == []

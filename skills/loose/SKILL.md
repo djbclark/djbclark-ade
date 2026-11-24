@@ -213,7 +213,7 @@ Once `/steps` has finished (its summary table, and any queued work done), end
 with one more prompt using the **same tool as `/steps`**, every time, even when
 the audit found nothing:
 
-1. **Handoff and continue** — the `handoff` skill: write a Tier 2 handoff, then
+1. **Handoff and continue** — the `self-handoff` skill (`/self-handoff`, `skills/self-handoff/SKILL.md`): write a Tier 2 handoff, then
    (its Step 9) start an acknowledged successor session that resumes from it, so
    work carries on with nobody typing. Recommend it when anything is still open or
    deferred, or the session was long or produced context that is not already
@@ -231,7 +231,7 @@ On Grok Bot the three options are the same but act differently (G6); ask
 with the widget, the recommended option first with `style: "primary"`, the
 reason in the text message before it.
 
-Then act on the answer. For handoff and continue, invoke the `handoff` skill (its Step 9
+Then act on the answer. For handoff and continue, invoke the `self-handoff` skill (`/self-handoff`, `skills/self-handoff/SKILL.md`; its Step 9
 runs here). **Lifecycle actions run only in the top-level session** (2026-10-20): a
 sub-agent or a dispatched slice shares or inherits the parent's agent id, so it never runs
 Rule 4's finish or the handoff's Step 9; it treats a handoff as document-only and
@@ -264,9 +264,9 @@ auto-compaction); never because context merely looks large: each compaction cost
 
 ## Silent mode, before a handoff
 
-The `handoff` skill runs Rule 2 by itself first (its Step 0): sweep for your
+The `self-handoff` skill (`/self-handoff`, `skills/self-handoff/SKILL.md`) runs Rule 2 by itself first (its Step 0): sweep for your
 own eyes, fix the small items, carry the rest into the handoff. No report, no
-prompts, no Rule 4 question in that case. Grok Bot has no `handoff` skill
+prompts, no Rule 4 question in that case. Grok Bot has no `self-handoff` skill
 (it is not mirrored there), so it never enters silent mode.
 
 ## On Grok Bot (added 2026-10-23)
@@ -293,7 +293,7 @@ Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
   GitHub connector, and Forgejo's API for forgejo.mit.edu. Filing the issue is
   posting: draft it and get his explicit OK first.
 - **G6 Rule 4 on Grok Bot.** Notifying him is a normal chat reply, so skip
-  every `hermes-ping`. There is no `handoff` skill, `/baton`,
+  every `hermes-ping`. There is no `self-handoff` skill, `/baton`,
   `/compact` or Paseo archive here:
   1. *Handoff and continue*: write the open items and what the next run needs
      somewhere durable (G4), say where, and keep working or stop as he says.
@@ -307,7 +307,7 @@ Paseo, launchd, Keychain, `hermes-ping` or Mac process list.
 
 ## What this is not
 
-- Not a handoff. Use `handoff` / `session-handoff` for persisting context so work
+- Not a handoff. Use `self-handoff` / `session-handoff` for persisting context so work
   can resume; this is about deciding what is still owed. Rule 4 only *offers* one
   at the end.
 - Not task verification of one task against its acceptance conditions; this

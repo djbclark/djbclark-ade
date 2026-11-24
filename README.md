@@ -17,7 +17,7 @@ read [AGENTS.md](AGENTS.md) (`CLAUDE.md` links to it) first; this page is the ma
    operator's inbox. Agents message each other with `paseo send --json` (positional id + message / `--prompt`; ask for
    `ack <your id>` and prove the return path). The one-cycle relay shim and the `acp-dispatch` / `acp-run` shims were deleted 2026-11-14
    ([docs/slim/wave6-follow-up.md](docs/slim/wave6-follow-up.md)).
-4. **Carry**: [`handoff`](skills/handoff/SKILL.md) (Tier 2 document), [`session-handoff`](skills/session-handoff/SKILL.md)
+4. **Carry**: [`self-handoff`](skills/self-handoff/SKILL.md) (whole-session acknowledged self-handoff and Tier 2 document; [`handoff`](skills/handoff/SKILL.md) and [`hand`](skills/hand/SKILL.md) are deprecated aliases to `/paseo-handoff`), [`session-handoff`](skills/session-handoff/SKILL.md)
    (Tier 1 pointer), [`baton`](skills/baton/SKILL.md) (`/resume`); [`loose`](skills/loose/SKILL.md) and [`steps`](skills/steps/SKILL.md) walk what is open.
 5. **Fan out**: [`fan-out`](skills/fan-out/SKILL.md): the Agent tool or a Workflow in process; `paseo run --no-wait` for a
    slice in its own worktree; `paseo wait` to collect. Rules: [docs/orchestration-practices.md](docs/orchestration-practices.md).

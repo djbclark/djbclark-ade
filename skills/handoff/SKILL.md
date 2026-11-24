@@ -1,51 +1,11 @@
 ---
 name: handoff
-description: "OLD WAY compatibility alias: use acknowledged self-handoff for a fresh agent. Preserves existing ADE recovery flows and explicit handoff requests; descriptive name: old-handoff-use-paseo-handoff."
+description: "Deprecated alias for /paseo-handoff (task handoff to a fresh subagent). For whole-session ADE replacement (ade-self-session), use /self-handoff."
 ---
 
-# handoff: old way; acknowledged self-handoff
+# handoff (deprecated alias for `/paseo-handoff`)
 
-This is a compatibility entry point for the existing ADE recovery protocol.
-Read [the legacy skill](../old-handoff-use-paseo-handoff/SKILL.md), pass all arguments unchanged, and follow it
-from its first step. Existing operator invocations and automatic ADE recovery callbacks keep
-their recovery records. References elsewhere to `handoff` steps mean the numbered steps in that linked
-canonical protocol, including handoff Step 9. This entry point adds no extra actions or questions.
+Deprecated alias (2026-11-24): load and follow the installed `paseo-handoff` skill verbatim, passing all arguments unchanged.
+Do not add extra actions or questions; `paseo-handoff` spawns a fresh child subagent with a self-contained task briefing.
 
-Whole-session replacement follows handoff Step 9 and the ADE self-session protocol.
-Before moving work between computers, read [old way versus new way](../../docs/old-way-new-way.md).
-A local handoff path is not a transferred artifact.
-
-For a whole-session handoff, Step 9 defaults to `~/src/djbclark-ade/bin/ade-self-session
-handoff --checkpoint ABSOLUTE_BRIEF --quiesced` (add `--provider PROVIDER/MODEL`
-for an operator-authorized cross-provider or model-override handoff, e.g.
-`--provider antigravity/gemini-4-neon`, 2026-11-23; add `--thinking LEVEL` to set
-the successor's thinking level, otherwise the successor inherits yours) and the
-[acknowledged successor protocol](../../docs/self-session.md#c-self-handoff-to-a-new-session).
-**Quota-floor guard (2026-11-23):** without `--provider` or `--route-kind`, `handoff`
-checks the predecessor pool's headroom against the router floors before cloning it.
-If the predecessor's pool is under its floor, `handoff` automatically routes via
-`route_agent.py plan` to an eligible unattended-mode-capable alternative (recording
-`quota_reroute`), or refuses cleanly with a non-zero exit if no eligible alternative
-is available (pass `--provider PROVIDER/MODEL` or `--allow-scarce-pool` to override;
-an explicit `--provider` logs a warning if scarce and is never blocked).
-If the helper refuses before creation, launch the top-level successor yourself
-with the documented unattended fallback. Verify its acknowledgement and idle-only
-retirement (a predecessor in `error` status is retired at once after the ack, ruling 2026-11-21); operator typing is never the fallback. Partial transfers keep the
-predecessor running, as specified by Step 9.
-
-A lead's other top-level workers (started with `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID
-paseo run …`, so they are not its descendants) carry `--label ade.lead=<lead agent id>`; without it
-`bin/ade-auto-permit` skips their permission prompts. A successor lead labels its own workers with its own id
-and runs the watcher with `--lead <its id>` (2026-11-13). After an acknowledged `ade-self-session` handoff nothing pinned to the
-predecessor's id needs a hand step (2026-11-14; automatic `ade-net-resume` tracking strengthened 2026-11-23): `ade-worker-run` adopts its windows and labelled workers, `finish` repoints both `~/.local/state/djbclark-ade/supervisor/lead` and any legacy `--lead <predecessor>` `com.djbclark.ade-net-resume.plist` (and `--lead-file` installs read `supervisor/lead` each tick), and the installed `ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed chain (`docs/self-session.md` C0, C0a). A manual
-handoff that never runs `finish` records no chain: update `supervisor/lead` (for `--lead-file` installs) or re-point those jobs by hand.
-
-Placement differs: workers go in the lead's one `WORKER <repo> (<work>)` box, and workers the operator asks for
-interactively in the lead's own `LEAD <repo> (<work>)` window (`skills/fan-out` section 3, `docs/workspace-layout.md`), but a
-**successor is a new lead, not a worker**: it starts top-level in its own placement (not in the predecessor's WORKER box;
-it names its own window `LEAD …` with `ade-worker-run rename-lead`; `ade-self-session finish` prints the exact command as `lead_window.command` when the window is not already named so), then **reuses the predecessor chain's WORKER and OTHER boxes**
-when it dispatches (operator ruling 2026-11-14: at most three windows per lead and repo; window names carry no lead id).
-
-## Opt-in NATS coordination
-
-Explicitly enrolled NATS roles use the [durable coordination contract](../../docs/nats-coordination.md). A queued wake or ADE-inbox-recorded receipt never means processed. Use the controlled retirement gate; do not substitute --quiesced or archive status for process/resource evidence. Unenrolled roles retain this skill's existing behavior.
+If the caller actually wants a whole-session ADE lead/session replacement (`bin/ade-self-session`, Tier 1/Tier 2 recovery records, acknowledged successor and predecessor retirement), use `/self-handoff` ([`../self-handoff/SKILL.md`](../self-handoff/SKILL.md)) instead.

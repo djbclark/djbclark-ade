@@ -18,17 +18,18 @@ named skill are separate things. The **Baton plugin** is distinct from ADE's **b
 | Repeated monitoring | Recurring model prompt | Existing scripts and schedules; judgment wakes only when needed | Keep the operator's script-first rule. |
 | Completed tabs | Leave sessions open | Archive completed agents after their results are captured | Archive agents individually; workspace archival affects all its sessions and may remove a managed worktree. |
 
-## B. Skill names and compatibility
+## B. Skill names and compatibility (updated 2026-11-24)
 
-The descriptive old-way names are `old-hand-use-paseo-handoff` and
-`old-handoff-use-paseo-handoff`. Their descriptions say what to use instead.
-`hand` and `handoff` remain compatibility entry points so existing prompts, command wrappers,
-and links continue to work. They retain the requested legacy behavior and point to the new way.
-The legacy skills remain model-accessible because existing automatic ADE recovery callbacks
-need them; the compatibility entry points forward numbered-step references to the canonical protocol.
+The canonical whole-session ADE self-handoff skill is now [`skills/self-handoff`](../skills/self-handoff/SKILL.md)
+(`/self-handoff`), consolidating the retired `old-handoff-use-paseo-handoff` and `old-hand-use-paseo-handoff`
+skills (removed 2026-11-24; `bin/skill-everywhere` cleans up their leftover symlinks).
+[`skills/handoff`](../skills/handoff/SKILL.md) (`/handoff`) and [`skills/hand`](../skills/hand/SKILL.md)
+(`/hand`) are thin deprecated aliases pointing to Paseo's installed `paseo-handoff` skill (spawning a fresh
+child subagent with a task briefing), with a pointer to `/self-handoff` when whole-session ADE replacement
+is intended.
 
-For whole-session replacement, use `handoff` Step 9 and `ade-self-session handoff`
-(2026-11-12). The external `paseo-handoff` skill supplies a task briefing format;
+For whole-session replacement, use `/self-handoff` Step 9 and `ade-self-session handoff`
+(2026-11-12). The external `paseo-handoff` skill supplies a child-subagent task briefing format;
 its child creation/manual detach flow is not ADE's self-handoff lifecycle. Keep `session-handoff` and `baton`
 for reading/writing existing ADE recovery chains. Keep `fan-out`: slicing, ownership and review
 are still useful, while native Paseo is the preferred launch/communication surface.
