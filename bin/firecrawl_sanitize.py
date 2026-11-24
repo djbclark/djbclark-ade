@@ -248,12 +248,48 @@ def _is_fence_close(line: str, fence_char: str, fence_len: int) -> bool:
     return run >= fence_len and stripped[run:].strip(" \t") == ""
 
 
+def _advance_comment_state(line: str, in_comment: bool) -> bool:
+    """Update HTML comment open/closed state across one line in strict O(len(line)) time.
+
+    Tracks state forward from the first opener so nested `<!-->` inside an already-open
+    comment never prematurely closes it (only `-->` or `--!>` closes an open comment).
+    """
+    pos = 0
+    n = len(line)
+    while pos < n:
+        if in_comment:
+            idx = line.find("--", pos)
+            if idx == -1:
+                return True
+            if idx + 2 < n and line[idx + 2] == ">":
+                in_comment = False
+                pos = idx + 3
+            elif idx + 3 < n and line[idx + 2 : idx + 4] == "!>":
+                in_comment = False
+                pos = idx + 4
+            else:
+                pos = idx + 1
+        else:
+            start = line.find("<!--", pos)
+            if start == -1:
+                return False
+            after = start + 4
+            if after < n and line[after] == ">":
+                pos = after + 1
+            elif after + 1 < n and line[after : after + 2] == "->":
+                pos = after + 2
+            else:
+                in_comment = True
+                pos = after
+    return in_comment
+
+
 def _strip_html_comments(text: str, *, preserve_fences: bool) -> tuple[str, int]:
-    """Strip HTML comments in O(N) time; splits strictly on `\\n` (never `splitlines()`).
+    """Strip HTML comments in strict O(N) time; splits strictly on `\\n` (never `splitlines()`).
 
     When `preserve_fences=True`, HTML comments inside a Markdown fenced code block are
-    preserved ONLY when the fence satisfies CommonMark §4.5 AND has a verified matching
-    closing fence before EOF (defeating both inline-span and unclosed-fence spoofs).
+    preserved ONLY when the fence opens outside any open HTML comment, satisfies
+    CommonMark §4.5, AND has a verified matching closing fence before EOF.
     """
     if "<!--" not in text:
         return text, 0
@@ -270,6 +306,7 @@ def _strip_html_comments(text: str, *, preserve_fences: bool) -> tuple[str, int]
     plain_buf: list[str] = []
     fence_buf: list[str] = []
     in_fence = False
+    in_open_comment = False
     fence_char = ""
     fence_len = 0
     total_stripped = 0
@@ -285,19 +322,16 @@ def _strip_html_comments(text: str, *, preserve_fences: bool) -> tuple[str, int]
 
     for line in lines:
         if not in_fence:
-            opened = _parse_fence_open(line)
-            if opened is not None:
-                # Only allow opening a fence if plain_buf is not currently inside an open HTML comment.
-                plain_joined = "".join(plain_buf)
-                last_open = plain_joined.rfind("<!--")
-                in_open_comment = last_open != -1 and _find_html_comment_end(plain_joined, last_open + 4) == -1
-                if not in_open_comment:
+            if not in_open_comment:
+                opened = _parse_fence_open(line)
+                if opened is not None:
                     _flush_plain()
                     in_fence = True
                     fence_char, fence_len = opened
                     fence_buf.append(line)
                     continue
             plain_buf.append(line)
+            in_open_comment = _advance_comment_state(line, in_open_comment)
         else:
             fence_buf.append(line)
             if _is_fence_close(line, fence_char, fence_len):
@@ -404,40 +438,77 @@ def spotlight_untrusted(text: str, nonce: str | None = None) -> tuple[str, str]:
     return f"<<<UNTRUSTED_WEB_DATA_{tok}>>>\n{text}\n<<<END_UNTRUSTED_WEB_DATA_{tok}>>>", tok
 
 
+def _meta_field_limit(key: object) -> int:
+    kl = str(key).lower()
+    if kl in ("url", "sourceurl", "ogurl", "ogimage", "canonical") or kl.endswith(("url", "image")):
+        return 2048
+    if kl.endswith("description"):
+        return 1000
+    return 500
+
+
+def _sanitize_meta_list(items: list, depth: int) -> tuple[bool, int]:
+    if depth >= _MAX_JSON_DEPTH:
+        return False, 0
+    mutated = False
+    stripped = 0
+    for idx, item in enumerate(items):
+        if isinstance(item, str):
+            cleaned, n = _sanitize_field_counted(item, limit=500)
+            if n or cleaned != item:
+                items[idx] = cleaned
+                stripped += max(n, 1) if cleaned != item else n
+                mutated = True
+        elif isinstance(item, dict):
+            sub_mut, sub_n = _sanitize_metadata_dict(item, depth + 1)
+            if sub_mut:
+                mutated = True
+            stripped += sub_n
+        elif isinstance(item, list):
+            sub_mut, sub_n = _sanitize_meta_list(item, depth + 1)
+            if sub_mut:
+                mutated = True
+            stripped += sub_n
+    return mutated, stripped
+
+
 def _sanitize_metadata_dict(meta: dict, depth: int = 0) -> tuple[bool, int]:
     if depth >= _MAX_JSON_DEPTH:
         return False, 0
     mutated = False
     stripped = 0
-    for key in list(meta.keys()):
-        val = meta[key]
-        lim = 1000 if str(key).lower().endswith("description") else 500
+    rebuilt: dict = {}
+    key_changed = False
+    for key, val in list(meta.items()):
+        skey = key
+        if isinstance(key, str):
+            ck, nk = _sanitize_field_counted(key, limit=200)
+            if nk or ck != key:
+                skey = ck
+                stripped += max(nk, 1) if ck != key else nk
+                mutated = True
+                key_changed = True
+        lim = _meta_field_limit(skey)
         if isinstance(val, str):
             cleaned, n = _sanitize_field_counted(val, limit=lim)
             if n or cleaned != val:
-                meta[key] = cleaned
+                val = cleaned
                 stripped += max(n, 1) if cleaned != val else n
                 mutated = True
         elif isinstance(val, list):
-            list_mut = False
-            new_list = []
-            for item in val:
-                if isinstance(item, str):
-                    cleaned, n = _sanitize_field_counted(item, limit=500)
-                    if n or cleaned != item:
-                        stripped += max(n, 1) if cleaned != item else n
-                        list_mut = True
-                    new_list.append(cleaned)
-                else:
-                    new_list.append(item)
-            if list_mut:
-                meta[key] = new_list
+            sub_mut, sub_n = _sanitize_meta_list(val, depth + 1)
+            if sub_mut:
                 mutated = True
+            stripped += sub_n
         elif isinstance(val, dict):
             sub_mut, sub_n = _sanitize_metadata_dict(val, depth + 1)
             if sub_mut:
                 mutated = True
             stripped += sub_n
+        rebuilt[skey] = val
+    if key_changed or mutated:
+        meta.clear()
+        meta.update(rebuilt)
     return mutated, stripped
 
 
@@ -445,7 +516,7 @@ def _sanitize_doc_object(data: dict) -> tuple[bool, int]:
     """Sanitize a Firecrawl document object (scrape / crawl item / batch-scrape item / search item)."""
     stripped = 0
     mutated = False
-    for key in ("markdown", "answer", "summary"):
+    for key in ("markdown", "answer", "summary", "snippet", "content", "body"):
         val = data.get(key)
         if isinstance(val, str):
             cleaned, n = sanitize_markdown(val)
@@ -461,7 +532,7 @@ def _sanitize_doc_object(data: dict) -> tuple[bool, int]:
                 data[key] = cleaned
                 stripped += max(n, 1) if cleaned != val else n
                 mutated = True
-    for key, lim in (("title", 300), ("description", 1000)):
+    for key, lim in (("title", 300), ("description", 1000), ("url", 2048), ("author", 500), ("repo", 500)):
         val = data.get(key)
         if isinstance(val, str):
             cleaned, n = _sanitize_field_counted(val, limit=lim)
@@ -469,34 +540,20 @@ def _sanitize_doc_object(data: dict) -> tuple[bool, int]:
                 data[key] = cleaned
                 stripped += max(n, 1) if cleaned != val else n
                 mutated = True
-    links = data.get("links")
-    if isinstance(links, list):
-        links_mut = False
-        new_links = []
-        for item in links:
-            if isinstance(item, str):
-                cleaned, n = _sanitize_field_counted(item, limit=2048)
-                if n or cleaned != item:
-                    stripped += max(n, 1) if cleaned != item else n
-                    links_mut = True
-                new_links.append(cleaned)
-            elif isinstance(item, dict):
-                sub_mut, sub_n = _sanitize_doc_object(item)
-                if sub_mut:
-                    links_mut = True
-                stripped += sub_n
-                new_links.append(item)
-            else:
-                new_links.append(item)
-        if links_mut:
-            data["links"] = new_links
-            mutated = True
-    if "json" in data and data["json"] is not None:
-        cleaned_j, n_j = sanitize_json_value(data["json"])
-        if n_j or cleaned_j is not data["json"]:
-            data["json"] = cleaned_j
-            stripped += max(n_j, 1) if cleaned_j is not data["json"] else n_j
-            mutated = True
+    for list_key in ("links", "images"):
+        items = data.get(list_key)
+        if isinstance(items, list):
+            l_mut, l_n = _sanitize_doc_list(items)
+            if l_mut:
+                mutated = True
+            stripped += l_n
+    for json_key in ("json", "extract"):
+        if json_key in data and data[json_key] is not None:
+            cleaned_j, n_j = sanitize_json_value(data[json_key])
+            if n_j or cleaned_j is not data[json_key]:
+                data[json_key] = cleaned_j
+                stripped += max(n_j, 1) if cleaned_j is not data[json_key] else n_j
+                mutated = True
     meta = data.get("metadata")
     if isinstance(meta, dict):
         m_mut, m_n = _sanitize_metadata_dict(meta)
@@ -531,6 +588,7 @@ def sanitize_firecrawl_reply(path: str, doc: object) -> tuple[bool, int]:
     """
     if not isinstance(doc, dict) or not is_content_route(path):
         return False, 0
+    route = path.split("?", 1)[0].rstrip("/").lower()
     mutated = False
     stripped = 0
 
@@ -540,15 +598,24 @@ def sanitize_firecrawl_reply(path: str, doc: object) -> tuple[bool, int]:
         mutated = mutated or l_mut
         stripped += l_n
 
-    # Top-level `data` (dict for /scrape & /extract & /search v2; list for /search v1 & /crawl & /batch/scrape)
+    # /extract routes return arbitrary user-schema JSON directly under `doc["data"]`.
     data = doc.get("data")
+    if "/extract" in route and data is not None:
+        cleaned_ex, n_ex = sanitize_json_value(data)
+        if n_ex or cleaned_ex is not data:
+            doc["data"] = cleaned_ex
+            mutated = True
+            stripped += max(n_ex, 1) if cleaned_ex is not data else n_ex
+        return mutated, stripped
+
+    # Top-level `data` (dict for /scrape & /search v2; list for /search v1 & /crawl & /batch/scrape)
     if isinstance(data, dict):
         d_mut, d_n = _sanitize_doc_object(data)
         mutated = mutated or d_mut
         stripped += d_n
         # Categorized /search or /search/developer dicts (e.g. {"web": [...], "news": [...], "github": [...]})
         for key, val in data.items():
-            if key in ("links", "metadata", "json"):
+            if key in ("links", "images", "metadata", "json", "extract"):
                 continue
             if isinstance(val, list):
                 s_mut, s_n = _sanitize_doc_list(val)

@@ -224,14 +224,19 @@ def _valid_exact_host(host: str) -> str | None:
     return h
 
 
+_SCHEME_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+
 def _extract_url_hosts(raw: object) -> set[str]:
-    """Extract normalized candidate hostnames from a URL string (including scheme-less and backslash differentials)."""
+    """Extract normalized candidate hostnames from a URL string (including scheme-less, protocol-relative, and backslash differentials)."""
     if not isinstance(raw, str):
         return set()
     s = raw.strip()
     if not s:
         return set()
-    if "://" not in s:
+    if s.startswith("//"):
+        s = "https:" + s
+    elif not _SCHEME_PREFIX_RE.match(s):
         s = "https://" + s
     hosts: set[str] = set()
     try:
