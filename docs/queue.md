@@ -238,6 +238,8 @@ under **Carried**, newest first, one line each; an item leaves when it ships (in
 
 65. **Trial Gemini 4 Hydrogen and Orchestrator** (operator 2026-11-21, Neon A6; after the dated-quota-overrides slice settles the Google pool, [docs/dated-quota-overrides.md](dated-quota-overrides.md)): Hydrogen for bulk and mechanical work at low-medium effort and for research at high; Orchestrator (planner plus executor, fixed effort; `gemini-pro-orchestrator`) as a lead-sized slice. Neither has a router row ([docs/model-routing.md](model-routing.md) B9a); both draw the one shared `google:gemini` pool on Ultra 20x, so measure the pool share per call first. A trial, not a routing change: a row needs the operator's rank decision.
 
+120. **Update the Resources plugin to catch non-CPU/non-RAM load-producing causes like `/watch load`** (operator, 2026-11-24; priority: at the END of the queue, after the other Carried items; queued only, not built): extend the Paseo Resources plugin (`zedobaia/resources`, `ZedObaia/paseo-plugins` `plugins/resources`, [docs/paseo-host-ram-plugins.md](paseo-host-ram-plugins.md)) so it detects and surfaces load-producing causes beyond plain CPU and RAM — matching `/watch load` (`bin/load-watch` / `skills/watch/SKILL.md`: per-core 1/5/15m load averages, compressor churn, `swapins`/`pageins`, I/O or uninterruptible-wait load spikes, and non-CPU/RAM incident drivers). Check upstream issues/PRs on `ZedObaia/paseo-plugins` first and upstream any plugin change (order 8).
+
 ## Closed by the slim-down (2026-11-06/07; the slice that closed it)
 
 1. relay: card-blocked records fail fast (2026-10-31): the outbox is gone; the shim fails closed on a target with a pending permission (E3).
