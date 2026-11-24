@@ -390,16 +390,14 @@ def assistant_messages(path: str) -> tuple[list[tuple[str, str, list[str], int]]
             continue
         mid = str(msg.get("id") or entry.get("uuid") or "")
         if mid:
+            rkey = _record_key(entry, line)
+            if mid in seen_records and rkey in seen_records[mid]:
+                continue
             if mid not in by_id:
                 by_id[mid] = []
                 turn_by_id[mid] = turn
                 seen_records[mid] = set()
                 order.append(mid)
-            else:
-                turn_by_id[mid] = turn
-            rkey = _record_key(entry, line)
-            if rkey in seen_records[mid]:
-                continue
             seen_records[mid].add(rkey)
             by_id[mid].extend(texts)
         else:

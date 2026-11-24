@@ -302,6 +302,14 @@ def test_duplicate_split_records_do_not_make_fresh_ref_look_reused(tmp_path):
     out_lag = e.run(full_msg, t_lag_turn, session="split-lag-turn")
     assert blocked(out_lag) and "already ended an earlier post" in out_lag["reason"]
 
+    # Case 5 (Round 4 MED #1): exact replay of the first historical assistant record after the
+    # second user record must NOT promote `prev_msg` into turn 2 -> reuse MUST still block.
+    t_lag_replay = tmp_path / "lag_prev_turn_replay.jsonl"
+    replay_records = [*lag_records, lag_records[1]]
+    t_lag_replay.write_text("\n".join(json.dumps(r) for r in replay_records) + "\n")
+    out_lag_replay = e.run(full_msg, t_lag_replay, session="split-lag-turn-replay")
+    assert blocked(out_lag_replay) and "already ended an earlier post" in out_lag_replay["reason"]
+
 
 def test_fallback_reader_deduplicates_partially_repeated_stream_in_forward_order(tmp_path):
     """Round 3 LOW #1: A partially repeated stream A/B/A (where both As share one record uuid and
