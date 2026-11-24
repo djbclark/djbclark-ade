@@ -169,6 +169,17 @@ order = 50
 notes = "24 files (+1235/-109), app-only, related Discussion https://github.com/getpaseo/paseo/discussions/8552; pinned to head seen 2026-11-23; trial_required: merge-tree against v0.17.3 (dd7c0499a) conflicts in packages/app/src/screens/settings-screen.tsx (due to provider detail page commits d5d385afa and 3914893aa); also check mobile detail pageTitle while search is active and Windows oxfmt.cmd invocation in generate-settings-search-source.mjs before landing"
 
 [[pick]]
+id = "paseo-daemon-status-capabilities"
+component = "paseo"
+repo = "frdminc/paseo"
+intent = "expose daemon capabilities (features, acpElicitationForms) and forkBuild marker in `paseo daemon status --json`"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+hold = "placeholder: not built yet (queued for build 3, 2026-11-24)"
+order = 55
+notes = "operator-approved 2026-11-24 via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-daemon-status-caps-445d802d, complementing PR #969 after stayturgid lead 8f296f0e-9056-4bb7-a53a-a3900a246afa report): (1) surface `features: info?.features` from `client.getLastServerInfoMessage()` in `packages/cli/src/commands/daemon/status.ts:84-85` (upstreamable on its own); (2) add optional `acpElicitationForms?: boolean` to `ServerInfoStatusPayloadSchema.features` in `packages/protocol/src/messages.ts:3995+` (COMPAT-tagged per `docs/protocol-compatibility.md`); (3) expose a `forkBuild` marker (e.g. `djbclark fork 3`, matching desktop About) in daemon status so agents, hooks, and cutover checks can verify capabilities at runtime on any host instead of assuming hostname=bigmac"
+
+[[pick]]
 id = "paseo-bump-wrangler-sharp-0-35"
 component = "paseo"
 repo = "frdminc/paseo"
