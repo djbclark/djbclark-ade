@@ -18,8 +18,8 @@ import ade_fork_plugins as snapshots
 from ade_fork_release import make_receipt, digest
 
 
-def git(root, *args):
-    return subprocess.check_output(['git', '-C', str(root), *args]).decode().strip()
+def git(root, *args, env=None):
+    return subprocess.check_output(['git', '-C', str(root), *args], env=env).decode().strip()
 
 
 @pytest.fixture
@@ -27,10 +27,20 @@ def fixture(tmp_path):
     repo = tmp_path / 'source'; repo.mkdir()
     git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'fixture')
     git(repo, 'config', 'user.email', 'fixture@example.invalid')
+    git(repo, 'config', 'commit.gpgsign', 'false')
     plugin = repo / 'plugins/ade-yolo'; plugin.mkdir(parents=True)
     (plugin / 'index.server.ts').write_text('export default ()=>()=>{}')
     (plugin / 'paseo-plugin.json').write_text('{}')
-    git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'fixture')
+    commit_env = {
+        **os.environ,
+        'GIT_AUTHOR_NAME': 'fixture',
+        'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+        'GIT_AUTHOR_DATE': '2026-01-01T00:00:00Z',
+        'GIT_COMMITTER_NAME': 'fixture',
+        'GIT_COMMITTER_EMAIL': 'fixture@example.invalid',
+        'GIT_COMMITTER_DATE': '2026-01-01T00:00:00Z',
+    }
+    git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'fixture', env=commit_env)
     commit = git(repo, 'rev-parse', 'HEAD'); payload = snapshots.produce(repo, commit)
     registry = c.load_policy()
     cohort = {cid: {'fixture': commit} for r in registry if r['compatibility_group'] == 'paseo-runtime' for cid in r['catalog_ids']}
@@ -469,17 +479,26 @@ def test_native_reservation_never_ends_on_uncertain_operation(monkeypatch):
 
 def test_selected_release_uses_fresh_attempt_not_first_digest(fixture,tmp_path,monkeypatch):
     row,receipt,payload,archive=fixture
+    # Deterministically pick an obsolete attempt 1 with a low digest so a valid
+    # later attempt 2 always sorts AFTER it, even if policy edits shift receipt.sha256.
+    base_old=c.evaluation(row)
+    for old_artifact in range(60,200):
+        old=c.replace(base_old,artifact_id=old_artifact)
+        old_value={'receipt_sha256':receipt.sha256,'evaluation':dict(asdict(old),jobs=list(old.jobs))}
+        if digest(old_value)<'8':break
+    else:pytest.fail('fixture could not arrange low obsolete digest')
+    row['evaluation']['artifact_id']=old.artifact_id
     controller=c.Controller(lambda:row,FakeEvaluator(archive,receipt),root=tmp_path/'private')
     controller.acquire(row)
-    old=c.evaluation(row)
-    old_value={'receipt_sha256':receipt.sha256,'evaluation':dict(asdict(old),jobs=list(old.jobs))}
-    # Find a valid later attempt whose filename sorts AFTER obsolete attempt1.
-    for artifact in range(61,500):
+    # Find a valid later attempt whose filename sorts AFTER obsolete attempt 1.
+    for artifact in range(old.artifact_id+1,old.artifact_id+500):
         fresh=c.replace(old,run_attempt=2,artifact_id=artifact,artifact_name='qualification-40-2')
         fresh_value={'receipt_sha256':receipt.sha256,'evaluation':dict(asdict(fresh),jobs=list(fresh.jobs))}
         if digest(old_value)<digest(fresh_value):break
     else:pytest.fail('fixture could not arrange obsolete-first digest order')
     controller.attest(receipt.sha256,fresh)
+    names=sorted((controller.root/'attestations'/receipt.sha256).iterdir())
+    assert [n.name for n in names]==[digest(old_value)+'.json',digest(fresh_value)+'.json']
     calls=[]
     class CurrentAttempt:
         def verify(self,expected,path):
