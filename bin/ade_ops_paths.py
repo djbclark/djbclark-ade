@@ -9,11 +9,21 @@ alongside legacy `~/ops/site-{public,private}-*` fallback for Stage 0 dual-read:
 - Pair-bound selector precedence: explicit `site_name` > `TENDCF_SITE` > `$XDG_CONFIG_HOME/tendcf/active-site`
   (when `XDG_CONFIG_HOME` is an absolute path, else `~/.config/tendcf/active-site`).
 - Fail-closed: never globs a sole directory under `~/tendcf-ops`; invalid/malformed selectors or
-  symlinked/case-mismatched site directories are rejected rather than guessed.
+  symlinked/case-mismatched/identity-mismatched site directories are rejected rather than guessed.
 - `bgrun` dual-read: `~/.local/bin/bgrun`, `<TENDCF_OPS_ROOT>/tendcf-{public,private}-<slug>/bin/bgrun`,
-  and legacy `~/ops/site-*/bin/bgrun` (plus `bg` where supported).
+  and legacy `<OPS_ROOT>/site-*/bin/bgrun` (plus `bg` where supported), anchored strictly to the
+  configured installation roots.
+- Touch ID / approval authority (`find_trusted_bgrun`) is strictly separate from general wrapper
+  discovery (`find_bgrun`): it ignores caller env overrides (`OPS_ROOT`, `TENDCF_OPS_ROOT`,
+  `TENDCF_SITE`, `XDG_CONFIG_HOME`) and trusts only fixed paths under `Path.home()`.
 
-Python 3.9+ stdlib only (no shebang: library module, callable via `python3 bin/ade_ops_paths.py ...`).
+CLI usage (for shell callers such as `bin/skill-everywhere`; library module, no shebang):
+  python3 bin/ade_ops_paths.py skill-roots            # print active private then site skills dirs
+  python3 bin/ade_ops_paths.py managed-root-bases     # print tendcf ops root then legacy ops root
+  python3 bin/ade_ops_paths.py find-bgrun [--include-bg]
+  python3 bin/ade_ops_paths.py default-bm-store       # print active or legacy Basic Memory store
+
+Python 3.9+ stdlib only.
 """
 from __future__ import annotations
 
@@ -44,6 +54,10 @@ LEGACY_SITE_NAMES = (
     "site-djbclark",
 )
 _HOME_PREFIXES = ("~/", "$HOME/", "${HOME}/")
+_CLI_USAGE = (
+    "usage: python3 bin/ade_ops_paths.py "
+    "{skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store}\n"
+)
 
 
 class OpsPathError(ValueError):
@@ -295,7 +309,13 @@ def active_site_slug(
 
 
 def _check_site_repo_dir(ops_root: Path, name: str, *, required: bool) -> Path | None:
-    """Verify `<ops_root>/<name>` is an exact-case real directory inside `ops_root` (no symlinks)."""
+    """Verify `<ops_root>/<name>` is an exact-case real directory inside `ops_root` (no symlinks).
+
+    Enforces exact-case `scandir` lookup, `O_DIRECTORY | O_NOFOLLOW` descriptor open, `(st_dev, st_ino)`
+    identity equality across lookup/open/resolve, and exact `(resolved.parent, resolved.name)` equality
+    so a concurrent sibling symlink swap under the same parent cannot redirect one slug to another site.
+    Assumes a stable local filesystem after return; sensitive consumers revalidate at point of use.
+    """
     exact = None
     case_mismatch = None
     target_lower = name.lower()
@@ -321,6 +341,7 @@ def _check_site_repo_dir(ops_root: Path, name: str, *, required: bool) -> Path |
     try:
         is_link = exact.is_symlink()
         is_dir = exact.is_dir(follow_symlinks=False)
+        entry_st = exact.stat(follow_symlinks=False)
     except OSError as exc:
         raise OpsPathError(f"cannot inspect site repo {candidate}: {exc}") from exc
 
@@ -328,12 +349,34 @@ def _check_site_repo_dir(ops_root: Path, name: str, *, required: bool) -> Path |
         raise OpsPathError(f"site repo must not be a symlink: {candidate}")
     if not is_dir:
         raise OpsPathError(f"site repo is not a directory: {candidate}")
+
+    open_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(candidate, open_flags)
+        fd_st = os.fstat(fd)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP)):
+            raise OpsPathError(f"site repo must not be a symlink: {candidate}") from exc
+        raise OpsPathError(f"cannot open site repo directory {candidate}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    if not stat.S_ISDIR(fd_st.st_mode):
+        raise OpsPathError(f"site repo is not a directory: {candidate}")
+    if (fd_st.st_dev, fd_st.st_ino) != (entry_st.st_dev, entry_st.st_ino):
+        raise OpsPathError(f"site repo directory identity changed during lookup: {candidate}")
+
     try:
         resolved = candidate.resolve(strict=True)
+        resolved_st = os.lstat(resolved)
     except (OSError, RuntimeError) as exc:
         raise OpsPathError(f"cannot resolve site repo {candidate}: {exc}") from exc
-    if resolved.parent != ops_root:
-        raise OpsPathError(f"site repo resolves outside {ops_root}: {resolved}")
+    if resolved.parent != ops_root or resolved.name != name:
+        raise OpsPathError(f"site repo resolves to unexpected target under {ops_root}: {resolved}")
+    if (resolved_st.st_dev, resolved_st.st_ino) != (fd_st.st_dev, fd_st.st_ino):
+        raise OpsPathError(f"site repo resolved identity mismatch: {resolved}")
     return resolved
 
 
@@ -428,6 +471,44 @@ def find_bgrun(
     return None
 
 
+def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
+    """Fixed trusted `bgrun` paths under `home` for Touch ID / approval-authority verification.
+
+    Strictly ignores caller environment overrides (`OPS_ROOT`, `TENDCF_OPS_ROOT`, `TENDCF_SITE`,
+    `XDG_CONFIG_HOME`) so a caller cannot redirect approval checks into an arbitrary checkout.
+    Resolution order under `h = Path.home() if home is None else home`:
+      1. `h/.local/bin/bgrun`
+      2. `h/tendcf-ops/tendcf-{public,private}-<slug>/bin/bgrun` only when `h/.config/tendcf/active-site`
+         selects a valid, real non-symlink pair under `h/tendcf-ops`
+      3. legacy `h/ops/site-{private-djbclark,private,public-djbclark,djbclark}/bin/bgrun`
+    """
+    h = Path.home() if home is None else home
+    empty_env: dict[str, str] = {}
+    candidates: list[Path] = [h / ".local" / "bin" / "bgrun"]
+
+    pair = resolve_tendcf_site_pair(empty_env, home=h)
+    if pair is not None:
+        if pair.public_dir is not None:
+            candidates.append(pair.public_dir / "bin" / "bgrun")
+        candidates.append(pair.private_dir / "bin" / "bgrun")
+
+    legacy = h / LEGACY_OPS_ROOT_NAME
+    for site_dir in LEGACY_SITE_NAMES:
+        candidates.append(legacy / site_dir / "bin" / "bgrun")
+    return candidates
+
+
+def find_trusted_bgrun(*, home: Path | None = None) -> Path | None:
+    """Return the first existing executable trusted `bgrun` under `home` (ignoring caller env overrides)."""
+    for cand in trusted_bgrun_paths(home=home):
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return cand
+        except OSError:
+            continue
+    return None
+
+
 def _is_tendcf_site_dir_name(name: str) -> bool:
     for prefix in (TENDCF_PUBLIC_PREFIX, TENDCF_PRIVATE_PREFIX):
         if name.startswith(prefix):
@@ -439,6 +520,58 @@ def _is_legacy_site_dir_name(name: str) -> bool:
     return bool(LEGACY_SITE_DIR_RE.match(name)) and not name.endswith(WORKTREE_SUFFIX)
 
 
+def _anchored_root_candidates(root: Path) -> list[Path]:
+    out = [root]
+    try:
+        resolved = root.resolve()
+        if resolved != root:
+            out.append(resolved)
+    except (OSError, RuntimeError):
+        pass
+    return out
+
+
+def _matches_anchored_ops_roots(
+    cand: Path,
+    allowed_exes: tuple[str, ...],
+    env: Mapping[str, str],
+    home: Path,
+) -> bool:
+    tendcf_roots: list[Path] = []
+    if "TENDCF_OPS_ROOT" in env:
+        custom_troot = tendcf_ops_root(env, home=home)
+        if custom_troot is not None:
+            tendcf_roots.append(custom_troot)
+    else:
+        tendcf_roots.append(home / DEFAULT_TENDCF_OPS_ROOT_NAME)
+    default_troot = home / DEFAULT_TENDCF_OPS_ROOT_NAME
+    if "TENDCF_OPS_ROOT" in env and tendcf_roots and default_troot not in tendcf_roots:
+        tendcf_roots.append(default_troot)
+
+    for base in tendcf_roots:
+        for root in _anchored_root_candidates(base):
+            try:
+                rel = cand.relative_to(root).parts
+            except ValueError:
+                continue
+            if len(rel) == 3 and rel[1] == "bin" and rel[2] in allowed_exes and _is_tendcf_site_dir_name(rel[0]):
+                return True
+
+    legacy_roots: list[Path] = [legacy_ops_root(env, home=home)]
+    default_lroot = home / LEGACY_OPS_ROOT_NAME
+    if default_lroot not in legacy_roots:
+        legacy_roots.append(default_lroot)
+    for base in legacy_roots:
+        for root in _anchored_root_candidates(base):
+            try:
+                rel = cand.relative_to(root).parts
+            except ValueError:
+                continue
+            if len(rel) == 3 and rel[1] == "bin" and rel[2] in allowed_exes and _is_legacy_site_dir_name(rel[0]):
+                return True
+    return False
+
+
 def is_bgrun_path(
     token: str,
     env: Mapping[str, str] | None = None,
@@ -448,20 +581,20 @@ def is_bgrun_path(
 ) -> bool:
     """Return True iff `token` names a valid Stage 0 `bgrun` (or `bg` when `allow_bg`) path.
 
-    Accepted forms (with `~`, `$HOME`, `${HOME}`, or an absolute path; never relative, never `..`,
-    never lookalikes like `bgrunner` or `-wt` worktrees):
-      1. `~/.local/bin/bgrun` (and `/bg` when `allow_bg`)
-      2. `<TENDCF_OPS_ROOT>/tendcf-{public,private}-<valid-slug>/bin/bgrun` (default `~/tendcf-ops`)
-      3. `~/ops/site-<name>/bin/bgrun` (legacy `~/ops/site-*/bin/bgrun`)
+    Accepted forms (anchored strictly to `$HOME`, `TENDCF_OPS_ROOT`, and `OPS_ROOT`; never
+    arbitrary unrelated absolute directories, never relative, never `..`, never lookalikes):
+      1. `~/.local/bin/bgrun` or `<HOME>/.local/bin/bgrun` (and `/bg` when `allow_bg`)
+      2. `<TENDCF_OPS_ROOT>/tendcf-{public,private}-<valid-slug>/bin/bgrun` (default `<HOME>/tendcf-ops`)
+      3. `<OPS_ROOT>/site-<name>/bin/bgrun` (default `<HOME>/ops/site-*/bin/bgrun`)
     """
     if not isinstance(token, str) or not token or "\x00" in token:
         return False
     if any(ch.isspace() for ch in token):
         return False
     allowed_exes = ("bgrun", "bg") if allow_bg else ("bgrun",)
-
-    # Reject empty segments (`//`), `.` and `..` anywhere after the leading prefix.
     env_m = _env_map(env)
+    h = _home_dir(env_m, home)
+
     rel_after_home: str | None = None
     for prefix in _HOME_PREFIXES:
         if token.startswith(prefix):
@@ -483,13 +616,9 @@ def is_bgrun_path(
             return _is_tendcf_site_dir_name(parts[1])
         if len(parts) == 4 and parts[0] == LEGACY_OPS_ROOT_NAME and parts[2] == "bin":
             return _is_legacy_site_dir_name(parts[1])
-        # Also honor a custom TENDCF_OPS_ROOT under $HOME (e.g. TENDCF_OPS_ROOT=~/my-ops).
-        expanded_abs = str(_home_dir(env_m, home).joinpath(*parts))
-        return _matches_custom_tendcf_root(expanded_abs, allowed_exes, env_m, home)
+        return _matches_anchored_ops_roots(h.joinpath(*parts), allowed_exes, env_m, h)
 
-    if not token.startswith("/"):
-        return False
-    if "//" in token:
+    if not token.startswith("/") or "//" in token:
         return False
     parts = token[1:].split("/")
     if any(p in ("", ".", "..") for p in parts):
@@ -497,42 +626,17 @@ def is_bgrun_path(
     exe = parts[-1]
     if exe not in allowed_exes:
         return False
-    if len(parts) >= 3 and parts[-3:] == [".local", "bin", exe]:
-        return True
-    if len(parts) >= 4 and parts[-4] == DEFAULT_TENDCF_OPS_ROOT_NAME and parts[-2] == "bin":
-        if _is_tendcf_site_dir_name(parts[-3]):
-            return True
-    if len(parts) >= 4 and parts[-4] == LEGACY_OPS_ROOT_NAME and parts[-2] == "bin":
-        if _is_legacy_site_dir_name(parts[-3]):
-            return True
-    return _matches_custom_tendcf_root(token, allowed_exes, env_m, home)
+    cand = Path(token)
 
-
-def _matches_custom_tendcf_root(
-    abs_path: str,
-    allowed_exes: tuple[str, ...],
-    env: Mapping[str, str],
-    home: Path | None,
-) -> bool:
-    custom_root = tendcf_ops_root(env, home=home)
-    if custom_root is None:
-        return False
-    cand = Path(abs_path)
-    roots = [custom_root]
-    try:
-        resolved = custom_root.resolve()
-        if resolved != custom_root:
-            roots.append(resolved)
-    except (OSError, RuntimeError):
-        pass
-    for root in roots:
+    for hroot in _anchored_root_candidates(h):
         try:
-            rel = cand.relative_to(root).parts
+            rel = cand.relative_to(hroot).parts
         except ValueError:
             continue
-        if len(rel) == 3 and rel[1] == "bin" and rel[2] in allowed_exes and _is_tendcf_site_dir_name(rel[0]):
+        if rel == (".local", "bin", exe):
             return True
-    return False
+
+    return _matches_anchored_ops_roots(cand, allowed_exes, env_m, h)
 
 
 def resolve_default_bm_store(
@@ -612,7 +716,7 @@ def resolve_ops_checkout_name(
 
     troot = tendcf_ops_root(env_m, home=h)
     if troot is not None:
-        for base in _unique_resolved_paths(troot):
+        for base in _anchored_root_candidates(troot):
             try:
                 parts = d.relative_to(base).parts
             except ValueError:
@@ -626,7 +730,7 @@ def resolve_ops_checkout_name(
                 return None
 
     lroot = legacy_ops_root(env_m, home=h)
-    for base in _unique_resolved_paths(lroot):
+    for base in _anchored_root_candidates(lroot):
         try:
             parts = d.relative_to(base).parts
         except ValueError:
@@ -636,24 +740,20 @@ def resolve_ops_checkout_name(
     return None
 
 
-def _unique_resolved_paths(path: Path) -> list[Path]:
-    out = [path]
-    try:
-        resolved = path.resolve()
-        if resolved != path:
-            out.append(resolved)
-    except (OSError, RuntimeError):
-        pass
-    return out
-
-
 def _cli(argv: list[str]) -> int:
-    if not argv:
-        return 2
+    if not argv or argv[0] in ("-h", "--help"):
+        stream = sys.stdout if argv and argv[0] in ("-h", "--help") else sys.stderr
+        stream.write(_CLI_USAGE)
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
     cmd = argv[0]
     if cmd == "skill-roots":
         priv, site = resolve_skill_roots()
         sys.stdout.write(f"{priv}\n{site}\n")
+        return 0
+    if cmd == "managed-root-bases":
+        troot = tendcf_ops_root() or (_home_dir(_env_map(None)) / DEFAULT_TENDCF_OPS_ROOT_NAME)
+        lroot = legacy_ops_root()
+        sys.stdout.write(f"{troot}\n{lroot}\n")
         return 0
     if cmd == "find-bgrun":
         include_bg = "--include-bg" in argv[1:]
@@ -665,6 +765,7 @@ def _cli(argv: list[str]) -> int:
     if cmd == "default-bm-store":
         sys.stdout.write(f"{resolve_default_bm_store()}\n")
         return 0
+    sys.stderr.write(_CLI_USAGE)
     return 2
 
 

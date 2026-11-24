@@ -22,34 +22,67 @@ const isTendcfSiteDir = (name) => {
   return false;
 };
 const isLegacySiteDir = (name) => LEGACY_SITE_RE.test(name) && !name.endsWith("-wt");
-const expandCustomTendcfRoot = () => {
-  const raw = process?.env?.TENDCF_OPS_ROOT;
-  if (!raw || !raw.trim() || raw.includes("\0")) return null;
-  let expanded = raw;
-  if (raw === "~") {
-    const home = process?.env?.HOME;
-    if (!home || !home.startsWith("/")) return null;
-    expanded = home;
-  } else if (raw.startsWith("~/")) {
-    const home = process?.env?.HOME;
-    const rest = raw.slice(2);
-    if (!home || !home.startsWith("/") || !rest || rest.startsWith("/")) return null;
-    expanded = `${home.replace(/\/+$/, "")}/${rest}`;
-  } else if (raw.startsWith("~")) {
-    return null;
-  }
-  if (!expanded.startsWith("/") || expanded.includes("//")) return null;
-  const parts = expanded.replace(/\/+$/, "").slice(1).split("/");
+const splitAbsParts = (raw) => {
+  if (!raw || typeof raw !== "string" || !raw.startsWith("/") || raw.includes("\0") || raw.includes("//")) return null;
+  const trimmed = raw.replace(/\/+$/, "");
+  if (!trimmed) return null;
+  const parts = trimmed.slice(1).split("/");
   if (!parts.length || parts.some((p) => p === "" || p === "." || p === "..")) return null;
   return parts;
 };
-const matchesCustomTendcfRoot = (absParts) => {
-  const rootParts = expandCustomTendcfRoot();
-  if (!rootParts || absParts.length !== rootParts.length + 3) return false;
-  for (let i = 0; i < rootParts.length; i++) {
-    if (absParts[i] !== rootParts[i]) return false;
+const expandEnvRoot = (raw, homeParts) => {
+  if (!raw || !raw.trim() || raw.includes("\0")) return null;
+  if (raw === "~") return homeParts;
+  if (raw.startsWith("~/")) {
+    const rest = raw.slice(2);
+    if (!homeParts || !rest || rest.startsWith("/")) return null;
+    return splitAbsParts(`/${homeParts.join("/")}/${rest}`);
   }
-  return absParts[rootParts.length + 1] === "bin" && isTendcfSiteDir(absParts[rootParts.length]);
+  if (raw.startsWith("~")) return null;
+  return splitAbsParts(raw);
+};
+const hasPrefix = (parts, prefix) => {
+  if (!prefix || parts.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i++) {
+    if (parts[i] !== prefix[i]) return false;
+  }
+  return true;
+};
+const getConfiguredRoots = () => {
+  const homeParts = splitAbsParts(process?.env?.HOME);
+  const tendcfRoots = [];
+  if (process?.env && Object.prototype.hasOwnProperty.call(process.env, "TENDCF_OPS_ROOT")) {
+    const custom = expandEnvRoot(process.env.TENDCF_OPS_ROOT, homeParts);
+    if (custom) {
+      tendcfRoots.push(custom);
+      if (homeParts) tendcfRoots.push([...homeParts, "tendcf-ops"]);
+    }
+  } else if (homeParts) {
+    tendcfRoots.push([...homeParts, "tendcf-ops"]);
+  }
+  const legacyRoots = [];
+  if (process?.env?.OPS_ROOT) {
+    const customLegacy = expandEnvRoot(process.env.OPS_ROOT, homeParts);
+    if (customLegacy) legacyRoots.push(customLegacy);
+  }
+  if (homeParts) legacyRoots.push([...homeParts, "ops"]);
+  return {homeParts, tendcfRoots, legacyRoots};
+};
+const matchesAnchoredOpsRoots = (absParts) => {
+  const {tendcfRoots, legacyRoots} = getConfiguredRoots();
+  for (const root of tendcfRoots) {
+    if (absParts.length === root.length + 3 && hasPrefix(absParts, root)
+        && absParts[root.length + 1] === "bin" && isTendcfSiteDir(absParts[root.length])) {
+      return true;
+    }
+  }
+  for (const root of legacyRoots) {
+    if (absParts.length === root.length + 3 && hasPrefix(absParts, root)
+        && absParts[root.length + 1] === "bin" && isLegacySiteDir(absParts[root.length])) {
+      return true;
+    }
+  }
+  return false;
 };
 const fullBg = (s) => {
   if (typeof s !== "string" || !s || s.includes("\0") || /\s/.test(s)) return false;
@@ -66,22 +99,19 @@ const fullBg = (s) => {
     if (parts.length === 3 && parts[0] === ".local" && parts[1] === "bin") return true;
     if (parts.length === 4 && parts[0] === "tendcf-ops" && parts[2] === "bin") return isTendcfSiteDir(parts[1]);
     if (parts.length === 4 && parts[0] === "ops" && parts[2] === "bin") return isLegacySiteDir(parts[1]);
-    const home = process?.env?.HOME;
-    if (home && home.startsWith("/")) {
-      const homeParts = home.replace(/\/+$/, "").slice(1).split("/").filter(Boolean);
-      return matchesCustomTendcfRoot([...homeParts, ...parts]);
-    }
-    return false;
+    const {homeParts} = getConfiguredRoots();
+    return homeParts ? matchesAnchoredOpsRoots([...homeParts, ...parts]) : false;
   }
-  if (!s.startsWith("/") || s.includes("//")) return false;
-  const parts = s.slice(1).split("/");
-  if (parts.some((p) => p === "" || p === "." || p === "..")) return false;
+  const parts = splitAbsParts(s);
+  if (!parts) return false;
   const exe = parts[parts.length - 1];
   if (exe !== "bgrun" && exe !== "bg") return false;
-  if (parts.length >= 3 && parts[parts.length - 3] === ".local" && parts[parts.length - 2] === "bin") return true;
-  if (parts.length >= 4 && parts[parts.length - 4] === "tendcf-ops" && parts[parts.length - 2] === "bin" && isTendcfSiteDir(parts[parts.length - 3])) return true;
-  if (parts.length >= 4 && parts[parts.length - 4] === "ops" && parts[parts.length - 2] === "bin" && isLegacySiteDir(parts[parts.length - 3])) return true;
-  return matchesCustomTendcfRoot(parts);
+  const {homeParts} = getConfiguredRoots();
+  if (homeParts && parts.length === homeParts.length + 3 && hasPrefix(parts, homeParts)
+      && parts[homeParts.length] === ".local" && parts[homeParts.length + 1] === "bin") {
+    return true;
+  }
+  return matchesAnchoredOpsRoots(parts);
 };
 
 function heredocs(line, state) {

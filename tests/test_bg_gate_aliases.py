@@ -10,13 +10,17 @@ GATE = Path(__file__).resolve().parents[1] / "claude/hooks/bg_test_gate.py"
 
 
 def _run_gate(command: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    base_env = {k: v for k, v in __import__("os").environ.items() if k not in ("TENDCF_OPS_ROOT", "OPS_ROOT")}
+    base_env["HOME"] = "/Users/me"
+    if env:
+        base_env.update(env)
     return subprocess.run(
         [sys.executable, str(GATE)],
         input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
         capture_output=True,
         text=True,
         check=True,
-        env=env,
+        env=base_env,
     )
 
 
@@ -60,6 +64,11 @@ def test_wrapper_aliases_allowed(command: str) -> None:
         "~/tendcf-ops/tendcf-public-Foo/bin/bgrun pytest tests/t.py",
         "~/tendcf-ops/site-private/bin/bgrun pytest tests/t.py",
         "~/.local/bin/bgrun pytest a.py; pytest b.py",
+        "/tmp/evil/.local/bin/bgrun pytest tests/t.py",
+        "/tmp/evil/ops/site-private/bin/bgrun pytest tests/t.py",
+        "/tmp/evil/tendcf-ops/tendcf-public-djbclark/bin/bgrun pytest tests/t.py",
+        "/Users/someone-else/.local/bin/bgrun pytest tests/t.py",
+        "/Users/someone-else/ops/site-private/bin/bgrun pytest tests/t.py",
     ],
 )
 def test_bare_and_lookalike_wrappers_denied(command: str) -> None:

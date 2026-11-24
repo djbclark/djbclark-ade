@@ -837,7 +837,7 @@ def test_gemini_only_retired_cleanup_runs_once_without_duplicates(catalog, tmp_p
 
 
 def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, tmp_path):
-    """Queue #123: skill-everywhere dual-reads active tendcf site pair and falls back fail-closed to ~/ops."""
+    """Queue #123 / Finding 2: dual-read active tendcf site pair, fail-closed fallback, and bidirectional transition reconciliation."""
     home, public, _, env = catalog
     env.pop("SKILL_EVERYWHERE_PRIVATE", None)
     env.pop("SKILL_EVERYWHERE_SITE", None)
@@ -845,6 +845,9 @@ def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, t
     env.pop("TENDCF_SITE", None)
     env.pop("TENDCF_OPS_ROOT", None)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex,grokbot"
+    grok_dir = home / "agent-data" / "workflows"
+    grok_dir.mkdir(parents=True)
 
     troot = home / "tendcf-ops"
     tpriv = troot / "tendcf-private-acme" / "skills"
@@ -853,6 +856,7 @@ def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, t
     tpub.mkdir(parents=True)
     tpriv_skill = skill(tpriv, "priv-tendcf")
     tpub_skill = skill(tpub, "pub-tendcf")
+    tshared_skill = skill(tpub, "shared-site")
 
     lpriv = home / "ops" / "site-private" / "skills"
     lsite = home / "ops" / "site-public-djbclark" / "skills"
@@ -860,30 +864,77 @@ def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, t
     lsite.mkdir(parents=True)
     lpriv_skill = skill(lpriv, "legacy-priv")
     lsite_skill = skill(lsite, "legacy-site")
+    lshared_skill = skill(lsite, "shared-site")
 
-    # Without selector, sole tendcf-ops pair is NOT globbed -> legacy ~/ops roots win.
+    # Truly foreign entries must NEVER be touched across transitions.
+    links = home / ".agents" / "skills"
+    foreign_target = tmp_path / "outside-foreign" / "foreign-skill"
+    foreign_target.mkdir(parents=True)
+    (links / "foreign-skill").symlink_to(foreign_target)
+    foreign_grok = grok_dir / "ade-foreign-only"
+    foreign_grok.mkdir()
+    (foreign_grok / "SKILL.md").write_text("foreign grok skill\n")
+
+    # 1. Without selector, sole tendcf-ops pair is NOT globbed -> legacy ~/ops roots win.
     r_legacy = run(catalog, "--all")
     assert r_legacy.returncode == 0, r_legacy.stdout + r_legacy.stderr
-    links = home / ".agents" / "skills"
     assert (links / "legacy-priv").readlink() == lpriv_skill
     assert (links / "legacy-site").readlink() == lsite_skill
+    assert (links / "shared-site").readlink() == lshared_skill
     assert not (links / "priv-tendcf").exists()
     assert not (links / "pub-tendcf").exists()
+    assert (grok_dir / "ade-legacy-site" / ".skill-everywhere").read_text().startswith("source=site-djbclark/skills/legacy-site\n")
+    assert (grok_dir / "ade-shared-site" / ".skill-everywhere").read_text().startswith("source=site-djbclark/skills/shared-site\n")
+    assert run(catalog, "--check", "--all").returncode == 0
 
-    # With XDG active-site set to `acme`, tendcf pair roots resolve cleanly.
+    # 2. Transition legacy -> tendcf via XDG active-site:
+    #    --check --all MUST fail (migrating same-name + stale old-site-only links & Grok Bot copies).
     active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
     active_cfg.parent.mkdir(parents=True)
     active_cfg.write_text("acme\n", encoding="utf-8")
+    chk_to_tendcf = run(catalog, "--check", "--all")
+    assert chk_to_tendcf.returncode == 1
+    assert "migrating from" in chk_to_tendcf.stdout
+    assert "stale site skill link still present" in chk_to_tendcf.stderr
+    assert "stale site skill copy still present" in chk_to_tendcf.stderr
+    assert "foreign-skill" not in chk_to_tendcf.stderr
+
+    #    --all relinks same-name, installs tendcf-only, removes legacy-only links & copies, preserves foreign.
     r_tendcf = run(catalog, "--all")
     assert r_tendcf.returncode == 0, r_tendcf.stdout + r_tendcf.stderr
     assert (links / "priv-tendcf").readlink() == tpriv_skill.resolve()
     assert (links / "pub-tendcf").readlink() == tpub_skill.resolve()
+    assert (links / "shared-site").readlink() == tshared_skill.resolve()
+    assert not os.path.lexists(links / "legacy-priv")
+    assert not os.path.lexists(links / "legacy-site")
+    assert not (grok_dir / "ade-legacy-priv").exists()
+    assert not (grok_dir / "ade-legacy-site").exists()
+    assert (grok_dir / "ade-pub-tendcf" / ".skill-everywhere").read_text().startswith("source=tendcf-public-acme/skills/pub-tendcf\n")
+    assert (grok_dir / "ade-shared-site" / ".skill-everywhere").read_text().startswith("source=tendcf-public-acme/skills/shared-site\n")
+    assert (links / "foreign-skill").readlink() == foreign_target
+    assert (foreign_grok / "SKILL.md").read_text() == "foreign grok skill\n"
+    assert run(catalog, "--check", "--all").returncode == 0
 
-    # Grok Bot copy provenance labels tendcf-public-<slug> accurately.
-    env["SKILL_EVERYWHERE_ONLY"] = "grokbot"
-    (home / "agent-data" / "workflows").mkdir(parents=True)
-    r_grok = run(catalog, "pub-tendcf")
-    assert r_grok.returncode == 0, r_grok.stdout + r_grok.stderr
-    marker = (home / "agent-data" / "workflows" / "ade-pub-tendcf" / ".skill-everywhere").read_text()
-    assert marker.startswith("source=tendcf-public-acme/skills/pub-tendcf\n")
+    # 3. Transition tendcf -> legacy (remove active-site):
+    #    --check --all MUST fail again on migrating same-name + stale tendcf-only links & copies.
+    active_cfg.unlink()
+    chk_to_legacy = run(catalog, "--check", "--all")
+    assert chk_to_legacy.returncode == 1
+    assert "migrating from" in chk_to_legacy.stdout
+    assert "stale site skill link still present" in chk_to_legacy.stderr
+    assert "stale site skill copy still present" in chk_to_legacy.stderr
+
+    r_back = run(catalog, "--all")
+    assert r_back.returncode == 0, r_back.stdout + r_back.stderr
+    assert (links / "legacy-priv").readlink() == lpriv_skill
+    assert (links / "legacy-site").readlink() == lsite_skill
+    assert (links / "shared-site").readlink() == lshared_skill
+    assert not os.path.lexists(links / "priv-tendcf")
+    assert not os.path.lexists(links / "pub-tendcf")
+    assert not (grok_dir / "ade-priv-tendcf").exists()
+    assert not (grok_dir / "ade-pub-tendcf").exists()
+    assert (grok_dir / "ade-shared-site" / ".skill-everywhere").read_text().startswith("source=site-djbclark/skills/shared-site\n")
+    assert (links / "foreign-skill").readlink() == foreign_target
+    assert (foreign_grok / "SKILL.md").read_text() == "foreign grok skill\n"
+    assert run(catalog, "--check", "--all").returncode == 0
 

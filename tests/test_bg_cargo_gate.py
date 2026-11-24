@@ -96,6 +96,12 @@ deny.push(
   "~/tendcf-ops/site-private/bin/bgrun cargo build",
   "~/tendcf-ops/tendcf-public-a/../tendcf-public-b/bin/bgrun cargo build",
   `~/tendcf-ops/tendcf-public-${"a".repeat(65)}/bin/bgrun cargo build`,
+  "/tmp/evil/.local/bin/bgrun cargo build",
+  "/tmp/evil/ops/site-private/bin/bgrun cargo build",
+  "/tmp/evil/tendcf-ops/tendcf-public-djbclark/bin/bgrun cargo build",
+  "/Users/someone-else/.local/bin/bgrun cargo build",
+  "/Users/someone-else/ops/site-private/bin/bgrun cargo build",
+  "/Users/someone-else/tendcf-ops/tendcf-public-djbclark/bin/bgrun cargo build",
 );
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);
@@ -124,8 +130,10 @@ const dispose = await plugin.setup(context);
   const read={action:"read",resources:["cargo build"],effect:"allow"};hooks[0][1](read);assert.equal(read.effect,"allow");
 await dispose();assert.equal(disposed,1);
 '''
+    env = {k: v for k, v in __import__("os").environ.items() if k not in ("TENDCF_OPS_ROOT", "OPS_ROOT")}
+    env["HOME"] = "/Users/me"
     result = subprocess.run(
         [node, "--input-type=module", "-e", script, str(source)],
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=20, env=env,
     )
     assert result.returncode == 0, result.stdout + result.stderr

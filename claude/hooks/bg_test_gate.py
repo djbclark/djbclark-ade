@@ -78,12 +78,13 @@ _OPS_PATHS = _load_ops_paths()
 def _is_valid_bgrun(token: str) -> bool:
     if _OPS_PATHS is not None:
         return _OPS_PATHS.is_bgrun_path(token, allow_bg=True)
-    # Minimal standalone fallback if bin/ade_ops_paths.py is unavailable.
-    if not token or ".." in token.split("/"):
+    # Minimal standalone fallback anchored strictly to $HOME if bin/ade_ops_paths.py is unavailable.
+    if not token or ".." in token.split("/") or "//" in token:
         return False
+    home_esc = re.escape(str(Path.home()).rstrip("/"))
     return bool(
-        re.match(r"^(?:~|\$HOME|\$\{HOME\}|/(?:[^/\s]+/)*)\.local/bin/bg(?:run)?\Z", token)
-        or re.match(r"^(?:~|\$HOME|\$\{HOME\}|/(?:[^/\s]+/)*)ops/site-[A-Za-z0-9][A-Za-z0-9._-]*/bin/bg(?:run)?\Z", token)
+        re.match(rf"^(?:~|\$HOME|\$\{{HOME\}}|{home_esc})/\.local/bin/bg(?:run)?\Z", token)
+        or re.match(rf"^(?:~|\$HOME|\$\{{HOME\}}|{home_esc})/ops/site-[A-Za-z0-9][A-Za-z0-9._-]*/bin/bg(?:run)?\Z", token)
     ) and not any(part.endswith("-wt") for part in token.split("/"))
 
 

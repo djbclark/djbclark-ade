@@ -20,8 +20,10 @@
 #     of the repo this script's real path sits in (SKILL_EVERYWHERE_ADE overrides; #279 / revived #292)
 #   ~/tendcf-ops/tendcf-private-<slug>/skills/<name>  private skills (active tendcf site pair; Stage 0 dual-read)
 #   ~/tendcf-ops/tendcf-public-<slug>/skills/<name>   site skills (active tendcf site pair; Stage 0 dual-read)
-#   ~/ops/site-private/skills/<name>                  legacy private skills (fallback when tendcf active-site absent)
-#   ~/ops/site-public-djbclark/skills/<name>          legacy site skills (fallback when tendcf active-site absent)
+#   ~/ops/site-private/skills/<name>                  legacy private skills (fallback; OPS_ROOT forces legacy)
+#   ~/ops/site-public-djbclark/skills/<name>          legacy site skills (fallback; OPS_ROOT forces legacy)
+# Switching active roots between ~/ops and ~/tendcf-ops reconciles provably managed site links and
+# Grok Bot copies in --all / --check --all while leaving foreign entries untouched.
 #   ~/src/chrome-use/skill-data/<name>          chrome-use skills (third-party git repo; SKILL_EVERYWHERE_CHROME overrides)
 # and every TUI links DIRECTLY at that path — no hub layers, no chained
 # symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
@@ -84,9 +86,19 @@ fi
 ade_root=$SKILL_EVERYWHERE_ADE
 default_priv_root="${OPS_ROOT:-$HOME/ops}/site-private/skills"
 default_site_root="${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills"
-if [[ -z ${OPS_ROOT:-} && ( -z ${SKILL_EVERYWHERE_PRIVATE:-} || -z ${SKILL_EVERYWHERE_SITE:-} ) ]]; then
-  _se_script_dir="$(cd -P "$(dirname "$(grealpath -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
-  if [[ -f $_se_script_dir/ade_ops_paths.py ]] && command -v python3 >/dev/null 2>&1; then
+managed_tendcf_base="$HOME/tendcf-ops"
+managed_legacy_base="${OPS_ROOT:-$HOME/ops}"
+_se_script_dir="$(cd -P "$(dirname "$(grealpath -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
+if [[ -f $_se_script_dir/ade_ops_paths.py ]] && command -v python3 >/dev/null 2>&1; then
+  _se_bases=()
+  while IFS= read -r _se_line; do
+    _se_bases+=("$_se_line")
+  done < <(python3 "$_se_script_dir/ade_ops_paths.py" managed-root-bases 2>/dev/null || true)
+  if ((${#_se_bases[@]} == 2)) && [[ -n ${_se_bases[0]} && -n ${_se_bases[1]} ]]; then
+    managed_tendcf_base="${_se_bases[0]}"
+    managed_legacy_base="${_se_bases[1]}"
+  fi
+  if [[ -z ${OPS_ROOT:-} && ( -z ${SKILL_EVERYWHERE_PRIVATE:-} || -z ${SKILL_EVERYWHERE_SITE:-} ) ]]; then
     _se_roots=()
     while IFS= read -r _se_line; do
       _se_roots+=("$_se_line")
@@ -100,6 +112,56 @@ fi
 priv_root="${SKILL_EVERYWHERE_PRIVATE:-$default_priv_root}"
 site_root="${SKILL_EVERYWHERE_SITE:-$default_site_root}"
 chrome_root="${SKILL_EVERYWHERE_CHROME:-$HOME/src/chrome-use/skill-data}"
+
+_is_valid_tendcf_slug() {
+  local s=$1
+  [[ ${#s} -ge 1 && ${#s} -le 64 && $s =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ && $s != *-wt ]]
+}
+_is_managed_tendcf_repo_name() {
+  local r=$1
+  if [[ $r == tendcf-private-* ]]; then _is_valid_tendcf_slug "${r#tendcf-private-}"
+  elif [[ $r == tendcf-public-* ]]; then _is_valid_tendcf_slug "${r#tendcf-public-}"
+  else return 1; fi
+}
+_is_managed_legacy_repo_name() {
+  local r=$1
+  [[ $r =~ ^site-[A-Za-z0-9][A-Za-z0-9._-]*$ && $r != *-wt ]]
+}
+_is_managed_site_skill_path() {
+  local tgt=$1 sname=$2 repo_dir base rbase rel
+  [[ -n $tgt && $tgt != */../* && $tgt != */.. && $tgt == */skills/"$sname" ]] || return 1
+  repo_dir="${tgt%"/skills/$sname"}"
+  for base in "$managed_tendcf_base" "$HOME/tendcf-ops"; do
+    [[ -n $base ]] || continue
+    for rbase in "$base" "$(grealpath -- "$base" 2>/dev/null || true)"; do
+      [[ -n $rbase ]] || continue
+      if [[ $repo_dir == "$rbase"/* ]]; then
+        rel="${repo_dir#"$rbase"/}"
+        [[ $rel != */* ]] && _is_managed_tendcf_repo_name "$rel" && return 0
+      fi
+    done
+  done
+  for base in "$managed_legacy_base" "$HOME/ops"; do
+    [[ -n $base ]] || continue
+    for rbase in "$base" "$(grealpath -- "$base" 2>/dev/null || true)"; do
+      [[ -n $rbase ]] || continue
+      if [[ $repo_dir == "$rbase"/* ]]; then
+        rel="${repo_dir#"$rbase"/}"
+        [[ $rel != */* ]] && _is_managed_legacy_repo_name "$rel" && return 0
+      fi
+    done
+  done
+  return 1
+}
+_is_managed_site_grokbot_source() {
+  local line=$1 sname=$2 rest repo
+  [[ $line == "source="* ]] || return 1
+  rest="${line#source=}"
+  [[ $rest == */skills/"$sname" ]] || return 1
+  repo="${rest%"/skills/$sname"}"
+  [[ $repo != */* ]] || return 1
+  _is_managed_tendcf_repo_name "$repo" || _is_managed_legacy_repo_name "$repo"
+}
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
 # dir we fill (a second link there would list the skill twice), or "x <why>",
@@ -366,6 +428,8 @@ for name in "$@"; do
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
     elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
+    elif [[ -L $link ]] && _is_managed_site_skill_path "$(greadlink "$link")" "$name"; then
+      state="migrating from $(greadlink "$link")"
     elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
@@ -378,7 +442,7 @@ for name in "$@"; do
           if ((all)) && [[ $state != linked ]]; then rc=1; fi
         fi ;;
       remove)
-        if [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
+        if [[ $state == linked || $state == migrating\ * ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         if [[ $state == missing ]]; then
@@ -390,10 +454,11 @@ for name in "$@"; do
           # instead of replacing the link.
           act "relink $link direct" ln -sfn "$src" "$link"
           ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
-        elif [[ $state == dangling\ * ]]; then
+        elif [[ $state == dangling\ * || $state == migrating\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
           # a TUI's skills dir still pointed at the pre-2026-10-09 site-private
-          # path); replace it rather than preserve a dead pointer.
+          # path), and a link to another managed site root migrates cleanly on
+          # root transitions (2026-11-24, queue #123).
           act "relink $link" ln -sfn "$src" "$link"
           ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
         elif ((third_party)) && [[ $state == "real dir/file (not ours)" ]]; then
@@ -545,6 +610,72 @@ retired_step() {
   done
 }
 retired_step
+
+# Reconcile old-site-only skills left behind after switching active site roots between legacy ~/ops
+# and ~/tendcf-ops/tendcf-{private,public}-<slug> (2026-11-24, queue #123). Runs in --all link and
+# --check --all modes only; foreign symlinks and foreign real directories are never touched.
+stale_site_step() {
+  ((all)) || return 0
+  [[ $mode == link || $mode == check ]] || return 0
+  local bin dir l sname tgt dest src_line seen_dirs="|" printed=0
+  _stale_site_header() {
+    if ((!printed)); then
+      echo "== stale site skills"
+      printed=1
+    fi
+  }
+  while IFS='|' read -r bin dir; do
+    [[ -z $bin ]] && continue
+    wanted "$bin" || continue
+    if [[ $dir == copy\ * ]]; then
+      ((no_copy)) && continue
+      dir="${dir#copy }"; dir="${dir/#\~/$HOME}"
+      [[ -d $dir ]] || continue
+      for dest in "$dir"/ade-*; do
+        [[ -d $dest && ! -L $dest && -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]] || continue
+        sname="${dest##*/ade-}"
+        [[ " ${names[*]:-} " == *" $sname "* ]] && continue
+        src_line="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
+        _is_managed_site_grokbot_source "$src_line" "$sname" || continue
+        if [[ $mode == check ]]; then
+          printf 'warning: stale site skill copy still present: %s (run skill-everywhere --all to remove)\n' "$dest" >&2
+          rc=1
+        else
+          _stale_site_header
+          act "remove stale site $dest" rm -rf -- "$dest"
+          ((dry)) || printf '  %-13s removed stale site %s\n' "$bin" "$dest"
+        fi
+      done
+      continue
+    fi
+    [[ $dir == via* || $dir == x* ]] && continue
+    dir="${dir/#\~/$HOME}"
+    [[ -d $dir ]] || continue
+    [[ $seen_dirs == *"|$dir|"* ]] && continue
+    seen_dirs="${seen_dirs}${dir}|"
+    for l in "$dir"/*; do
+      [[ -L $l ]] || continue
+      sname="${l##*/}"
+      [[ $sname == paseo ]] && continue
+      [[ " ${names[*]:-} " == *" $sname "* ]] && continue
+      tgt="$(greadlink -- "$l" 2>/dev/null)" || continue
+      if [[ $tgt == "$ade_root/$sname" || $tgt == "$priv_root/$sname" \
+         || $tgt == "$site_root/$sname" || $tgt == "$chrome_root/$sname" ]]; then
+        continue
+      fi
+      _is_managed_site_skill_path "$tgt" "$sname" || continue
+      if [[ $mode == check ]]; then
+        printf 'warning: stale site skill link still present: %s -> %s (run skill-everywhere --all to remove)\n' "$l" "$tgt" >&2
+        rc=1
+      else
+        _stale_site_header
+        act "remove stale site $l" rm -- "$l"
+        ((dry)) || printf '  %-13s removed stale site %s\n' "$bin" "$l"
+      fi
+    done
+  done <<<"$targets"
+}
+stale_site_step
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

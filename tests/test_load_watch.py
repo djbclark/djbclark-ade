@@ -538,9 +538,10 @@ def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path
 
 
 def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_path, monkeypatch):
-    """Queue #123: ticket lookup dual-reads ~/.local/bin/bgrun and active tendcf pair, fail-closed without selector."""
+    """Queue #123 / Finding 1: Touch ID ticket authority reads ONLY trusted $HOME paths and ignores caller env overrides."""
     monkeypatch.delenv("TENDCF_SITE", raising=False)
     monkeypatch.delenv("TENDCF_OPS_ROOT", raising=False)
+    monkeypatch.delenv("OPS_ROOT", raising=False)
     repo = _repo(tmp_path)
     stub_sudo_ask(tmp_path, 1)
     home = tmp_path / "home"
@@ -548,20 +549,40 @@ def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_p
     tendcf_pub_bgrun = home / "tendcf-ops" / "tendcf-public-acme" / "bin" / "bgrun"
     stub_bgrun(tendcf_pub_bgrun, 0, out="11223344 until 2026-11-25 02:10 EST")
 
-    # Without a site selector, sole tendcf-ops site is NOT globbed -> dialog denies.
-    r_no_sel = run(tmp_path, "ci", "decide", str(repo), "local", "no selector", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
-    assert r_no_sel.returncode == 1
+    # Caller-supplied env overrides (TENDCF_OPS_ROOT, TENDCF_SITE, OPS_ROOT, XDG_CONFIG_HOME) MUST NOT
+    # redirect Touch ID ticket verification into arbitrary checkouts.
+    alt_ops = tmp_path / "alt-tendcf-ops"
+    (alt_ops / "tendcf-private-evil").mkdir(parents=True)
+    stub_bgrun(alt_ops / "tendcf-public-evil" / "bin" / "bgrun", 0, out="deadbeef until 2026-11-25 02:10 EST")
+    alt_legacy = tmp_path / "alt-legacy-ops"
+    stub_bgrun(alt_legacy / "site-private-djbclark" / "bin" / "bgrun", 0, out="deadbeef until 2026-11-25 02:10 EST")
+    alt_xdg = tmp_path / "alt-xdg" / "tendcf" / "active-site"
+    alt_xdg.parent.mkdir(parents=True)
+    alt_xdg.write_text("acme\n", encoding="utf-8")
 
-    # With TENDCF_SITE=acme, tendcf-public-acme/bin/bgrun covers the local decision.
-    r_sel = run(tmp_path, "ci", "decide", str(repo), "local", "tendcf ticket", TENDCF_SITE="acme", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
-    assert r_sel.returncode == 0, r_sel.stderr
+    r_env_site = run(tmp_path, "ci", "decide", str(repo), "local", "env site", TENDCF_SITE="acme")
+    assert r_env_site.returncode == 1
+    r_env_root = run(tmp_path, "ci", "decide", str(repo), "local", "env root", TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
+    assert r_env_root.returncode == 1
+    r_env_legacy = run(tmp_path, "ci", "decide", str(repo), "local", "env legacy", OPS_ROOT=str(alt_legacy))
+    assert r_env_legacy.returncode == 1
+    r_env_xdg = run(tmp_path, "ci", "decide", str(repo), "local", "env xdg", XDG_CONFIG_HOME=str(tmp_path / "alt-xdg"))
+    assert r_env_xdg.returncode == 1
+
+    # Trusted $HOME/.config/tendcf/active-site resolves $HOME/tendcf-ops/tendcf-public-acme/bin/bgrun.
+    trusted_cfg = home / ".config" / "tendcf" / "active-site"
+    trusted_cfg.parent.mkdir(parents=True)
+    trusted_cfg.write_text("acme\n", encoding="utf-8")
+    r_trusted = run(tmp_path, "ci", "decide", str(repo), "local", "tendcf ticket", TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
+    assert r_trusted.returncode == 0, r_trusted.stderr
     assert rows(tmp_path)[0][2] == "[ticket 11223344] tendcf ticket"
 
-    # ~/.local/bin/bgrun works even without TENDCF_SITE and takes precedence.
+    # Trusted ~/.local/bin/bgrun takes top precedence even without active-site.
+    trusted_cfg.unlink()
     local_bgrun = home / ".local" / "bin" / "bgrun"
     stub_bgrun(local_bgrun, 0, out="55667788 until 2026-11-25 03:10 EST")
     (tmp_path / "ci-only.tsv").unlink()
-    r_local = run(tmp_path, "ci", "decide", str(repo), "local", "local bin ticket", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
+    r_local = run(tmp_path, "ci", "decide", str(repo), "local", "local bin ticket")
     assert r_local.returncode == 0, r_local.stderr
     assert rows(tmp_path)[0][2] == "[ticket 55667788] local bin ticket"
 
@@ -1103,10 +1124,11 @@ def test_under_bg_and_outside_bg(monkeypatch):
     assert w["repos"][0]["bg_cores"] == 0.0
 
 
-def test_bg_rules_and_lookalikes():
+def test_bg_rules_and_lookalikes(monkeypatch):
     lw = load_module()
-    assert lw.bg_args(f"/bin/bash {BG} pytest tests/test_x.py") == ["pytest", "tests/test_x.py"]
-    assert lw.bg_args(f"{BG} just release") == ["just", "release"]
+    monkeypatch.setattr(lw, "HOME", Path("/Users/x"))
+    assert lw.bg_args(f"/bin/bash /Users/x/ops/site-private/bin/bgrun pytest tests/test_x.py") == ["pytest", "tests/test_x.py"]
+    assert lw.bg_args("/Users/x/ops/site-private/bin/bgrun just release") == ["just", "release"]
     assert lw.bg_args("cat /Users/x/ops/site-private/bin/bgrun") is None  # reading it is not running it
     assert lw.bg_args("python other/bin/bgrun") is None
     for name in ("bg", "bgrun"):
@@ -1134,6 +1156,11 @@ def test_bg_rules_and_lookalikes():
         "/Users/x/tendcf-ops/site-private/bin/bgrun",
         "/Users/x/.local/bin/bgrunner",
         "/tmp/bgrun",
+        "/tmp/evil/.local/bin/bgrun",
+        "/tmp/evil/ops/site-private/bin/bgrun",
+        "/tmp/evil/tendcf-ops/tendcf-public-djbclark/bin/bgrun",
+        "/Users/other/.local/bin/bgrun",
+        "/Users/other/ops/site-private/bin/bgrun",
     ):
         assert lw.bg_args(f"{bad} pytest t.py") is None, bad
     assert lw.bg_rule(["just", "release-all"]) == "release"

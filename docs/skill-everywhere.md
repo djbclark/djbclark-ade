@@ -20,18 +20,33 @@ churn can no longer break skill loading):
 
 - public skills: `~/src/djbclark-ade/skills/<name>/` when that checkout exists,
   otherwise `<this-checkout>/skills/<name>/` (see section 1) — link target that path
-- private skills: `~/ops/site-private/skills/<name>/` (real directory; only
-  `1password` today) — link target `~/ops/site-private/skills/<name>`
-- site skills (since 2026-11-06, the skills moved out of this repo by the
-  slim-down): `~/ops/site-public-djbclark/skills/<name>/`, the Mac's checkout of
-  the site-djbclark repo (default `${OPS_ROOT:-~/ops}/site-public-djbclark/skills`,
-  `SKILL_EVERYWHERE_SITE` overrides it) — link target
-  `~/ops/site-public-djbclark/skills/<name>`. A name in more than one root resolves
-  public, then private, then site.
+- private skills (Stage 0 dual-read, 2026-11-24): when a valid `tendcf` site is selected
+  (`TENDCF_SITE` > `$XDG_CONFIG_HOME/tendcf/active-site`, fail-closed with no sole-directory
+  glob; `TENDCF_OPS_ROOT` defaults to `~/tendcf-ops`) and `OPS_ROOT` is unset, prefers
+  `<TENDCF_OPS_ROOT>/tendcf-private-<slug>/skills/<name>/` when present; otherwise falls
+  back to legacy `${OPS_ROOT:-~/ops}/site-private/skills/<name>/` (real directory;
+  `SKILL_EVERYWHERE_PRIVATE` overrides both)
+- site skills (Stage 0 dual-read, 2026-11-24): when a valid `tendcf` site pair is selected
+  and `OPS_ROOT` is unset, prefers `<TENDCF_OPS_ROOT>/tendcf-public-<slug>/skills/<name>/`
+  when present; otherwise falls back to legacy `${OPS_ROOT:-~/ops}/site-public-djbclark/skills/<name>/`
+  (`SKILL_EVERYWHERE_SITE` overrides both; setting legacy `OPS_ROOT` forces the legacy
+  `${OPS_ROOT}/site-{private,public-djbclark}/skills` roots). A name in more than one root
+  resolves public, then private, then site.
 - chrome-use skills (since 2026-11-17): `~/src/chrome-use/skill-data/<name>/`,
   the third-party `leeguooooo/chrome-use` repo's skills (e.g. `real-chrome`, `core`),
   `SKILL_EVERYWHERE_CHROME` overrides it — resolves after public, private and site, so a
   same-named ADE skill wins over a chrome-use one.
+
+**Site-root transition reconciliation (2026-11-24).** Switching active roots between legacy
+`~/ops/site-*` and `~/tendcf-ops/tendcf-{private,public}-<slug>` (in either direction)
+reconciles provably managed entries without touching foreign links or directories: same-name
+skills pointing to a previous managed site root are classified as `migrating from ...`
+(`--check --all` exits 1) and atomically relinked to the active root in link mode (and Grok
+Bot copies are re-rendered); old-site-only links and Grok Bot managed copies (verified by a
+regular non-symlink `.skill-everywhere` marker naming a managed site/private repo) are
+flagged by `--check --all` and removed by `--all`. Truly foreign symlinks and directories are
+always left untouched. Shared path/slug helpers live in `bin/ade_ops_paths.py` (CLI verbs:
+`python3 bin/ade_ops_paths.py {skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store}`).
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/self-handoff` is a symlink to the git

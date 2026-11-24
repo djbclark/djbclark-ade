@@ -237,9 +237,12 @@ import ade_ops_paths as _ops_paths  # noqa: E402
 
 
 def resolve_bgrun_bin(home=None):
-    """Stage 0 dual-read lookup for `bgrun` (`~/.local/bin/bgrun`, active tendcf pair, legacy `~/ops/site-*`)."""
+    """Trusted Touch ID ticket-verifier lookup strictly under `HOME` (`~/.local/bin/bgrun`,
+    `~/.config/tendcf/active-site` -> `~/tendcf-ops/...`, or legacy `~/ops/site-private-djbclark/bin/bgrun`).
+    Ignores caller env overrides (`TENDCF_OPS_ROOT`, `TENDCF_SITE`, `OPS_ROOT`, `XDG_CONFIG_HOME`)
+    so callers cannot redirect approval authority into arbitrary checkouts."""
     h = HOME if home is None else home
-    found = _ops_paths.find_bgrun(home=h)
+    found = _ops_paths.find_trusted_bgrun(home=h)
     if found is not None:
         return found
     return h / "ops/site-private-djbclark/bin/bgrun"

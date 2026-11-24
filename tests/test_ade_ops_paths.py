@@ -218,6 +218,66 @@ def test_resolve_tendcf_site_pair_fail_closed_no_sole_dir_glob(tmp_path: Path) -
     assert ops.resolve_tendcf_site_pair({**env, "TENDCF_SITE": "djbclark"}) is None
 
 
+def test_check_site_repo_dir_rejects_sibling_symlink_and_mid_lookup_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 4: sibling symlink under same ops_root and mid-lookup identity swap must fail closed."""
+    ops_root = (tmp_path / "tendcf-ops").resolve()
+    site_a = ops_root / "tendcf-private-alpha"
+    site_b = ops_root / "tendcf-private-beta"
+    site_b.mkdir(parents=True)
+
+    # Direct sibling symlink under the same parent is refused.
+    site_a.symlink_to(site_b)
+    with pytest.raises(ops.OpsPathError):
+        ops._check_site_repo_dir(ops_root, "tendcf-private-alpha", required=True)
+    site_a.unlink()
+
+    # Simulated race: real dir at scandir/open time, but Path.resolve returns sibling dir under same ops_root.
+    site_a.mkdir()
+    orig_resolve = Path.resolve
+
+    def swapped_resolve(self: Path, strict: bool = False) -> Path:
+        if self == site_a:
+            return site_b
+        return orig_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", swapped_resolve)
+    with pytest.raises(ops.OpsPathError, match="unexpected target"):
+        ops._check_site_repo_dir(ops_root, "tendcf-private-alpha", required=True)
+
+
+def test_find_trusted_bgrun_ignores_caller_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding 1: Touch ID ticket authority ignores TENDCF_OPS_ROOT, TENDCF_SITE, OPS_ROOT, XDG_CONFIG_HOME."""
+    home = tmp_path / "home"
+    evil_ops = tmp_path / "evil-ops"
+    (evil_ops / "tendcf-private-evil").mkdir(parents=True)
+    _mk_exec(evil_ops / "tendcf-public-evil" / "bin" / "bgrun")
+    _mk_exec(tmp_path / "evil-legacy" / "site-private-djbclark" / "bin" / "bgrun")
+    evil_xdg = tmp_path / "evil-xdg" / "tendcf" / "active-site"
+    evil_xdg.parent.mkdir(parents=True)
+    evil_xdg.write_text("evil\n", encoding="utf-8")
+
+    # Even with all caller env vars poisoned, trusted lookup finds nothing when home has no install.
+    monkeypatch.setenv("TENDCF_OPS_ROOT", str(evil_ops))
+    monkeypatch.setenv("TENDCF_SITE", "evil")
+    monkeypatch.setenv("OPS_ROOT", str(tmp_path / "evil-legacy"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "evil-xdg"))
+    assert ops.find_trusted_bgrun(home=home) is None
+
+    # Adding a real installation under home/tendcf-ops STILL does not match until home/.config/tendcf/active-site names it.
+    (home / "tendcf-ops" / "tendcf-private-acme").mkdir(parents=True)
+    trusted_pub = _mk_exec(home / "tendcf-ops" / "tendcf-public-acme" / "bin" / "bgrun")
+    assert ops.find_trusted_bgrun(home=home) is None
+
+    trusted_cfg = home / ".config" / "tendcf" / "active-site"
+    trusted_cfg.parent.mkdir(parents=True)
+    trusted_cfg.write_text("acme\n", encoding="utf-8")
+    assert ops.find_trusted_bgrun(home=home) == trusted_pub.resolve()
+
+    # ~/.local/bin/bgrun under home takes top precedence.
+    local_bin = _mk_exec(home / ".local" / "bin" / "bgrun")
+    assert ops.find_trusted_bgrun(home=home) == local_bin
+
+
 # --- bgrun dual-read discovery & path validation ------------------------------------------
 
 def _mk_exec(path: Path) -> Path:
@@ -262,7 +322,6 @@ def test_find_bgrun_precedence_and_legacy_fallback(tmp_path: Path) -> None:
         "$HOME/.local/bin/bgrun",
         "${HOME}/.local/bin/bgrun",
         "/Users/djbclark/.local/bin/bgrun",
-        "/home/box/.local/bin/bg",
         "~/tendcf-ops/tendcf-public-djbclark/bin/bgrun",
         "~/tendcf-ops/tendcf-private-djbclark/bin/bgrun",
         "~/tendcf-ops/tendcf-public-djbclark-lab/bin/bg",
@@ -307,10 +366,22 @@ def test_is_bgrun_path_accepts_stage0_locations(token: str) -> None:
         "~otheruser/.local/bin/bgrun",
         "~//.local/bin/bgrun",
         "/Users/djbclark//tendcf-ops/tendcf-public-djbclark/bin/bgrun",
+        "/tmp/evil/.local/bin/bgrun",
+        "/tmp/evil/ops/site-private/bin/bgrun",
+        "/tmp/evil/tendcf-ops/tendcf-public-djbclark/bin/bgrun",
+        "/Users/someone-else/.local/bin/bgrun",
+        "/Users/someone-else/ops/site-private/bin/bgrun",
+        "/Users/someone-else/tendcf-ops/tendcf-public-djbclark/bin/bgrun",
+        "/home/box/.local/bin/bg",
     ],
 )
 def test_is_bgrun_path_rejects_lookalikes_and_invalid_paths(token: str) -> None:
     assert ops.is_bgrun_path(token, env={"HOME": "/Users/djbclark"}, allow_bg=True) is False
+
+
+def test_is_bgrun_path_accepts_linux_home_when_anchored() -> None:
+    assert ops.is_bgrun_path("/home/box/.local/bin/bg", env={"HOME": "/home/box"}, allow_bg=True) is True
+    assert ops.is_bgrun_path("/home/box/tendcf-ops/tendcf-public-box/bin/bgrun", env={"HOME": "/home/box"}) is True
 
 
 def test_is_bgrun_path_honors_custom_tendcf_ops_root_and_allow_bg_flag(tmp_path: Path) -> None:

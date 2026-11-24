@@ -66,25 +66,38 @@ fi
 
 git fetch origin "$default_branch" -q 2>/dev/null || true
 
+head_sha="$(git rev-parse HEAD 2>/dev/null || echo "")"
+tip_contained="no"
+if [[ -n "$head_sha" ]] \
+   && git rev-parse --verify --quiet "refs/remotes/origin/$default_branch" >/dev/null 2>&1 \
+   && git merge-base --is-ancestor "$head_sha" "refs/remotes/origin/$default_branch" 2>/dev/null; then
+  tip_contained="yes"
+fi
+
 merged="no"
 remote_url="$(git config --get remote.origin.url 2>/dev/null || echo "")"
 repo_slug="$(basename -s .git "$remote_url" 2>/dev/null || echo "")"
 owner_slug="$(basename "$(dirname "$remote_url")" 2>/dev/null || echo "")"
-if [[ -n "$repo_slug" && -n "$owner_slug" ]] && command -v gh >/dev/null 2>&1; then
-  pr_state="$(gh pr list --repo "${owner_slug}/${repo_slug}" --head "$branch" --state merged --json number --jq 'length' 2>/dev/null || echo "0")"
+gh_bin="${OPS_GUARD_GH:-gh}"
+if [[ "$tip_contained" == "yes" && -n "$repo_slug" && -n "$owner_slug" ]] \
+   && { [[ -x "$gh_bin" ]] || command -v "$gh_bin" >/dev/null 2>&1; }; then
+  pr_state="$("$gh_bin" pr list --repo "${owner_slug}/${repo_slug}" --head "$branch" --base "$default_branch" --state merged --json number,baseRefName --jq "[.[] | select((.baseRefName // \"$default_branch\") == \"$default_branch\")] | length" 2>/dev/null || echo "0")"
   if [[ "$pr_state" != "0" ]]; then
     merged="yes"
   fi
 fi
 
-if [[ "$merged" == "yes" ]]; then
-  echo "✅ post-checkout-guard: '$branch' has a merged PR and the tree is clean — auto-healing to $default_branch." >&2
+if [[ "$merged" == "yes" && "$tip_contained" == "yes" ]]; then
+  echo "✅ post-checkout-guard: '$branch' tip ($head_sha) is contained in origin/$default_branch with a merged PR — auto-healing to $default_branch." >&2
   git checkout "$default_branch" -q
-  git pull -q origin "$default_branch"
-  git branch -D "$branch" >/dev/null 2>&1 || true
-  echo "✅ post-checkout-guard: back on $default_branch ($(git log --oneline -1))." >&2
+  if git pull --ff-only -q origin "$default_branch"; then
+    git branch -d "$branch" >/dev/null 2>&1 || echo "⚠️  post-checkout-guard: safe branch delete (-d) refused for '$branch'; kept locally." >&2
+    echo "✅ post-checkout-guard: back on $default_branch ($(git log --oneline -1))." >&2
+  else
+    echo "⚠️  post-checkout-guard: fast-forward pull of $default_branch failed; kept '$branch' locally." >&2
+  fi
 else
-  echo "⚠️  post-checkout-guard: could not confirm '$branch' is merged — leaving it checked out." >&2
+  echo "⚠️  post-checkout-guard: could not confirm '$branch' tip is merged into $default_branch — leaving it checked out." >&2
   echo "    If this branch's work is done, merge its PR (or check it out from a" >&2
   echo "    task worktree instead) — this checkout should not be doing dev work." >&2
 fi
