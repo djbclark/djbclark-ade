@@ -278,6 +278,57 @@ def test_duplicate_split_records_do_not_make_fresh_ref_look_reused(tmp_path):
     out = e.run(full_msg, t_reuse, session="split-reuse")
     assert blocked(out) and "already ended an earlier post" in out["reason"]
 
+    # Case 4 (Round 3 MED #1): lagging transcript where prior turn had A/B/A/B (distinct uuids)
+    # ending in r1, followed by a newer main-thread `user` prompt, and the new turn's assistant
+    # message (reusing r1 with text A/B) has NOT flushed yet -> MUST block (not drop prior turn!).
+    t_lag_turn = tmp_path / "lag_prev_turn.jsonl"
+    lag_records = [
+        {"type": "user", "isSidechain": False, "message": {"role": "user", "content": "turn 1"}},
+        {"type": "assistant", "uuid": "t1-0", "isSidechain": False, "message": {
+            "id": "prev_msg", "role": "assistant", "content": [{"type": "text", "text": part_a}],
+        }},
+        {"type": "assistant", "uuid": "t1-1", "isSidechain": False, "message": {
+            "id": "prev_msg", "role": "assistant", "content": [{"type": "text", "text": part_b}],
+        }},
+        {"type": "assistant", "uuid": "t1-2", "isSidechain": False, "message": {
+            "id": "prev_msg", "role": "assistant", "content": [{"type": "text", "text": part_a}],
+        }},
+        {"type": "assistant", "uuid": "t1-3", "isSidechain": False, "message": {
+            "id": "prev_msg", "role": "assistant", "content": [{"type": "text", "text": part_b}],
+        }},
+        {"type": "user", "isSidechain": False, "message": {"role": "user", "content": "turn 2"}},
+    ]
+    t_lag_turn.write_text("\n".join(json.dumps(r) for r in lag_records) + "\n")
+    out_lag = e.run(full_msg, t_lag_turn, session="split-lag-turn")
+    assert blocked(out_lag) and "already ended an earlier post" in out_lag["reason"]
+
+
+def test_fallback_reader_deduplicates_partially_repeated_stream_in_forward_order(tmp_path):
+    """Round 3 LOW #1: A partially repeated stream A/B/A (where both As share one record uuid and
+    B ends in a valid issued Ref) must reconstruct A/B in original forward order (not B/A),
+    matching assistant_messages() and passing without a false missing-Ref block."""
+    e = Env(tmp_path)
+    r1 = e.issue()
+    part_a = "First streamed paragraph of the reply."
+    part_b = f"{LONG}\n{r1}"
+    t = tmp_path / "partial_repeat.jsonl"
+    rec_a = {"type": "assistant", "uuid": "u-a", "isSidechain": False, "message": {
+        "id": "cur", "role": "assistant", "content": [{"type": "text", "text": part_a}],
+    }}
+    rec_b = {"type": "assistant", "uuid": "u-b", "isSidechain": False, "message": {
+        "id": "cur", "role": "assistant", "content": [{"type": "text", "text": part_b}],
+    }}
+    records = [
+        {"type": "user", "isSidechain": False, "message": {"role": "user", "content": "go"}},
+        rec_a,
+        rec_b,
+        rec_a,
+    ]
+    t.write_text("\n".join(json.dumps(r) for r in records) + "\n")
+
+    assert e.run(None, t, session="partial-repeat") is None
+    assert e.decisions()[-1]["outcome"] == "allowed-valid"
+
 
 def test_historical_streamed_multi_block_message_grouped_by_message_id(tmp_path):
     """LOW #3: An earlier streamed message with a Ref at the end of block 1 and more prose in

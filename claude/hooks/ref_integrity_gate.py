@@ -345,29 +345,42 @@ def _collapse_repeated_sequence(blocks: list[str]) -> list[str]:
     return blocks
 
 
-def assistant_messages(path: str) -> list[tuple[str, str, list[str]]]:
-    """[(message id, complete joined text, individual text blocks)] for main-thread assistant
-    messages in the transcript tail, oldest first, grouped by `message.id` with repeated physical
-    records deduplicated by record `uuid` (or line digest when `uuid` is absent)."""
+def assistant_messages(path: str) -> tuple[list[tuple[str, str, list[str], int]], int]:
+    """([(message id, complete joined text, individual text blocks, turn)], current_turn) for
+    main-thread assistant messages in the transcript tail, oldest first, grouped by `message.id`
+    with repeated physical records deduplicated in forward order by record `uuid` (or line digest
+    when `uuid` is absent). `turn` increments on every main-thread `user` or `compact_boundary`
+    record so callers can prove whether a match belongs to the current turn or an earlier turn."""
     order: list[str | None] = []
     by_id: dict[str, list[str]] = {}
+    turn_by_id: dict[str, int] = {}
     seen_records: dict[str, set[tuple[str, object]]] = {}
-    anonymous: list[tuple[int, list[str]]] = []
+    anonymous: list[tuple[list[str], int]] = []
+    turn = 0
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
             fh.seek(max(0, size - TRANSCRIPT_TAIL))
             raw = fh.read()
     except OSError:
-        return []
+        return [], 0
     for line in raw.split(b"\n"):
-        if b'"assistant"' not in line:
+        has_assistant = b'"assistant"' in line
+        has_user = b'"user"' in line
+        has_boundary = bool(COMPACT_BOUNDARY.search(line))
+        if not (has_assistant or has_user or has_boundary):
             continue
         try:
             entry = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
+        if not isinstance(entry, dict) or entry.get("isSidechain"):
+            continue
+        etype = entry.get("type")
+        if etype == "user" or (etype == "system" and entry.get("subtype") == "compact_boundary"):
+            turn += 1
+            continue
+        if etype != "assistant":
             continue
         msg = entry.get("message")
         if not isinstance(msg, dict):
@@ -379,35 +392,39 @@ def assistant_messages(path: str) -> list[tuple[str, str, list[str]]]:
         if mid:
             if mid not in by_id:
                 by_id[mid] = []
+                turn_by_id[mid] = turn
                 seen_records[mid] = set()
                 order.append(mid)
+            else:
+                turn_by_id[mid] = turn
             rkey = _record_key(entry, line)
             if rkey in seen_records[mid]:
                 continue
             seen_records[mid].add(rkey)
             by_id[mid].extend(texts)
         else:
-            anonymous.append((len(order), texts))
+            anonymous.append((texts, turn))
             order.append(None)
-    out: list[tuple[str, str, list[str]]] = []
+    out: list[tuple[str, str, list[str], int]] = []
     anon_iter = iter(anonymous)
     for key in order:
         if key is None:
-            _, blocks = next(anon_iter)
-            out.append(("", "\n".join(blocks), blocks))
+            blocks, msg_turn = next(anon_iter)
+            out.append(("", "\n".join(blocks), blocks, msg_turn))
         else:
             blocks = by_id[key]
-            out.append((key, "\n".join(blocks), blocks))
-    return out
+            out.append((key, "\n".join(blocks), blocks, turn_by_id[key]))
+    return out, turn
 
 
 def last_transcript_text(path: str) -> str:
     """Text of the final main-thread assistant message in the transcript (fallback when the payload
-    has no `last_assistant_message`). Collects all text blocks sharing the newest assistant
-    `message.id` (deduplicating repeated physical records), skips sidechain records, stops
-    immediately at any newer main-thread `user` / task-notification or `compact_boundary` boundary
-    (so a textless wake-up tail never reaches back to an earlier reply), and returns "" when that
-    newest turn has no text."""
+    has no `last_assistant_message`). Collects all records sharing the newest assistant
+    `message.id`, reverses them to original forward record order before deduplicating repeated
+    physical records (matching `assistant_messages()`), skips sidechain records, stops immediately
+    at any newer main-thread `user` / task-notification or `compact_boundary` boundary (so a
+    textless wake-up tail never reaches back to an earlier reply), and returns "" when that newest
+    turn has no text."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -416,8 +433,7 @@ def last_transcript_text(path: str) -> str:
     except OSError:
         return ""
     target_mid: str | None = None
-    chunks: list[str] = []
-    seen_keys: set[tuple[str, object]] = set()
+    rev_records: list[tuple[tuple[str, object], list[str]]] = []
     for line in reversed(raw.split(b"\n")):
         has_assistant = b'"assistant"' in line
         has_user = b'"user"' in line
@@ -446,20 +462,20 @@ def last_transcript_text(path: str) -> str:
             if not mid:
                 return "\n".join(texts)
             target_mid = mid
-            rkey = _record_key(entry, line)
-            seen_keys.add(rkey)
-            if texts:
-                chunks.append("\n".join(texts))
+            rev_records.append((_record_key(entry, line), texts))
         else:
             if mid != target_mid:
                 break
-            rkey = _record_key(entry, line)
-            if rkey in seen_keys:
-                continue
-            seen_keys.add(rkey)
-            if texts:
-                chunks.append("\n".join(texts))
-    return "\n".join(reversed(chunks))
+            rev_records.append((_record_key(entry, line), texts))
+    chunks: list[str] = []
+    seen_keys: set[tuple[str, object]] = set()
+    for rkey, texts in reversed(rev_records):
+        if rkey in seen_keys:
+            continue
+        seen_keys.add(rkey)
+        if texts:
+            chunks.append("\n".join(texts))
+    return "\n".join(chunks)
 
 
 def compact_epoch_id(path: str) -> str | None:
@@ -512,23 +528,26 @@ def compact_epoch_id(path: str) -> str | None:
 def used_earlier(path: str, ref_line: str, message: str) -> bool:
     """True when an earlier main-thread assistant message of this transcript already ended with
     `ref_line` (evaluated on each message's complete grouped text). The current message is normally
-    already in the transcript, so the newest match is dropped when it corresponds to the message
-    being checked (including when split records were written more than once); a transcript that
-    lags is then not miscounted."""
-    ends: list[tuple[str, str, list[str]]] = []
-    for mid, full_text, blocks in assistant_messages(path):
-        if last_line(full_text) == ref_line:
-            ends.append((mid, full_text, blocks))
+    already in the transcript, so the newest match is dropped ONLY when it is the latest assistant
+    message in the current transcript turn (no newer main-thread `user` or `compact_boundary`
+    record follows it) and matches the message being checked; a lagging transcript with a
+    previous-turn match is never misdropped."""
+    messages, current_turn = assistant_messages(path)
+    if not messages:
+        return False
+    ends = [m for m in messages if last_line(m[1]) == ref_line]
     if ends:
-        cur_mid, cur_text, cur_blocks = ends[-1]
-        norm_msg = message.rstrip()
-        collapsed_text = "\n".join(_collapse_repeated_sequence(cur_blocks)).rstrip()
-        if (
-            norm_msg.endswith(cur_text.rstrip())
-            or norm_msg.endswith(collapsed_text)
-            or (cur_blocks and all(b.rstrip() == norm_msg for b in cur_blocks))
-        ):
-            ends = [e for e in ends if e[0] != cur_mid] if cur_mid else ends[:-1]
+        cur_mid, cur_text, cur_blocks, cur_turn = ends[-1]
+        is_current_turn_tail = cur_turn == current_turn and ends[-1] is messages[-1]
+        if is_current_turn_tail:
+            norm_msg = message.rstrip()
+            collapsed_text = "\n".join(_collapse_repeated_sequence(cur_blocks)).rstrip()
+            if (
+                norm_msg.endswith(cur_text.rstrip())
+                or norm_msg.endswith(collapsed_text)
+                or (cur_blocks and all(b.rstrip() == norm_msg for b in cur_blocks))
+            ):
+                ends = [e for e in ends if e[0] != cur_mid] if cur_mid else ends[:-1]
     return bool(ends)
 
 
