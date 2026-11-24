@@ -277,10 +277,10 @@ def _daemon_descendant(client, agent, leads, cache):
     return False
 
 
-def _sweep_daemon(lead, labels, log, all_local=False, client=None):
+def _sweep_daemon(lead, labels, log, all_local=False, client=None, daemon_url=None):
     current, leads, queried = lead_lineage(lead, log)
     try:
-        daemon = client if client is not None else paseo_client.PaseoClient(timeout=30)
+        daemon = client if client is not None else paseo_client.PaseoClient(url=daemon_url, timeout=30)
         raw_requests = daemon.list_pending_permissions(cli_rows=True)
     except paseo_client.DaemonError as exc:
         raise ProbeError("daemon list_pending_permissions unavailable") from exc
@@ -370,8 +370,7 @@ def _sweep_daemon(lead, labels, log, all_local=False, client=None):
 
 def sweep(lead, labels, log, all_local=False, *, client=None, daemon_url=None):
     if client is not None or _use_daemon(daemon_url):
-        daemon = client if client is not None else paseo_client.PaseoClient(url=daemon_url, timeout=30)
-        return _sweep_daemon(lead, labels, log, all_local=all_local, client=daemon)
+        return _sweep_daemon(lead, labels, log, all_local=all_local, client=client, daemon_url=daemon_url)
     current, leads, queried = lead_lineage(lead, log)
     requests = rows(call(["permit", "ls"]))
     eligible, via = {}, {}

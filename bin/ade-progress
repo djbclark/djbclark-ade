@@ -390,8 +390,10 @@ def nudge(d: dict) -> str:
 
 # ---------- channels ----------
 
-def wake(paseo: list[str], d: dict) -> str:
+def wake(paseo: list[str] | None, d: dict) -> str:
     """Plain `paseo send` (the agent is idle; item 4). sent | refused | unknown. Never retried blindly."""
+    if not paseo:
+        return "unknown"
     rc, out = run(paseo + ["send", "--json", "--no-wait", d["agent_id"], nudge(d)], 20)
     try:
         obj = json.loads(out)
@@ -558,6 +560,9 @@ def process(st: dict, c: dict, paseo: list[str], rep: dict) -> dict | None:
             save(st)
             rep["withdrawn"] += 1
             return None
+        elif not paseo:
+            rec["wake"] = "unknown"
+            rep["health"].append(f"{d['task']}: paseo binary not found; cannot send wake")
         else:
             rec["wake"] = "intent"
             st["wakes"][wake_key(d)] = {"ts": now(), "key": key}

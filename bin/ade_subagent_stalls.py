@@ -601,7 +601,13 @@ def handed_off_to(cfg: Config, parent: str, warnings: list[str], run_state: dict
     the wrong recipient in the log (PR 938 round 2, LOW-1). A refusal also returns the parent itself: nothing is sent. When the
     guard reports that Paseo could not inspect `parent` (timeout or unreachable daemon), sets `run_state["down"] = True` so no
     further probes run this pass (PR 948 LOW-2)."""
-    daemon = _daemon_client(cfg)
+    try:
+        daemon = _daemon_client(cfg)
+    except paseo_client.DaemonError as exc:
+        warnings.append(f"paseo daemon client error for {parent}: {exc}")
+        if run_state is not None:
+            run_state["down"] = True
+        return None
     if daemon is None and cfg.paseo is None:
         return None
     try:
@@ -633,7 +639,13 @@ def parent_idle(cfg: Config, paseo_id: str, warnings: list[str], run_state: dict
     its turn, and one to an archived agent would un-archive it. Uses the loopback daemon API when daemon mode is active
     (zero Node subprocesses); a daemon failure or CLI timeout sets `run_state["down"]` so the rest of the run stops
     inspecting (PR 938 round 2, LOW-5)."""
-    daemon = _daemon_client(cfg)
+    try:
+        daemon = _daemon_client(cfg)
+    except paseo_client.DaemonError as exc:
+        warnings.append(f"paseo daemon client error: {exc}")
+        if run_state is not None:
+            run_state["down"] = True
+        return False
     if daemon is not None:
         try:
             info = daemon.inspect_agent(paseo_id, cli_shape=True)
@@ -683,6 +695,10 @@ def _send_argv_env(cfg: Config, parent: str, text: str) -> tuple[list[str], dict
         env = {**_scrubbed_env(), "PATH": SHIM_PATH}
         if cfg.paseo is not None:
             env["ADE_REAL_PASEO"] = str(cfg.paseo)
+        if cfg.paseo_url:
+            env[paseo_client.ENV_DAEMON_URL] = cfg.paseo_url
+        elif not cfg.use_daemon and not (env.get(paseo_client.ENV_DAEMON_URL) or "").strip():
+            env[paseo_client.ENV_TRANSPORT] = "cli"
         return [str(cfg.paseo_guard), "send", "--json", "--no-wait", "--", parent, text], env
     return [str(cfg.paseo), "send", "--json", "--no-wait", "--", parent, text], None
 

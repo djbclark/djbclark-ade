@@ -71,6 +71,10 @@ class DaemonError(Exception):
     """Loopback daemon unreachable, unauthorized, malformed, or refused an operation."""
 
 
+class _McpUnauthorizedError(DaemonError):
+    """Internal marker: `/mcp/agents` returned HTTP 401 (eligible for `/ws` localCredential fallback)."""
+
+
 class AgentNotFoundError(DaemonError, LookupError):
     """The daemon explicitly reported that the requested agent ID does not exist."""
 
@@ -161,15 +165,30 @@ def _normalize_loopback_host(host: Optional[str]) -> str:
     return cleaned
 
 
+def _validate_unix_path_string(sock: str) -> str:
+    if not sock.startswith("/") or "\x00" in sock or ".." in Path(sock).parts:
+        raise DaemonError("unix daemon target must be a normalized absolute socket path")
+    return sock
+
+
+def _validate_unix_socket(socket_path: str) -> None:
+    """Verify `socket_path` exists, is not a symlink, and is an actual Unix socket."""
+    _validate_unix_path_string(socket_path)
+    try:
+        st = os.lstat(socket_path)
+    except OSError as exc:
+        raise DaemonError(f"unix daemon socket unavailable: {type(exc).__name__}") from exc
+    if not stat.S_ISSOCK(st.st_mode):
+        raise DaemonError("unix daemon target is not a socket")
+
+
 def _parse_listen_string(raw: str) -> DaemonTarget:
     text = raw.strip()
     if not text:
         raise DaemonError("empty daemon listen address")
     if text.startswith("unix://") or text.startswith("/"):
         sock = text[len("unix://"):] if text.startswith("unix://") else text
-        sock = sock.strip()
-        if not sock.startswith("/") or "\x00" in sock:
-            raise DaemonError("unix daemon target must be an absolute socket path")
+        sock = _validate_unix_path_string(sock.strip())
         return DaemonTarget(kind="unix", socket_path=sock)
     if text.isdigit():
         port = int(text)
@@ -200,8 +219,7 @@ def parse_daemon_url(url: str) -> DaemonTarget:
             rest, mcp_only = rest[:-4], True
         elif rest.endswith("#ws"):
             rest, ws_only = rest[:-3], True
-        if not rest.startswith("/") or "\x00" in rest:
-            raise DaemonError("unix daemon URL must be unix:///abs/path")
+        rest = _validate_unix_path_string(rest)
         return DaemonTarget(kind="unix", socket_path=rest, mcp_only=mcp_only, ws_only=ws_only)
     parsed = urllib.parse.urlsplit(raw)
     if parsed.scheme not in ("http", "ws"):
@@ -320,6 +338,32 @@ def transport_mode(
 Opener = Callable[[str, bytes, Dict[str, str], float], Tuple[int, str, bytes]]
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse all HTTP redirects so loopback requests can never be redirected off-host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        raise DaemonError(f"daemon redirected (HTTP {code})")
+
+    def http_error_302(self, req, fp, code, msg, headers):  # type: ignore[override]
+        raise DaemonError(f"daemon redirected (HTTP {code})")
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _build_loopback_opener() -> urllib.request.OpenerDirector:
+    """Strict HTTP-only loopback opener: no proxies, no redirects, no HTTPS/FTP/File/Data handlers."""
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPHandler(),
+        _NoRedirectHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        urllib.request.HTTPDefaultErrorHandler(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
 class _UnixHTTPConnection(http.client.HTTPConnection):
     """HTTP/1.1 connection over a local AF_UNIX stream socket."""
 
@@ -328,10 +372,24 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self._socket_path = socket_path
 
     def connect(self) -> None:
+        _validate_unix_socket(self._socket_path)
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
-        sock.connect(self._socket_path)
+        try:
+            sock.connect(self._socket_path)
+        except OSError:
+            sock.close()
+            raise
         self.sock = sock
+
+
+def _read_bounded_http_body(resp: Any, status: int) -> bytes:
+    if status == 200:
+        data = resp.read(MAX_HTTP_BYTES + 1)
+        if len(data) > MAX_HTTP_BYTES:
+            raise DaemonError("daemon HTTP response exceeded size limit")
+        return data
+    return resp.read(MAX_ERROR_BYTES)
 
 
 def _unix_http_request(
@@ -346,38 +404,37 @@ def _unix_http_request(
     try:
         conn.request(method, path, body=body, headers=headers)
         resp = conn.getresponse()
-        limit = MAX_HTTP_BYTES if resp.status == 200 else MAX_ERROR_BYTES
-        data = resp.read(limit)
+        data = _read_bounded_http_body(resp, resp.status)
         return resp.status, resp.getheader("Content-Type", "") or "", data
     finally:
         conn.close()
 
 
 def urllib_opener(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> Tuple[int, str, bytes]:
-    """POST over loopback HTTP (never via proxy) or local unix:// socket, with bounded reads."""
+    """POST over loopback HTTP (never via proxy or redirect) or local unix:// socket, with bounded reads."""
     if url.startswith("unix://"):
         sock = url[len("unix://"):].split("#", 1)[0]
         return _unix_http_request(sock, "POST", "/mcp/agents", body, headers, timeout)
-    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    no_proxy = _build_loopback_opener()
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
         with no_proxy.open(request, timeout=timeout) as resp:
-            return resp.status, resp.headers.get("Content-Type", ""), resp.read(MAX_HTTP_BYTES)
+            return resp.status, resp.headers.get("Content-Type", ""), _read_bounded_http_body(resp, resp.status)
     except urllib.error.HTTPError as exc:
         ctype = exc.headers.get("Content-Type", "") if exc.headers else ""
         return exc.code, ctype, exc.read(MAX_ERROR_BYTES)
 
 
 def urllib_get(url: str, headers: Dict[str, str], timeout: float, path: str = "/api/health") -> Tuple[int, str, bytes]:
-    """GET over loopback HTTP (never via proxy) or local unix:// socket, with bounded reads."""
+    """GET over loopback HTTP (never via proxy or redirect) or local unix:// socket, with bounded reads."""
     if url.startswith("unix://"):
         sock = url[len("unix://"):].split("#", 1)[0]
         return _unix_http_request(sock, "GET", path, None, headers, timeout)
-    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    no_proxy = _build_loopback_opener()
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with no_proxy.open(request, timeout=timeout) as resp:
-            return resp.status, resp.headers.get("Content-Type", ""), resp.read(MAX_HTTP_BYTES)
+            return resp.status, resp.headers.get("Content-Type", ""), _read_bounded_http_body(resp, resp.status)
     except urllib.error.HTTPError as exc:
         ctype = exc.headers.get("Content-Type", "") if exc.headers else ""
         return exc.code, ctype, exc.read(MAX_ERROR_BYTES)
@@ -437,12 +494,14 @@ class McpClient:
             status, ctype, raw = self.opener(self.url, body, self._headers(), self.timeout)
         except (OSError, urllib.error.URLError, http.client.HTTPException, ValueError) as exc:
             raise DaemonError(f"daemon unreachable: {type(exc).__name__}") from exc
+        if status == 401:
+            raise _McpUnauthorizedError("daemon answered HTTP 401")
         if status != 200:
             raise DaemonError(f"daemon answered HTTP {status}")
         text = raw.decode("utf-8", "replace")
         messages: List[Any] = []
         try:
-            if "text/event-stream" in ctype:
+            if "text/event-stream" in ctype.lower():
                 messages = [json.loads(line[5:]) for line in text.splitlines() if line.startswith("data:")]
             else:
                 messages = [json.loads(text)]
@@ -601,7 +660,10 @@ class McpClient:
             args["labels"] = dict(labels)
         if settings is not None:
             args["settings"] = dict(settings)
-        return self.call_tool("update_agent", args)
+        answer = self.call_tool("update_agent", args)
+        if answer.get("success") is not True:
+            raise DaemonError("update_agent not confirmed")
+        return answer
 
     def archive_agent(self, agent_id: str) -> None:
         answer = self.call_tool("archive_agent", {"agentId": agent_id})
@@ -637,14 +699,22 @@ class _StdlibWebSocket:
         self._buf = bytearray()
 
     def connect(self) -> None:
+        deadline = time.monotonic() + self.timeout
         try:
             if self.target.kind == "unix":
+                _validate_unix_socket(self.target.socket_path)
                 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 sock.settimeout(self.timeout)
-                sock.connect(self.target.socket_path)
+                try:
+                    sock.connect(self.target.socket_path)
+                except OSError:
+                    sock.close()
+                    raise
             else:
                 sock = socket.create_connection((self.target.host, self.target.port), timeout=self.timeout)
                 sock.settimeout(self.timeout)
+        except DaemonError:
+            raise
         except OSError as exc:
             raise DaemonError(f"daemon WebSocket unreachable: {type(exc).__name__}") from exc
         self._sock = sock
@@ -662,9 +732,17 @@ class _StdlibWebSocket:
             f"\r\n"
         ).encode("ascii")
         try:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise DaemonError("daemon WebSocket handshake timed out")
+            sock.settimeout(min(self.timeout, rem))
             sock.sendall(req)
             raw = bytearray()
             while b"\r\n\r\n" not in raw:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    raise DaemonError("daemon WebSocket handshake timed out")
+                sock.settimeout(min(self.timeout, rem))
                 chunk = sock.recv(4096)
                 if not chunk:
                     raise DaemonError("daemon closed connection during WebSocket handshake")
@@ -674,6 +752,9 @@ class _StdlibWebSocket:
         except DaemonError:
             self.close()
             raise
+        except socket.timeout as exc:
+            self.close()
+            raise DaemonError("daemon WebSocket handshake timed out") from exc
         except OSError as exc:
             self.close()
             raise DaemonError(f"WebSocket handshake failed: {type(exc).__name__}") from exc
@@ -682,7 +763,8 @@ class _StdlibWebSocket:
         self._buf = bytearray(raw[sep + 4:])
         lines = head.split("\r\n")
         status_line = lines[0] if lines else ""
-        if " 101 " not in status_line:
+        status_parts = status_line.split(" ", 2)
+        if len(status_parts) < 2 or not status_parts[0].startswith("HTTP/") or status_parts[1] != "101":
             self.close()
             raise DaemonError(f"WebSocket upgrade rejected ({status_line[:60]})")
         headers: Dict[str, str] = {}
@@ -752,6 +834,11 @@ class _StdlibWebSocket:
                 length = struct.unpack("!H", self._recv_exact(2, end))[0]
             elif length == 127:
                 length = struct.unpack("!Q", self._recv_exact(8, end))[0]
+            if opcode in (0x8, 0x9, 0xA):
+                if not fin or length > 125:
+                    raise DaemonError("invalid WebSocket control frame")
+            elif opcode not in (0x0, 0x1, 0x2):
+                raise DaemonError(f"unsupported WebSocket opcode {opcode:#x}")
             if total + length > MAX_WS_BYTES:
                 raise DaemonError("daemon WebSocket message exceeded size limit")
             mask = self._recv_exact(4, end) if masked else b""
@@ -759,6 +846,11 @@ class _StdlibWebSocket:
             if masked:
                 payload = bytes(b ^ mask[i & 3] for i, b in enumerate(payload))
             if opcode == 0x9:  # ping -> pong
+                rem = end - time.monotonic()
+                if rem <= 0:
+                    raise DaemonError("daemon WebSocket timed out")
+                assert self._sock is not None
+                self._sock.settimeout(min(self.timeout, rem))
                 self._send_frame(0xA, payload)
                 continue
             if opcode == 0xA:  # pong
@@ -766,21 +858,25 @@ class _StdlibWebSocket:
             if opcode == 0x8:  # close
                 code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1000
                 raise DaemonError(f"daemon WebSocket closed (code {code})")
-            if opcode in (0x1, 0x2, 0x0):
-                chunks.append(payload)
-                total += len(payload)
-                if fin:
-                    try:
-                        parsed = json.loads(b"".join(chunks).decode("utf-8", "replace"))
-                    except ValueError as exc:
-                        raise DaemonError("daemon WebSocket frame is not JSON") from exc
-                    if not isinstance(parsed, dict):
-                        raise DaemonError("daemon WebSocket message is not a JSON object")
-                    return parsed
+            if opcode == 0x0 and not chunks:
+                raise DaemonError("unexpected WebSocket continuation frame")
+            if opcode in (0x1, 0x2) and chunks:
+                raise DaemonError("unexpected WebSocket data frame during fragmented message")
+            chunks.append(payload)
+            total += len(payload)
+            if fin:
+                try:
+                    parsed = json.loads(b"".join(chunks).decode("utf-8", "replace"))
+                except ValueError as exc:
+                    raise DaemonError("daemon WebSocket frame is not JSON") from exc
+                if not isinstance(parsed, dict):
+                    raise DaemonError("daemon WebSocket message is not a JSON object")
+                return parsed
 
     def close(self) -> None:
         if self._sock is not None:
             try:
+                self._sock.settimeout(min(1.0, self.timeout))
                 self._send_frame(0x8, struct.pack("!H", 1000))
             except Exception:
                 pass
@@ -834,6 +930,7 @@ class WsClient:
             "protocolVersion": 1,
             "capabilities": {
                 "hello_rejection": True,
+                "owned_subscriptions": True,
                 "all_providers": True,
                 "explicit_event_subscriptions": True,
             },
@@ -1002,7 +1099,78 @@ class WsClient:
         entries = payload.get("entries")
         if not isinstance(entries, list):
             raise DaemonError("fetch_workspaces_response missing entries list")
-        return [e for e in entries if isinstance(e, dict)]
+        out: List[Dict[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            ws_item = entry.get("workspace") if isinstance(entry.get("workspace"), dict) else entry
+            if isinstance(ws_item, dict):
+                out.append(ws_item)
+        return out
+
+    def list_pending_permissions(self, *, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Derive pending permission items from `fetch_agents` snapshots (works with localCredential auth)."""
+        agents = self.fetch_agents(include_background=True, include_archived=True, timeout=timeout)
+        items: List[Dict[str, Any]] = []
+        for a in agents:
+            for p in a.get("pendingPermissions") or []:
+                if isinstance(p, dict):
+                    items.append({"agentId": a.get("id"), "status": a.get("status"), "request": p})
+        return items
+
+    def respond_to_permission(
+        self,
+        agent_id: str,
+        request_id: str,
+        response: Dict[str, Any],
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Respond to a pending permission over `/ws` (`agent_permission_response` -> `agent_permission_resolved`)."""
+        payload, _ = self.rpc(
+            {
+                "type": "agent_permission_response",
+                "agentId": agent_id,
+                "requestId": request_id,
+                "response": dict(response),
+            },
+            expected_type="agent_permission_resolved",
+            timeout=timeout,
+        )
+        if payload.get("agentId") not in (None, agent_id):
+            raise DaemonError("permission resolution agentId mismatch")
+        return payload
+
+    def update_agent(
+        self,
+        agent_id: str,
+        *,
+        name: Optional[str] = None,
+        labels: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Update agent metadata/labels over `/ws` (`update_agent_request` -> `update_agent_response`)."""
+        req: Dict[str, Any] = {"type": "update_agent_request", "agentId": agent_id}
+        if name is not None:
+            req["name"] = name
+        if labels is not None:
+            req["labels"] = dict(labels)
+        payload, _ = self.rpc(req, expected_type="update_agent_response", timeout=timeout)
+        if payload.get("accepted") is not True:
+            err = str(payload.get("error") or "update_agent rejected")[:160]
+            raise DaemonError(f"update_agent not confirmed: {err}")
+        return {"success": True, **payload}
+
+    def archive_agent(self, agent_id: str, *, timeout: Optional[float] = None) -> Dict[str, Any]:
+        """Archive an agent over `/ws` (`archive_agent_request` -> `agent_archived`)."""
+        payload, _ = self.rpc(
+            {"type": "archive_agent_request", "agentId": agent_id},
+            expected_type="agent_archived",
+            timeout=timeout,
+        )
+        if payload.get("agentId") not in (None, agent_id) or not payload.get("archivedAt"):
+            raise DaemonError("archive_agent not confirmed")
+        return payload
 
     def fetch_agent_timeline(
         self,
@@ -1170,7 +1338,7 @@ def snapshot_to_inspect_dict(snapshot: Mapping[str, Any]) -> Dict[str, Any]:
         "Capabilities": caps_out,
         "AvailableModes": modes_out,
         "PendingPermissions": perms_out,
-        "Worktree": snapshot.get("worktreePath") or None,
+        "Worktree": labels.get("paseo.worktree") or snapshot.get("worktreePath") or None,
         "ParentAgentId": parent,
         "Labels": dict(labels),
     }
@@ -1309,6 +1477,7 @@ class PaseoClient:
         self._auth = read_local_auth(paseo_home=paseo_home, env=env)
         self._opener = opener
         self._ws_factory = ws_factory
+        self._mcp_unauthorized = False
         self._mcp: Optional[McpClient] = None
         if not self.target.ws_only:
             self._mcp = McpClient(self.target.mcp_url, opener=opener, timeout=timeout, auth=self._auth)
@@ -1402,36 +1571,61 @@ class PaseoClient:
                 pass
         return result
 
-    def inspect_agent(self, agent_id: str, *, cli_shape: bool = True) -> Dict[str, Any]:
-        """Inspect one agent (1-RTT MCP `get_agent_status`, or WS `fetch_agent` for ws-only URLs)."""
+    def _can_ws_local_cred_fallback(self) -> bool:
+        return (
+            not self.target.mcp_only
+            and self._auth is not None
+            and self._auth[0] == "localCredential"
+        )
+
+    def _prefer_ws(self) -> bool:
+        """Use authenticated `/ws` RPC for ws-only targets or after `/mcp/agents` returns HTTP 401
+        when authenticating via `<PASEO_HOME>/local-credential` (Paseo's `/mcp/agents` rejects
+        `local-credential` with HTTP 401 while `/ws` accepts it)."""
         if self.target.ws_only:
+            return True
+        return self._mcp_unauthorized and self._can_ws_local_cred_fallback()
+
+    def _mcp_or_ws(self, mcp_fn: Callable[[], Any], ws_fn: Callable[[WsClient], Any]) -> Any:
+        if self._prefer_ws():
             with self._ws() as ws:
-                snap = ws.fetch_agent(agent_id, timeout=self.timeout)
-        else:
-            snap = self.mcp.get_agent_status(agent_id)
+                return ws_fn(ws)
+        try:
+            return mcp_fn()
+        except _McpUnauthorizedError:
+            if not self._can_ws_local_cred_fallback():
+                raise
+            self._mcp_unauthorized = True
+            with self._ws() as ws:
+                return ws_fn(ws)
+
+    def inspect_agent(self, agent_id: str, *, cli_shape: bool = True) -> Dict[str, Any]:
+        """Inspect one agent (1-RTT MCP `get_agent_status`, falling back to WS `fetch_agent` on MCP 401 + localCredential)."""
+        snap = self._mcp_or_ws(
+            lambda: self.mcp.get_agent_status(agent_id),
+            lambda ws: ws.fetch_agent(agent_id, timeout=self.timeout),
+        )
         return snapshot_to_inspect_dict(snap) if cli_shape else snap
 
     def list_pending_permissions(self, *, cli_rows: bool = False) -> List[Dict[str, Any]]:
-        """List all pending permissions via 1-RTT MCP (or WS agents for ws-only URLs)."""
-        if self.target.ws_only:
-            agents = self.list_agents(include_background=True, include_archived=True)
-            items: List[Dict[str, Any]] = []
-            for a in agents:
-                for p in a.get("pendingPermissions") or []:
-                    if isinstance(p, dict):
-                        items.append({"agentId": a.get("id"), "status": a.get("status"), "request": p})
-            return [mcp_permission_to_cli_row(i) for i in items] if cli_rows else items
-        items = self.mcp.list_pending_permissions()
+        """List all pending permissions via 1-RTT MCP (falling back to WS agents on MCP 401 + localCredential)."""
+        items = self._mcp_or_ws(
+            lambda: self.mcp.list_pending_permissions(),
+            lambda ws: ws.list_pending_permissions(timeout=self.timeout),
+        )
         return [mcp_permission_to_cli_row(i) for i in items] if cli_rows else items
 
     def respond_to_permission(self, agent_id: str, request_id: str, behavior: str = "allow") -> None:
-        self.mcp.respond_to_permission(agent_id, request_id, {"behavior": behavior})
+        self._mcp_or_ws(
+            lambda: self.mcp.respond_to_permission(agent_id, request_id, {"behavior": behavior}),
+            lambda ws: ws.respond_to_permission(agent_id, request_id, {"behavior": behavior}, timeout=self.timeout),
+        )
 
     def list_workspaces(self, *, include_background: bool = False) -> List[Dict[str, Any]]:
-        if self.target.ws_only:
-            with self._ws() as ws:
-                return ws.fetch_workspaces(include_background=include_background, timeout=self.timeout)
-        return self.mcp.list_workspaces(include_background=include_background)
+        return self._mcp_or_ws(
+            lambda: self.mcp.list_workspaces(include_background=include_background),
+            lambda ws: ws.fetch_workspaces(include_background=include_background, timeout=self.timeout),
+        )
 
     def list_providers(self) -> List[Dict[str, Any]]:
         return self.mcp.list_providers()
@@ -1447,7 +1641,20 @@ class PaseoClient:
             return ws.list_usage_reports(agent_id=agent_id, force_refresh=force_refresh, timeout=self.timeout)
 
     def update_agent_labels(self, agent_id: str, labels: Mapping[str, str]) -> Dict[str, Any]:
-        return self.mcp.update_agent(agent_id, labels=dict(labels))
+        lbl = dict(labels)
+        return self._mcp_or_ws(
+            lambda: self.mcp.update_agent(agent_id, labels=lbl),
+            lambda ws: ws.update_agent(agent_id, labels=lbl, timeout=self.timeout),
+        )
 
-    def archive_agent(self, agent_id: str) -> None:
-        self.mcp.archive_agent(agent_id)
+    def archive_agent(self, agent_id: str, *, force: bool = False) -> None:
+        if not force:
+            info = self.inspect_agent(agent_id, cli_shape=True)
+            if info.get("Archived") is True:
+                raise DaemonError(f"agent {agent_id} is already archived")
+            if str(info.get("Status") or "").lower() == "running":
+                raise DaemonError(f"agent {agent_id} is running (refusing archive without force=True)")
+        self._mcp_or_ws(
+            lambda: self.mcp.archive_agent(agent_id),
+            lambda ws: ws.archive_agent(agent_id, timeout=self.timeout),
+        )

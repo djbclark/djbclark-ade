@@ -20,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -352,11 +354,12 @@ class FakeUnixPaseoDaemon:
             if msg.get("type") == "hello":
                 self.hellos.append(msg)
                 auth = msg.get("auth") or {}
-                if self.require_password and auth != {"kind": "password", "password": self.require_password}:
-                    self._ws_send_json(conn, {"type": "hello_rejected", "reason": "bad_password"})
-                    return
-                if self.require_local_cred and auth != {"kind": "localCredential", "token": self.require_local_cred}:
-                    self._ws_send_json(conn, {"type": "hello_rejected", "reason": "bad_local_cred"})
+                if self.require_local_cred and auth == {"kind": "localCredential", "token": self.require_local_cred}:
+                    pass
+                elif self.require_password and auth == {"kind": "password", "password": self.require_password}:
+                    pass
+                elif self.require_local_cred or self.require_password:
+                    self._ws_send_json(conn, {"type": "hello_rejected", "reason": "bad_auth"})
                     return
                 self._ws_send_json(
                     conn,
@@ -445,6 +448,76 @@ class FakeUnixPaseoDaemon:
                         },
                     },
                 )
+            elif mtype == "agent_permission_response":
+                aid = str(inner.get("agentId") or "")
+                response = inner.get("response") or {}
+                self.allowed_requests.append((aid, rid, response))
+                self._ws_send_json(
+                    conn,
+                    {
+                        "type": "session",
+                        "message": {
+                            "type": "agent_permission_resolved",
+                            "payload": {"agentId": aid, "requestId": rid, "resolution": response},
+                        },
+                    },
+                )
+            elif mtype == "update_agent_request":
+                aid = str(inner.get("agentId") or "")
+                a = self._find_agent(aid)
+                if a is None:
+                    self._ws_send_json(
+                        conn,
+                        {
+                            "type": "session",
+                            "message": {
+                                "type": "update_agent_response",
+                                "payload": {"requestId": rid, "agentId": aid, "accepted": False, "error": "Agent not found"},
+                            },
+                        },
+                    )
+                else:
+                    lbl = dict(a.get("labels") or {})
+                    lbl.update(inner.get("labels") or {})
+                    a["labels"] = lbl
+                    self.updated_labels.append((aid, dict(inner.get("labels") or {})))
+                    self._ws_send_json(
+                        conn,
+                        {
+                            "type": "session",
+                            "message": {
+                                "type": "update_agent_response",
+                                "payload": {"requestId": rid, "agentId": aid, "accepted": True, "error": None},
+                            },
+                        },
+                    )
+            elif mtype == "archive_agent_request":
+                aid = str(inner.get("agentId") or "")
+                a = self._find_agent(aid)
+                if a is None:
+                    self._ws_send_json(
+                        conn,
+                        {
+                            "type": "session",
+                            "message": {
+                                "type": "rpc_error",
+                                "payload": {"requestId": rid, "code": "NOT_FOUND", "error": "Agent not found"},
+                            },
+                        },
+                    )
+                else:
+                    a["archivedAt"] = "2026-11-24T12:00:00Z"
+                    self.archived_ids.append(aid)
+                    self._ws_send_json(
+                        conn,
+                        {
+                            "type": "session",
+                            "message": {
+                                "type": "agent_archived",
+                                "payload": {"requestId": rid, "agentId": aid, "archivedAt": a["archivedAt"]},
+                            },
+                        },
+                    )
             elif mtype == "usage.list_reports.request":
                 for rep in self.usage_reports:
                     self._ws_send_json(
@@ -824,3 +897,389 @@ def test_converted_pollers_run_zero_subprocess_against_unix_daemon(tmp_path: Pat
         pi_loader.exec_module(pi_mod)
         rows = pi_mod.list_agents_rows()
         assert any(row["id"] == worker and row["provider"] == "pi/openai/gpt-6.1-sol" for row in rows)
+
+
+# ---------------------------------------------------------------- Round 2 adversary regression tests
+
+
+def test_high1_loopback_opener_blocks_redirects_and_restricts_handlers(monkeypatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    opener = pc._build_loopback_opener()
+    handler_types = {type(h).__name__ for h in opener.handlers}
+    assert handler_types == {
+        "HTTPHandler",
+        "_NoRedirectHandler",
+        "HTTPErrorProcessor",
+        "HTTPDefaultErrorHandler",
+    }
+
+    for code in (302, 307):
+        followed: List[str] = []
+
+        class _RedirectingHTTPHandler(urllib.request.BaseHandler):
+            def http_open(self, req):
+                followed.append(req.full_url)
+                import io
+                from http.client import HTTPMessage
+
+                hdrs = HTTPMessage()
+                hdrs["Location"] = "http://evil.example.com/steal"
+                resp = urllib.request.addinfourl(io.BytesIO(b""), hdrs, req.full_url, code)
+                resp.msg = "Redirect"
+                return resp
+
+        def _fake_opener():
+            op = urllib.request.OpenerDirector()
+            for h in (
+                urllib.request.ProxyHandler({}),
+                _RedirectingHTTPHandler(),
+                pc._NoRedirectHandler(),
+                urllib.request.HTTPErrorProcessor(),
+                urllib.request.HTTPDefaultErrorHandler(),
+            ):
+                op.add_handler(h)
+            return op
+
+        monkeypatch.setattr(pc, "_build_loopback_opener", _fake_opener)
+        with pytest.raises(pc.DaemonError, match=f"redirected \\(HTTP {code}\\)"):
+            pc.urllib_opener("http://127.0.0.1:7263/mcp/agents", b"{}", {}, 2.0)
+        with pytest.raises(pc.DaemonError, match=f"redirected \\(HTTP {code}\\)"):
+            pc.urllib_get("http://127.0.0.1:7263/api/health", {}, 2.0)
+        assert all("evil.example.com" not in u for u in followed)
+
+
+def test_high2_local_credential_routes_all_ops_over_ws_when_mcp_enforces_password(tmp_path: Path) -> None:
+    a1 = "11111111-1111-4111-8111-111111111111"
+    a2 = "22222222-2222-4222-8222-222222222222"
+    perm = {"id": "perm-ws-1", "name": "Bash", "kind": "tool", "provider": "claude", "description": "run"}
+    agents = [
+        _sample_agent(a1, title="LEAD ws", status="idle", pending=[perm]),
+        _sample_agent(a2, title="RETIRED ws", status="idle"),
+    ]
+    paseo_home = tmp_path / ".paseo"
+    paseo_home.mkdir()
+    (paseo_home / "local-credential").write_text("local-only-token\n")
+    sock = tmp_path / "paseo.sock"
+    with FakeUnixPaseoDaemon(
+        sock,
+        agents=agents,
+        workspaces=[{"workspaceId": "wks_ws", "title": "LEAD ws"}],
+        require_password="mcp-only-password",
+        require_local_cred="local-only-token",
+    ) as daemon:
+        # No PASEO_PASSWORD in env -> only localCredential is available (MCP returns HTTP 401 -> WS fallback).
+        client = pc.PaseoClient(url=daemon.url, paseo_home=paseo_home, env={}, timeout=5.0)
+        insp = client.inspect_agent(a1)
+        assert insp["Id"] == a1 and insp["Name"] == "LEAD ws"
+        assert client._prefer_ws() is True  # memoized after first MCP 401 -> subsequent calls skip MCP
+        perms = client.list_pending_permissions(cli_rows=True)
+        assert len(perms) == 1 and perms[0]["id"] == "perm-ws-1" and perms[0]["agentId"] == a1
+        client.respond_to_permission(a1, "perm-ws-1", "allow")
+        assert daemon.allowed_requests == [(a1, "perm-ws-1", {"behavior": "allow"})]
+        ws_list = client.list_workspaces()
+        assert len(ws_list) == 1 and ws_list[0]["workspaceId"] == "wks_ws"
+        client.update_agent_labels(a1, {"ade.interactive": "1"})
+        assert daemon.updated_labels == [(a1, {"ade.interactive": "1"})]
+        client.archive_agent(a2)
+        assert daemon.archived_ids == [a2]
+        # Zero MCP calls succeeded (rejected 401 before dispatch); all 6 ops completed over authenticated WS.
+        assert daemon.mcp_calls == []
+        assert daemon.hellos and daemon.hellos[0]["capabilities"]["owned_subscriptions"] is True
+
+
+def test_medium1_unix_socket_rejects_traversal_symlinks_and_non_sockets(tmp_path: Path) -> None:
+    with pytest.raises(pc.DaemonError):
+        pc.parse_daemon_url("unix:///tmp/../etc/passwd")
+    with pytest.raises(pc.DaemonError):
+        pc._parse_listen_string("unix:///tmp/../paseo.sock")
+    with pytest.raises(pc.DaemonError):
+        pc._parse_listen_string("/tmp/../paseo.sock")
+
+    # Regular file is not a socket
+    plain = tmp_path / "not-a-sock"
+    plain.write_text("hi")
+    with pytest.raises(pc.DaemonError, match="not a socket"):
+        pc.McpClient(f"unix://{plain}").health()
+    with pytest.raises(pc.DaemonError, match="not a socket"):
+        pc.WsClient(f"unix://{plain}").connect()
+
+    # Symlink pointing to a real Unix socket must be refused
+    sock = tmp_path / "real.sock"
+    with FakeUnixPaseoDaemon(sock) as daemon:
+        link = tmp_path / "link.sock"
+        link.symlink_to(daemon.sock_path)
+        with pytest.raises(pc.DaemonError, match="not a socket"):
+            pc.McpClient(f"unix://{link}").health()
+        with pytest.raises(pc.DaemonError, match="not a socket"):
+            pc.WsClient(f"unix://{link}").connect()
+
+
+def _run_raw_unix_server(handler: Callable[[socket.socket], None]):
+    d = Path(tempfile.mkdtemp(prefix="ade-ws-", dir="/tmp"))
+    os.chmod(str(d), 0o700)
+    sp = d / "raw.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(str(sp))
+    os.chmod(str(sp), 0o600)
+    srv.listen(4)
+    srv.settimeout(3.0)
+
+    def serve():
+        try:
+            conn, _ = srv.accept()
+            with conn:
+                handler(conn)
+        except OSError:
+            pass
+        finally:
+            srv.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return sp, d, t
+
+
+def _raw_ws_upgrade(conn: socket.socket) -> None:
+    buf = bytearray()
+    while b"\r\n\r\n" not in buf:
+        c = conn.recv(4096)
+        if not c:
+            return
+        buf.extend(c)
+    head = bytes(buf).decode("iso-8859-1", "replace")
+    key = ""
+    for line in head.split("\r\n")[1:]:
+        if line.lower().startswith("sec-websocket-key:"):
+            key = line.split(":", 1)[1].strip()
+    accept = base64.b64encode(hashlib.sha1((key + pc.WS_MAGIC_GUID).encode("ascii")).digest()).decode("ascii")
+    conn.sendall(
+        (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+        ).encode("ascii")
+    )
+
+
+def test_medium2_ws_handshake_deadline_status_line_and_rfc6455_validation() -> None:
+    # 1. Slow/stalled handshake hits overall monotonic deadline
+    def slow_handshake(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 101 ")
+        time.sleep(0.5)
+
+    sp, d, t = _run_raw_unix_server(slow_handshake)
+    try:
+        ws = pc._StdlibWebSocket(pc.DaemonTarget(kind="unix", socket_path=str(sp)), timeout=0.15)
+        t0 = time.monotonic()
+        with pytest.raises(pc.DaemonError, match="timed out"):
+            ws.connect()
+        assert time.monotonic() - t0 < 0.6
+    finally:
+        t.join(timeout=2.0)
+        sp.unlink(missing_ok=True)
+        d.rmdir()
+
+    # 2. Malformed status line containing " 101 " in reason phrase is rejected
+    def spoofed_status(conn: socket.socket) -> None:
+        conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK 101 fake\r\nSec-WebSocket-Accept: x\r\n\r\n")
+
+    sp, d, t = _run_raw_unix_server(spoofed_status)
+    try:
+        ws = pc._StdlibWebSocket(pc.DaemonTarget(kind="unix", socket_path=str(sp)), timeout=1.0)
+        with pytest.raises(pc.DaemonError, match="upgrade rejected"):
+            ws.connect()
+    finally:
+        t.join(timeout=2.0)
+        sp.unlink(missing_ok=True)
+        d.rmdir()
+
+    # 3. RFC 6455 frame violations: fragmented ping, oversized ping, unknown opcode, bad continuation, nested data
+    cases = [
+        ("invalid WebSocket control frame", lambda c: _ws_send_frame(c, 0x9, b"hi", fin=False)),
+        ("invalid WebSocket control frame", lambda c: _ws_send_frame(c, 0x9, b"x" * 126, fin=True)),
+        ("unsupported WebSocket opcode", lambda c: _ws_send_frame(c, 0x3, b"bad", fin=True)),
+        ("unexpected WebSocket continuation frame", lambda c: _ws_send_frame(c, 0x0, b"{}", fin=True)),
+        (
+            "unexpected WebSocket data frame",
+            lambda c: (_ws_send_frame(c, 0x1, b'{"a":', fin=False), _ws_send_frame(c, 0x1, b"1}", fin=True)),
+        ),
+    ]
+    for pattern, send_bad in cases:
+        def _srv(conn: socket.socket, fn=send_bad) -> None:
+            _raw_ws_upgrade(conn)
+            fn(conn)
+
+        sp, d, t = _run_raw_unix_server(_srv)
+        try:
+            ws = pc._StdlibWebSocket(pc.DaemonTarget(kind="unix", socket_path=str(sp)), timeout=1.0)
+            ws.connect()
+            try:
+                with pytest.raises(pc.DaemonError, match=pattern):
+                    ws.recv_json()
+            finally:
+                ws.close()
+        finally:
+            t.join(timeout=2.0)
+            sp.unlink(missing_ok=True)
+            d.rmdir()
+
+
+def test_medium3_send_guard_lazy_client_env_isolation_and_paseo_guard_daemon_mode(tmp_path: Path, monkeypatch) -> None:
+    import ade_send_guard as sg
+
+    aid = "11111111-1111-4111-8111-111111111111"
+    # Invalid ADE_PASEO_URL must NOT raise DaemonError out of guard() (lazy client -> OSError -> fail-open PASS)
+    d = sg.guard(aid, env={"ADE_PASEO_URL": "http://example.com:7263"})
+    assert d.action == sg.PASS and "could not inspect" in d.reason
+
+    # Explicit caller env={"ADE_PASEO_TRANSPORT": "cli"} must NOT inherit os.environ["ADE_PASEO_URL"]
+    monkeypatch.setenv("ADE_PASEO_URL", "http://example.com:7263")
+    fn = sg.paseo_inspect(env={"ADE_PASEO_TRANSPORT": "cli"})
+    assert fn.__name__ == "inspect"
+
+    # bin/ade-paseo-guard uses daemon mode by default without spawning ADE_REAL_PASEO for inspect
+    marker = tmp_path / "real-paseo-ran"
+    fake_real = tmp_path / "fake-paseo"
+    fake_real.write_text(f"#!/bin/sh\necho \"$@\" >> {marker}\nexit 0\n")
+    fake_real.chmod(0o755)
+    archived = _sample_agent(aid, title="OLD", archived_at="2026-11-23T00:00:00Z")
+    sock = tmp_path / "guard.sock"
+    with FakeUnixPaseoDaemon(sock, agents=[archived]) as daemon:
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("ADE_PASEO_TRANSPORT", "PASEO_AGENT_ID", "ADE_ALLOW_ARCHIVED_SEND", "ADE_ALLOW_REPLACED_SEND")
+        }
+        env["ADE_REAL_PASEO"] = str(fake_real)
+        env["ADE_PASEO_URL"] = daemon.url
+        env["ADE_SELF_SESSION_STATE"] = str(tmp_path / "self-state")
+        env["PASEO_HOME"] = str(tmp_path / "paseo-home")
+        p = subprocess.run(
+            [sys.executable, "-I", str(BIN / "ade-paseo-guard"), "send", "--no-wait", aid, "hi"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert p.returncode == 4, p.stderr
+        assert "archived" in p.stderr
+        assert not marker.exists()  # real paseo was NEVER spawned for inspect or send
+
+
+def test_medium4_auto_permit_and_subagent_stalls_handle_invalid_daemon_url(tmp_path: Path) -> None:
+    lead = "11111111-1111-4111-8111-111111111111"
+    log_path = tmp_path / "ap.jsonl"
+    env = {k: v for k, v in os.environ.items() if k not in ("ADE_PASEO_URL", "ADE_PASEO_TRANSPORT")}
+    r = subprocess.run(
+        [sys.executable, str(BIN / "ade-auto-permit"), "--lead", lead, "--daemon-url", "http://example.com:7263", "--log", str(log_path)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert any(e.get("reason") == "enumeration-unavailable" for e in entries)
+
+    import ade_subagent_stalls as ss
+
+    cfg = ss.make_config(tmp_path, paseo=None, paseo_url="http://example.com:7263", use_daemon=True)
+    w1: List[str] = []
+    rs1 = {"down": False}
+    assert ss.parent_idle(cfg, lead, w1, rs1) is False
+    assert rs1["down"] is True and w1
+
+    w2: List[str] = []
+    rs2 = {"down": False}
+    assert ss.handed_off_to(cfg, lead, w2, rs2) is None
+    assert rs2["down"] is True and w2
+
+
+def test_medium5_ade_progress_daemon_mode_with_missing_paseo_binary(tmp_path: Path, monkeypatch) -> None:
+    prog_loader = importlib.machinery.SourceFileLoader("ade_progress_mod", str(BIN / "ade-progress"))
+    prog_spec = importlib.util.spec_from_loader("ade_progress_mod", prog_loader)
+    prog = importlib.util.module_from_spec(prog_spec)
+    prog_loader.exec_module(prog)
+
+    aid = "11111111-1111-4111-8111-111111111111"
+    idle_agent = _sample_agent(aid, title="LEAD prog", status="idle", updated_at="2020-01-01T00:00:00Z")
+    sock = tmp_path / "prog.sock"
+    with FakeUnixPaseoDaemon(sock, agents=[idle_agent]) as daemon:
+        monkeypatch.setenv("ADE_PASEO_URL", daemon.url)
+        monkeypatch.delenv("ADE_PASEO_TRANSPORT", raising=False)
+        monkeypatch.setenv("ADE_PROGRESS_STATE_DIR", str(tmp_path / "pstate"))
+        monkeypatch.setenv("ADE_PROGRESS_PASEO_PROGRESS", str(tmp_path / "no-pp"))
+        st = {"events": {}, "pings": [], "wakes": {}, "last_scan": 0}
+        decl = {
+            "task": "t1",
+            "agent_id": aid,
+            "paseo_home": prog.paseo_home(),
+            "state": "open",
+            "pending_count": 1,
+            "generation": 1,
+            "summary": "test work",
+            "idle_after_min": 1,
+            "workspace": None,
+        }
+        info = prog.classify(None, aid, None)
+        assert info["kind"] == "idle"
+        cand = {"d": decl, "reason": "idle_with_work", "key": prog.event_key(decl, "idle_with_work"), "info": info}
+        rep = {"health": [], "withdrawn": 0}
+        rec = prog.process(st, cand, None, rep)
+        assert rec is not None
+        assert rec["wake"] == "unknown"
+        assert rec["state"] == "published-local"
+        assert any("cannot send wake" in h for h in rep["health"])
+        assert prog.wake(None, decl) == "unknown"
+
+
+def test_low1_2_3_worktree_label_sse_case_oversize_update_confirm_and_archive_guard(tmp_path: Path, monkeypatch) -> None:
+    # LOW-1: Worktree prefers labels["paseo.worktree"] over worktreePath
+    snap = _sample_agent("11111111-1111-4111-8111-111111111111", labels={"paseo.worktree": "/wt/from-label"})
+    snap["worktreePath"] = "/wt/from-field"
+    assert pc.snapshot_to_inspect_dict(snap)["Worktree"] == "/wt/from-label"
+    snap["labels"] = {}
+    assert pc.snapshot_to_inspect_dict(snap)["Worktree"] == "/wt/from-field"
+
+    # LOW-2a: Case-insensitive Content-Type text/event-stream
+    sse_body = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"content":[],"structuredContent":{"permissions":[]}}}\n\n'
+    mcp = pc.McpClient(opener=lambda u, b, h, t: (200, "Text/Event-Stream; charset=utf-8", sse_body))
+    assert mcp.list_pending_permissions() == []
+
+    # LOW-2c: McpClient.update_agent checks success is True
+    bad_upd = b'{"jsonrpc":"2.0","id":1,"result":{"content":[],"structuredContent":{"success":false}}}'
+    mcp_bad = pc.McpClient(opener=lambda u, b, h, t: (200, "application/json", bad_upd))
+    with pytest.raises(pc.DaemonError, match="update_agent not confirmed"):
+        mcp_bad.update_agent("11111111-1111-4111-8111-111111111111", labels={"a": "b"})
+
+    # LOW-2b: Oversize HTTP body raises DaemonError instead of silent truncation
+    sock = tmp_path / "big.sock"
+    with FakeUnixPaseoDaemon(sock, agents=[_sample_agent("11111111-1111-4111-8111-111111111111")]) as daemon:
+        with monkeypatch.context() as mp:
+            mp.setattr(pc, "MAX_HTTP_BYTES", 32)
+            with pytest.raises(pc.DaemonError, match="exceeded size limit"):
+                pc.McpClient(daemon.url).list_pending_permissions()
+
+    # LOW-3: PaseoClient.archive_agent refuses running or already-archived agents unless force=True
+    running_id = "22222222-2222-4222-8222-222222222222"
+    archived_id = "33333333-3333-4333-8333-333333333333"
+    sock2 = tmp_path / "arch.sock"
+    with FakeUnixPaseoDaemon(
+        sock2,
+        agents=[
+            _sample_agent(running_id, status="running"),
+            _sample_agent(archived_id, status="idle", archived_at="2026-11-23T00:00:00Z"),
+        ],
+    ) as daemon:
+        client = pc.PaseoClient(url=daemon.url, timeout=5.0)
+        with pytest.raises(pc.DaemonError, match="running"):
+            client.archive_agent(running_id)
+        with pytest.raises(pc.DaemonError, match="already archived"):
+            client.archive_agent(archived_id)
+        assert daemon.archived_ids == []
+        client.archive_agent(running_id, force=True)
+        assert daemon.archived_ids == [running_id]

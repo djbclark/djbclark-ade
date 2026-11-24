@@ -52,7 +52,7 @@ resumed or relaunched agent): the stub is stalled only when every one of them is
 
 ## Output and exit codes
 
-`ade-subagent-stalls [--json] [--stale-min N] [--max-age-h N] [--tool-grace-min N] [--home DIR]`
+`ade-subagent-stalls [--json] [--stale-min N] [--max-age-h N] [--tool-grace-min N] [--home DIR] [--daemon-url URL]`
 
 - Plain text, or `--json`: a list of `{report, session_id, agent_id, transcript, idle_min, parent_session, parent_paseo_agent_id,
   parent_live, last_record, link, suggested_action}`. `parent_paseo_agent_id` is the Paseo agent whose Claude session is the transcript's
@@ -93,9 +93,7 @@ announcement and one repeat, then silence). A failed ping or send is not recorde
 dropped from the state, so a recurrence pings as new. `--max-pings` (default 5) caps hermes pings per run AND parent sends per run, repeats
 included, so a mass orphaning drains over several runs, both at first and at the repeat; a stall without a slot keeps waiting;
 `--dry-run` prints what would be sent and writes nothing; **`--baseline`** records every stall found now as known and announces nothing, for
-the run that switches the watcher on (otherwise the first run pings every orphan of the last 48 hours). Both tools are called by the absolute
-paths `~/.local/bin/hermes-ping` and `~/.local/bin/paseo` (override: `--hermes-ping`, `--paseo`); nothing looks at PATH (the guard shim gets a
-fixed one, `/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`, for its python3). `suggested_action` is a shell-quoted command (`shlex.join`).
+the run that switches the watcher on (otherwise the first run pings every orphan of the last 48 hours). Both tools are called by the absolute paths `~/.local/bin/hermes-ping` and `~/.local/bin/paseo` (override: `--hermes-ping`, `--paseo`); nothing looks at PATH (the guard shim gets a fixed one, `/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`, for its python3). When `--paseo` is omitted and `ADE_PASEO_TRANSPORT` is not `cli`, parent-idle inspects and in-process send-guard probes talk directly to Paseo's loopback daemon API via `bin/ade_paseo_client.py` (override target with `--daemon-url` or `ADE_PASEO_URL`), avoiding `paseo` CLI subprocesses; `--paseo` still selects the CLI binary path (used both for explicit CLI mode and for the actual `paseo send`). `suggested_action` is a shell-quoted command (`shlex.join`).
 
 ## Hook-in (site-public)
 

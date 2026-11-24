@@ -249,12 +249,8 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
 
 
 def _transport_env(env):
-    """Merge os.environ with explicit caller env for daemon transport discovery (never used for security overrides)."""
-    if env is None:
-        return os.environ
-    merged = dict(os.environ)
-    merged.update(env)
-    return merged
+    """Environment for daemon transport discovery (never merges os.environ under an explicit caller env)."""
+    return os.environ if env is None else env
 
 
 def paseo_inspect(paseo: str = "paseo", timeout: int = 5, env=None):
@@ -263,10 +259,13 @@ def paseo_inspect(paseo: str = "paseo", timeout: int = 5, env=None):
     tenv = _transport_env(env)
     use_cli = paseo_client.transport_mode(cli_override=paseo, env=tenv) == "cli"
     if not use_cli:
-        client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
+        client = None
 
         def inspect_daemon(ident: str) -> dict:
+            nonlocal client
             try:
+                if client is None:
+                    client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
                 return client.inspect_agent(ident, cli_shape=True)
             except paseo_client.AgentNotFoundError as exc:
                 raise LookupError(ident) from exc
@@ -294,13 +293,16 @@ def paseo_ls_label(paseo: str = "paseo", timeout: int = 10, env=None):
     tenv = _transport_env(env)
     use_cli = paseo_client.transport_mode(cli_override=paseo, env=tenv) == "cli"
     if not use_cli:
-        client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
+        client = None
 
         def ls_label_daemon(label: str) -> list:
+            nonlocal client
             if "=" not in label:
                 raise ValueError("label must be K=V")
             key, value = label.split("=", 1)
             try:
+                if client is None:
+                    client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
                 rows = client.list_agents(
                     include_background=True,
                     include_archived=True,

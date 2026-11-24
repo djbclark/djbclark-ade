@@ -431,9 +431,17 @@ def judge(target: str, allow: str | None, backstop: bool = False, replaced: str 
         return None
     sys.path.insert(0, str(BIN))
     import ade_send_guard as guard  # noqa: PLC0415 - lazy: any import problem must fail open
-    # the overrides count only as assignments written before the command; the sender is this hook's own agent (PASEO_AGENT_ID)
-    env = {k: v for k, v in ((guard.ALLOW_ENV, allow), (guard.ALLOW_REPLACED_ENV, replaced),
-                             (guard.SENDER_ENV, os.environ.get(guard.SENDER_ENV))) if v}
+    # the overrides count only as assignments written before the command; the sender is this hook's own agent (PASEO_AGENT_ID),
+    # and daemon transport settings come from the hook's own environment (never from overrides).
+    env = {k: v for k, v in (
+        (guard.ALLOW_ENV, allow),
+        (guard.ALLOW_REPLACED_ENV, replaced),
+        (guard.SENDER_ENV, os.environ.get(guard.SENDER_ENV)),
+        ("ADE_PASEO_URL", os.environ.get("ADE_PASEO_URL")),
+        ("ADE_PASEO_TRANSPORT", os.environ.get("ADE_PASEO_TRANSPORT")),
+        ("PASEO_HOME", os.environ.get("PASEO_HOME")),
+        ("PASEO_PASSWORD", os.environ.get("PASEO_PASSWORD")),
+    ) if v}
     d = guard.guard(target, env=env, source="hook-precheck")
     if d.action not in (guard.REDIRECT, guard.REFUSE):
         return None
