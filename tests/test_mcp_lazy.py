@@ -1,9 +1,12 @@
 """Unit and integration tests for bin/mcp-lazy (docs/mcp-on-demand.md §11.3)."""
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import select
+import signal
 import stat
 import subprocess
 import sys
@@ -19,6 +22,8 @@ SCRIPT = Path(__file__).resolve().parent.parent / "bin" / "mcp-lazy"
 FIXTURE_SERVER = r'''#!/usr/bin/env python3
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 
@@ -57,6 +62,12 @@ def send_msg(obj, framing="ndjson"):
 
 
 def main():
+    if os.environ.get("FIXTURE_SLOW_EXIT") == "1":
+        def _slow_term(_signum, _frame):
+            time.sleep(0.35)
+            os._exit(0)
+        signal.signal(signal.SIGTERM, _slow_term)
+
     pid_log = os.environ.get("FIXTURE_PID_LOG")
     if pid_log:
         with open(pid_log, "a", encoding="utf-8") as f:
@@ -69,6 +80,13 @@ def main():
             f.flush()
 
     tools_file = os.environ.get("FIXTURE_TOOLS_FILE")
+    caps_file = os.environ.get("FIXTURE_CAPS_FILE")
+    proto_file = os.environ.get("FIXTURE_PROTO_FILE")
+    cursor_file = os.environ.get("FIXTURE_CURSOR_FILE")
+    fail_init_file = os.environ.get("FIXTURE_FAIL_INIT_FILE")
+    roots_flag = os.environ.get("FIXTURE_ASK_ROOTS_ON_TOOLS_LIST") == "1"
+    pre_init_noise = os.environ.get("FIXTURE_PRE_INIT_NOISE") == "1"
+    descendant_pid_file = os.environ.get("FIXTURE_DESCENDANT_PID_FILE")
 
     def current_tools():
         if tools_file and os.path.exists(tools_file):
@@ -78,14 +96,37 @@ def main():
             {"name": "echo", "description": "Echo back input with child pid", "inputSchema": {"type": "object"}},
             {"name": "slow", "description": "Sleep before replying", "inputSchema": {"type": "object"}},
             {"name": "crash", "description": "Crash mid-call", "inputSchema": {"type": "object"}},
+            {"name": "crash_with_descendant", "description": "Spawn descendant holding stdout then crash", "inputSchema": {"type": "object"}},
+            {"name": "stall_stdin", "description": "Stop reading stdin forever", "inputSchema": {"type": "object"}},
             {"name": "noisy", "description": "Write non-JSON line to stdout before replying", "inputSchema": {"type": "object"}},
+            {"name": "json_noise", "description": "Write valid JSON without JSON-RPC envelope", "inputSchema": {"type": "object"}},
+            {"name": "oversized", "description": "Write oversized NDJSON frame", "inputSchema": {"type": "object"}},
             {"name": "ask_client", "description": "Send a server-to-client request", "inputSchema": {"type": "object"}},
         ]
+
+    def current_caps():
+        if caps_file and os.path.exists(caps_file):
+            with open(caps_file, encoding="utf-8") as f:
+                return json.load(f)
+        return {
+            "tools": {"listChanged": True},
+            "prompts": {},
+            "resources": {"subscribe": True},
+        }
+
+    def current_proto(offered):
+        if proto_file and os.path.exists(proto_file):
+            val = open(proto_file, encoding="utf-8").read().strip()
+            if val:
+                return val
+        return offered
 
     framing = "ndjson"
     while True:
         msg, seen_framing = read_msg()
         if msg is None:
+            if os.environ.get("FIXTURE_SLOW_EXIT") == "1":
+                time.sleep(0.45)
             break
         if seen_framing == "content-length":
             framing = "content-length"
@@ -94,28 +135,46 @@ def main():
         params = msg.get("params") or {}
 
         if method is None:
-            # Client response to a server-initiated request
             continue
         if "id" not in msg:
-            # Notification
             continue
 
         if method == "initialize":
+            if pre_init_noise:
+                send_msg({"jsonrpc": "2.0", "method": "notifications/message", "params": {"data": "too-early"}}, framing)
+                send_msg({"jsonrpc": "2.0", "id": "early-req", "method": "roots/list", "params": {}}, framing)
+                # Consume proxy's -32600 rejection of early-req
+                _early_reply, _ = read_msg()
+            if fail_init_file and os.path.exists(fail_init_file):
+                secret_blob = open(fail_init_file, encoding="utf-8").read()
+                send_msg({"jsonrpc": "2.0", "id": mid, "error": {"code": -32001, "message": secret_blob}}, framing)
+                continue
+            offered = params.get("protocolVersion", "2025-11-25")
             send_msg({
                 "jsonrpc": "2.0",
                 "id": mid,
                 "result": {
-                    "protocolVersion": params.get("protocolVersion", "2025-11-25"),
-                    "capabilities": {
-                        "tools": {"listChanged": True},
-                        "prompts": {},
-                        "resources": {"subscribe": True},
-                    },
+                    "protocolVersion": current_proto(offered),
+                    "capabilities": current_caps(),
                     "serverInfo": {"name": "fixture-mcp", "version": "1.0.0"},
                 },
             }, framing)
         elif method == "tools/list":
-            send_msg({"jsonrpc": "2.0", "id": mid, "result": {"tools": current_tools()}}, framing)
+            if roots_flag:
+                req_id = f"srv-roots-{os.getpid()}"
+                send_msg({"jsonrpc": "2.0", "id": req_id, "method": "roots/list", "params": {}}, framing)
+                while True:
+                    reply, _ = read_msg()
+                    if reply is None:
+                        return
+                    if reply.get("method") is None and reply.get("id") == req_id:
+                        break
+            res = {"tools": current_tools()}
+            if cursor_file and os.path.exists(cursor_file):
+                cursor = open(cursor_file, encoding="utf-8").read().strip()
+                if cursor and not params.get("cursor"):
+                    res["nextCursor"] = cursor
+            send_msg({"jsonrpc": "2.0", "id": mid, "result": res}, framing)
         elif method == "prompts/list":
             send_msg({"jsonrpc": "2.0", "id": mid, "result": {"prompts": [{"name": "hello"}]}}, framing)
         elif method == "resources/list":
@@ -144,6 +203,27 @@ def main():
                 }, framing)
             elif name == "crash":
                 os._exit(42)
+            elif name == "crash_with_descendant":
+                # Spawn a descendant inheriting stdout FD, then crash parent immediately.
+                child = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(60)"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=sys.stdout.fileno(),
+                    stderr=subprocess.DEVNULL,
+                )
+                if descendant_pid_file:
+                    with open(descendant_pid_file, "w", encoding="utf-8") as f:
+                        f.write(f"{child.pid}\n")
+                        f.flush()
+                os._exit(43)
+            elif name == "stall_stdin":
+                # Reply to trigger call, then stop reading stdin forever.
+                send_msg({
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {"content": [{"type": "text", "text": f"pid={os.getpid()} stalling"}]},
+                }, framing)
+                time.sleep(60)
             elif name == "noisy":
                 sys.stderr.write("fixture stderr diagnostic\n")
                 sys.stderr.flush()
@@ -154,8 +234,25 @@ def main():
                     "id": mid,
                     "result": {"content": [{"type": "text", "text": f"pid={os.getpid()} noisy=ok"}]},
                 }, framing)
+            elif name == "json_noise":
+                # Valid JSON objects/arrays that are NOT valid JSON-RPC 2.0 envelopes.
+                for junk in (
+                    {"level": "info", "msg": "diagnostic json"},
+                    {"jsonrpc": "1.0", "id": 999, "result": {}},
+                    {"jsonrpc": "2.0", "id": True, "result": {}},
+                    [1, 2, 3],
+                ):
+                    send_msg(junk, framing)
+                send_msg({
+                    "jsonrpc": "2.0",
+                    "id": mid,
+                    "result": {"content": [{"type": "text", "text": f"pid={os.getpid()} json_noise=ok"}]},
+                }, framing)
+            elif name == "oversized":
+                # Emit an NDJSON line larger than the test's MCP_LAZY_MAX_FRAME_BYTES cap.
+                huge = {"jsonrpc": "2.0", "id": mid, "result": {"blob": "x" * 4096}}
+                send_msg(huge, framing)
             elif name == "ask_client":
-                # Reply to tool call, then emit a server-initiated request to the client.
                 send_msg({
                     "jsonrpc": "2.0",
                     "id": mid,
@@ -176,6 +273,15 @@ def main():
 if __name__ == "__main__":
     main()
 '''
+
+
+def _load_mcp_lazy_module():
+    loader = importlib.machinery.SourceFileLoader("mcp_lazy_mod", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("mcp_lazy_mod", loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 def _pid_alive(pid: int) -> bool:
@@ -269,14 +375,14 @@ class ProxyClient:
             buf.extend(chunk)
         return bytes(buf)
 
-    def handshake(self) -> tuple[dict[str, Any], dict[str, Any]]:
+    def handshake(self, protocol_version: str = "2025-11-25") -> tuple[dict[str, Any], dict[str, Any]]:
         self.send({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
+                "protocolVersion": protocol_version,
+                "capabilities": {"roots": {}},
                 "clientInfo": {"name": "pytest-client", "version": "1"},
             },
         })
@@ -293,7 +399,7 @@ class ProxyClient:
             except OSError:
                 pass
         try:
-            self.proc.wait(timeout=5.0)
+            self.proc.wait(timeout=6.0)
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=5.0)
@@ -315,6 +421,11 @@ def fixture_env(tmp_path: Path):
     pid_log = tmp_path / "pids.log"
     env_log = tmp_path / "env.json"
     tools_file = tmp_path / "tools.json"
+    caps_file = tmp_path / "caps.json"
+    proto_file = tmp_path / "proto.txt"
+    cursor_file = tmp_path / "cursor.txt"
+    fail_init_file = tmp_path / "fail_init.txt"
+    descendant_pid_file = tmp_path / "descendant.pid"
     fake_home = tmp_path / "fake-home"
     fake_home.mkdir(mode=0o700)
     session_cwd = tmp_path / "session-checkout"
@@ -327,20 +438,32 @@ def fixture_env(tmp_path: Path):
         framing: str = "ndjson",
         extra_env: Optional[dict[str, str]] = None,
         cwd: Optional[Path] = None,
+        cache_dir_override: Optional[Path] = None,
+        via_python: bool = False,
     ) -> ProxyClient:
         env = dict(os.environ)
         env["HOME"] = str(fake_home)
         env["FIXTURE_PID_LOG"] = str(pid_log)
         env["FIXTURE_ENV_LOG"] = str(env_log)
+        env["FIXTURE_DESCENDANT_PID_FILE"] = str(descendant_pid_file)
         if tools_file.exists():
             env["FIXTURE_TOOLS_FILE"] = str(tools_file)
+        if caps_file.exists():
+            env["FIXTURE_CAPS_FILE"] = str(caps_file)
+        if proto_file.exists():
+            env["FIXTURE_PROTO_FILE"] = str(proto_file)
+        if cursor_file.exists():
+            env["FIXTURE_CURSOR_FILE"] = str(cursor_file)
+        if fail_init_file.exists():
+            env["FIXTURE_FAIL_INIT_FILE"] = str(fail_init_file)
         if extra_env:
             env.update(extra_env)
+        prefix = [sys.executable, str(SCRIPT)] if via_python else [str(SCRIPT)]
         argv = [
-            str(SCRIPT),
+            *prefix,
             "--id", server_id,
             "--idle", str(idle),
-            "--cache-dir", str(cache_dir),
+            "--cache-dir", str(cache_dir_override or cache_dir),
             "--",
             sys.executable, str(server_script),
         ]
@@ -366,6 +489,11 @@ def fixture_env(tmp_path: Path):
         "pid_log": pid_log,
         "env_log": env_log,
         "tools_file": tools_file,
+        "caps_file": caps_file,
+        "proto_file": proto_file,
+        "cursor_file": cursor_file,
+        "fail_init_file": fail_init_file,
+        "descendant_pid_file": descendant_pid_file,
         "home": fake_home,
         "session_cwd": session_cwd,
         "start": start,
@@ -382,7 +510,6 @@ def test_cold_cache_warms_and_reaps_then_warm_handshake_spawns_no_child(fixture_
         tool_names = [t["name"] for t in tools_r["result"]["tools"]]
         assert "echo" in tool_names
 
-        # Also check prompts/list and resources/list served from freshly warmed cache.
         client1.send({"jsonrpc": "2.0", "id": 3, "method": "prompts/list", "params": {}})
         prompts_r = client1.recv()
         assert prompts_r["result"]["prompts"] == [{"name": "hello"}]
@@ -398,7 +525,6 @@ def test_cold_cache_warms_and_reaps_then_warm_handshake_spawns_no_child(fixture_
         rc, _err = client1.close()
         assert rc == 0
 
-    # Verify hardened cache permissions and schema (no command/argv stored).
     cache_dir: Path = fixture_env["cache_dir"]
     cache_file = cache_dir / "fixture-srv.json"
     assert cache_file.is_file() and not cache_file.is_symlink()
@@ -406,9 +532,11 @@ def test_cold_cache_warms_and_reaps_then_warm_handshake_spawns_no_child(fixture_
     assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
     cached = json.loads(cache_file.read_text(encoding="utf-8"))
     assert "command" not in cached and "argv" not in cached
-    assert set(cached.keys()) <= {"version", "initialize", "tools", "prompts", "resources", "resourceTemplates"}
+    assert set(cached.keys()) <= {
+        "version", "clientProtocolVersion", "initialize", "tools", "prompts", "resources", "resourceTemplates"
+    }
 
-    # Warm start: ZERO child spawned for initialize, notifications/initialized, tools/list, prompts/list, resources/list, ping!
+    # Warm start: ZERO child spawned for initialize, notifications/initialized, tools/list, prompts/list, resources/list, ping.
     fixture_env["pid_log"].unlink()
     client2 = fixture_env["start"]()
     try:
@@ -430,7 +558,6 @@ def test_cold_cache_warms_and_reaps_then_warm_handshake_spawns_no_child(fixture_
 
 
 def test_first_tools_call_spawns_child_and_returns_real_result(fixture_env):
-    # Warm cache first
     c0 = fixture_env["start"]()
     c0.handshake()
     c0.close()
@@ -453,7 +580,6 @@ def test_first_tools_call_spawns_child_and_returns_real_result(fixture_env):
         assert len(pids) == 1
         assert resp["result"]["content"][0]["text"] == f"pid={pids[0]} msg=hello"
 
-        # Second call reuses the same live child.
         client.send({
             "jsonrpc": "2.0",
             "id": 21,
@@ -468,8 +594,72 @@ def test_first_tools_call_spawns_child_and_returns_real_result(fixture_env):
         assert rc == 0
 
 
+def test_discovery_awaits_client_roots_reply_on_cold_and_on_demand_start(fixture_env):
+    """HIGH #1: client reader stays unblocked during cold warm-up & on-demand discovery; pre-init traffic is gated."""
+    extra = {
+        "FIXTURE_ASK_ROOTS_ON_TOOLS_LIST": "1",
+        "FIXTURE_PRE_INIT_NOISE": "1",
+    }
+    # 1. Cold warm-up: server emits pre-init noise (must be gated!), then asks roots/list during warm-up tools/list.
+    c1 = fixture_env["start"](extra_env=extra)
+    try:
+        c1.send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "roots-client", "version": "1"},
+            },
+        })
+        # First message MUST be the initialize response (pre-init notification & early-req were gated!).
+        first = c1.recv(timeout=5.0)
+        assert first.get("id") == 1 and "result" in first, f"pre-init traffic leaked before initialize: {first!r}"
+        c1.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # Next, server asks roots/list while constructing warm-up tools/list; client replies while proxy is warming!
+        roots_req = c1.recv(timeout=5.0)
+        assert roots_req.get("method") == "roots/list" and "id" in roots_req
+        c1.send({"jsonrpc": "2.0", "id": roots_req["id"], "result": {"roots": [{"uri": "file:///ws"}]}})
+
+        # Now client requests tools/list -> served from the freshly warmed cache after warm-up completes!
+        c1.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools_r = c1.recv(timeout=5.0)
+        assert tools_r["id"] == 2 and any(t["name"] == "echo" for t in tools_r["result"]["tools"])
+    finally:
+        rc, stderr = c1.close()
+        assert rc == 0
+        assert "dropping pre-initialization child message" in stderr
+
+    # 2. On-demand startup: warm handshake spawns 0 children; tools/call triggers on-demand spawn + discovery refresh
+    #    which again asks roots/list and MUST receive the client's reply without stalling!
+    fixture_env["pid_log"].unlink()
+    c2 = fixture_env["start"](extra_env=extra)
+    try:
+        init_r, tools_r = c2.handshake()
+        assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
+        assert fixture_env["read_pids"]() == []
+
+        c2.send({
+            "jsonrpc": "2.0",
+            "id": 25,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "after-roots"}},
+        })
+        # Expect server's roots/list during on-demand discovery; reply to it, then receive tools/call response!
+        roots_req2 = c2.recv(timeout=5.0)
+        assert roots_req2.get("method") == "roots/list" and "id" in roots_req2
+        c2.send({"jsonrpc": "2.0", "id": roots_req2["id"], "result": {"roots": [{"uri": "file:///ws"}]}})
+
+        call_r = c2.recv(timeout=5.0)
+        assert call_r["id"] == 25
+        assert "msg=after-roots" in call_r["result"]["content"][0]["text"]
+    finally:
+        assert c2.close()[0] == 0
+
+
 def test_idle_reap_fires_and_never_while_call_in_flight(fixture_env):
-    # Warm cache first
     c0 = fixture_env["start"]()
     c0.handshake()
     c0.close()
@@ -478,7 +668,6 @@ def test_idle_reap_fires_and_never_while_call_in_flight(fixture_env):
     client = fixture_env["start"](idle=1.0)
     try:
         client.handshake()
-        # Start a slow call (2.0s) exceeding idle=1.0s: must NOT reap while in flight.
         client.send({
             "jsonrpc": "2.0",
             "id": 30,
@@ -493,10 +682,8 @@ def test_idle_reap_fires_and_never_while_call_in_flight(fixture_env):
         assert f"pid={first_pid} slow=done" == resp["result"]["content"][0]["text"]
         assert _pid_alive(first_pid), "child should still be alive right after slow call completes"
 
-        # Now wait past idle=1.0s with nothing in flight: reaper must kill first_pid.
         assert _wait_pid_dead(first_pid, timeout=4.0), "idle child was not reaped"
 
-        # Next call transparently respawns a new child with a new pid.
         client.send({
             "jsonrpc": "2.0",
             "id": 31,
@@ -514,7 +701,6 @@ def test_idle_reap_fires_and_never_while_call_in_flight(fixture_env):
 
 
 def test_idle_reap_blocked_by_subscription_and_server_request(fixture_env):
-    # Warm cache first
     c0 = fixture_env["start"]()
     c0.handshake()
     c0.close()
@@ -524,7 +710,6 @@ def test_idle_reap_blocked_by_subscription_and_server_request(fixture_env):
     try:
         client.handshake()
 
-        # 1. Open resource subscription must prevent idle reaping.
         client.send({
             "jsonrpc": "2.0",
             "id": 40,
@@ -538,7 +723,6 @@ def test_idle_reap_blocked_by_subscription_and_server_request(fixture_env):
         time.sleep(1.1)
         assert _pid_alive(pid1), "child with open resource subscription must not be reaped"
 
-        # Unsubscribe -> child becomes eligible and gets reaped.
         client.send({
             "jsonrpc": "2.0",
             "id": 41,
@@ -549,16 +733,13 @@ def test_idle_reap_blocked_by_subscription_and_server_request(fixture_env):
         assert unsub_r["result"]["unsubscribed"] == "mem://item"
         assert _wait_pid_dead(pid1, timeout=3.0), "child should reap after unsubscribe"
 
-        # 2. Unanswered server-to-client request must prevent idle reaping.
         client.send({
             "jsonrpc": "2.0",
             "id": 42,
             "method": "tools/call",
             "params": {"name": "ask_client", "arguments": {}},
         })
-        r1 = client.recv()
-        r2 = client.recv()
-        msgs = [r1, r2]
+        msgs = [client.recv(), client.recv()]
         assert any(m.get("id") == 42 for m in msgs)
         assert any(m.get("id") == "srv-req-1" and m.get("method") == "roots/list" for m in msgs)
         pid2 = fixture_env["read_pids"]()[1]
@@ -566,7 +747,6 @@ def test_idle_reap_blocked_by_subscription_and_server_request(fixture_env):
         time.sleep(1.1)
         assert _pid_alive(pid2), "child with unanswered server-to-client request must not be reaped"
 
-        # Answer server-to-client request -> child becomes eligible and gets reaped.
         client.send({"jsonrpc": "2.0", "id": "srv-req-1", "result": {"roots": []}})
         assert _wait_pid_dead(pid2, timeout=3.0), "child should reap after server request is answered"
     finally:
@@ -595,7 +775,6 @@ def test_child_crash_mid_call_returns_error_and_next_call_respawns(fixture_env):
         pids1 = fixture_env["read_pids"]()
         assert len(pids1) == 1
 
-        # Next call respawns cleanly with a new pid.
         client.send({
             "jsonrpc": "2.0",
             "id": 51,
@@ -612,19 +791,123 @@ def test_child_crash_mid_call_returns_error_and_next_call_respawns(fixture_env):
         assert rc == 0
 
 
+def test_child_crash_with_descendant_holding_stdout_open(fixture_env):
+    """HIGH #2a: child dies while descendant keeps stdout open; proxy must not hang and must kill pgid."""
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    client = fixture_env["start"]()
+    try:
+        client.handshake()
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 52,
+            "method": "tools/call",
+            "params": {"name": "crash_with_descendant", "arguments": {}},
+        })
+        err_resp = client.recv(timeout=4.0)
+        assert err_resp["id"] == 52 and err_resp["error"]["code"] == -32603
+
+        desc_pid = int(fixture_env["descendant_pid_file"].read_text(encoding="utf-8").strip())
+        assert _wait_pid_dead(desc_pid, timeout=3.0), "descendant holding stdout open must be killed with process group"
+
+        # Next call respawns cleanly.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 53,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "post-desc"}},
+        })
+        ok_r = client.recv(timeout=5.0)
+        assert ok_r["id"] == 53 and "msg=post-desc" in ok_r["result"]["content"][0]["text"]
+    finally:
+        assert client.close()[0] == 0
+
+
+def test_stalled_stdin_consumer_retires_child_without_hanging(fixture_env):
+    """HIGH #2b: non-reading child fills stdin pipe buffer; bounded write times out, retires child, and respawns."""
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    client = fixture_env["start"](extra_env={"MCP_LAZY_WRITE_TIMEOUT": "0.5"})
+    try:
+        client.handshake()
+        # Put child into non-reading stall mode.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 54,
+            "method": "tools/call",
+            "params": {"name": "stall_stdin", "arguments": {}},
+        })
+        r_stall = client.recv(timeout=5.0)
+        assert "stalling" in r_stall["result"]["content"][0]["text"]
+        stalled_pid = fixture_env["read_pids"]()[0]
+
+        # Send a large payload (>512 KB, exceeding OS pipe buffer) so stdin write blocks and hits write timeout.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 55,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "A" * (512 * 1024)}},
+        })
+        err_r = client.recv(timeout=5.0)
+        assert err_r["id"] == 55 and err_r["error"]["code"] == -32603
+        assert _wait_pid_dead(stalled_pid, timeout=3.0), "stalled child must be terminated"
+
+        # Next call respawns cleanly.
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 56,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "after-stall"}},
+        })
+        ok_r = client.recv(timeout=5.0)
+        assert ok_r["id"] == 56 and "msg=after-stall" in ok_r["result"]["content"][0]["text"]
+    finally:
+        assert client.close()[0] == 0
+
+
+def test_eof_racing_idle_reap_leaves_no_orphan_child(fixture_env):
+    """HIGH #2c: client EOF arriving while idle reaper is mid-teardown must wait for teardown (no orphan)."""
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    client = fixture_env["start"](idle=0.25, extra_env={"FIXTURE_SLOW_EXIT": "1"})
+    client.handshake()
+    client.send({
+        "jsonrpc": "2.0",
+        "id": 57,
+        "method": "tools/call",
+        "params": {"name": "echo", "arguments": {"msg": "race"}},
+    })
+    assert "msg=race" in client.recv(timeout=5.0)["result"]["content"][0]["text"]
+    child_pid = fixture_env["read_pids"]()[0]
+
+    # Sleep right into the idle reap window (idle=0.25s, child takes ~0.45s to exit), then send EOF!
+    time.sleep(0.32)
+    rc, _err = client.close()
+    assert rc == 0
+    # By the time proxy exits, the child MUST already be dead (no detached orphan).
+    assert not _pid_alive(child_pid), f"orphan child pid={child_pid} survived EOF racing idle reap"
+
+
 def test_tools_list_changed_emitted_when_fresh_list_differs_from_cache(fixture_env):
     tools_file: Path = fixture_env["tools_file"]
     tools_file.write_text(json.dumps([
         {"name": "echo", "description": "v1", "inputSchema": {"type": "object"}},
     ]), encoding="utf-8")
 
-    # Warm cache with v1 tools.
     c0 = fixture_env["start"]()
     c0.handshake()
     c0.close()
     fixture_env["pid_log"].unlink()
 
-    # Mutate server's tool list to v2 before next session.
     tools_file.write_text(json.dumps([
         {"name": "echo", "description": "v1", "inputSchema": {"type": "object"}},
         {"name": "new_tool", "description": "v2", "inputSchema": {"type": "object"}},
@@ -642,14 +925,11 @@ def test_tools_list_changed_emitted_when_fresh_list_differs_from_cache(fixture_e
             "method": "tools/call",
             "params": {"name": "echo", "arguments": {"msg": "trigger"}},
         })
-        m1 = client.recv()
-        m2 = client.recv()
-        msgs = [m1, m2]
+        msgs = [client.recv(), client.recv()]
         assert any(m.get("method") == "notifications/tools/list_changed" and "id" not in m for m in msgs)
         call_r = next(m for m in msgs if m.get("id") == 60)
         assert "msg=trigger" in call_r["result"]["content"][0]["text"]
 
-        # Cache file on disk must now carry the refreshed tool list.
         cached = json.loads((fixture_env["cache_dir"] / "fixture-srv.json").read_text(encoding="utf-8"))
         assert [t["name"] for t in cached["tools"]["tools"]] == ["echo", "new_tool"]
     finally:
@@ -657,8 +937,111 @@ def test_tools_list_changed_emitted_when_fresh_list_differs_from_cache(fixture_e
         assert rc == 0
 
 
-def test_stdout_only_valid_jsonrpc_and_content_length_framing(fixture_env):
-    # 1. Noisy child writes garbage to stdout and logs to stderr; proxy stdout must stay pure JSON-RPC.
+def test_protocol_version_change_rewarms_and_fails_closed_on_live_mismatch(fixture_env):
+    """MEDIUM #2: cached initialize validates protocolVersion compatibility and live mismatch fails closed."""
+    proto_file: Path = fixture_env["proto_file"]
+    # 1. Warm cache with client offering 2025-06-18 (server agrees on 2025-06-18).
+    c0 = fixture_env["start"]()
+    init0, _ = c0.handshake(protocol_version="2025-06-18")
+    assert init0["result"]["protocolVersion"] == "2025-06-18"
+    assert c0.close()[0] == 0
+
+    # 2. Next client offers 2025-11-25 -> cache mismatch -> re-warms from child (1 spawn) and negotiates 2025-11-25.
+    fixture_env["pid_log"].unlink()
+    c1 = fixture_env["start"]()
+    try:
+        init1, _ = c1.handshake(protocol_version="2025-11-25")
+        assert init1["result"]["protocolVersion"] == "2025-11-25"
+        assert len(fixture_env["read_pids"]()) == 1
+    finally:
+        assert c1.close()[0] == 0
+
+    # 3. Now live server switches to 2024-11-05 while cache still says 2025-11-25.
+    #    Client gets cached 2025-11-25 on initialize, then on tools/call the live child negotiates 2024-11-05
+    #    -> proxy MUST fail closed with JSON-RPC -32603 error and invalidate the stale cache!
+    proto_file.write_text("2024-11-05\n", encoding="utf-8")
+    fixture_env["pid_log"].unlink()
+    c2 = fixture_env["start"]()
+    try:
+        init2, _ = c2.handshake(protocol_version="2025-11-25")
+        assert init2["result"]["protocolVersion"] == "2025-11-25"
+        assert fixture_env["read_pids"]() == []
+
+        c2.send({
+            "jsonrpc": "2.0",
+            "id": 65,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "should-fail"}},
+        })
+        err_r = c2.recv(timeout=5.0)
+        assert err_r["id"] == 65
+        assert "error" in err_r and err_r["error"]["code"] == -32603
+        assert "protocol version" in err_r["error"]["message"].lower()
+        assert not (fixture_env["cache_dir"] / "fixture-srv.json").exists(), "stale cache must be invalidated"
+    finally:
+        assert c2.close()[0] == 0
+
+
+def test_refresh_drops_stale_cache_on_pagination_and_capability_removal(fixture_env):
+    """MEDIUM #3: refresh drops stale cached lists and emits list_changed when paginated or capability removed."""
+    # Warm cache with full tools + prompts + resources.
+    c0 = fixture_env["start"]()
+    c0.handshake()
+    c0.close()
+    fixture_env["pid_log"].unlink()
+
+    cache_file = fixture_env["cache_dir"] / "fixture-srv.json"
+    before = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert "tools" in before and "prompts" in before
+
+    # Transition: tools/list becomes paginated (nextCursor) AND prompts capability is removed.
+    fixture_env["cursor_file"].write_text("page-2\n", encoding="utf-8")
+    fixture_env["caps_file"].write_text(json.dumps({"tools": {"listChanged": True}}), encoding="utf-8")
+
+    c1 = fixture_env["start"]()
+    try:
+        c1.handshake()
+        c1.send({"jsonrpc": "2.0", "id": 66, "method": "prompts/list", "params": {}})
+        assert c1.recv()["result"]["prompts"] == [{"name": "hello"}]
+        assert fixture_env["read_pids"]() == []
+
+        # Trigger on-demand spawn & refresh.
+        c1.send({
+            "jsonrpc": "2.0",
+            "id": 67,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "refresh-inval"}},
+        })
+        # Expect list_changed notifications for tools, prompts, and resources + tools/call reply.
+        received = []
+        while not any(m.get("id") == 67 for m in received):
+            received.append(c1.recv(timeout=5.0))
+        notif_methods = {m.get("method") for m in received if "id" not in m}
+        assert "notifications/tools/list_changed" in notif_methods
+        assert "notifications/prompts/list_changed" in notif_methods
+        assert "notifications/resources/list_changed" in notif_methods
+    finally:
+        assert c1.close()[0] == 0
+
+    after = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert "tools" not in after, "paginated tools list must drop stale cache entry"
+    assert "prompts" not in after, "removed prompts capability must drop stale cache entry"
+    assert "resources" not in after, "removed resources capability must drop stale cache entry"
+
+    # Subsequent session must NOT serve stale tools from cache: tools/list spawns child and returns nextCursor.
+    fixture_env["pid_log"].unlink()
+    c2 = fixture_env["start"]()
+    try:
+        _init2, tools2 = c2.handshake()
+        assert tools2["result"].get("nextCursor") == "page-2"
+        assert len(fixture_env["read_pids"]()) == 1
+    finally:
+        assert c2.close()[0] == 0
+
+
+def test_stdout_strict_jsonrpc_filtering_bounded_frames_and_bounded_error_logs(fixture_env):
+    """MEDIUM #4: filter non-JSON-RPC JSON, bound NDJSON frames, retire on framing error, bound startup error logs."""
+    # 1. Noisy text + valid JSON lacking JSON-RPC 2.0 envelope must be dropped; stdout stays pure JSON-RPC 2.0.
     client = fixture_env["start"]()
     try:
         client.handshake()
@@ -668,19 +1051,76 @@ def test_stdout_only_valid_jsonrpc_and_content_length_framing(fixture_env):
             "method": "tools/call",
             "params": {"name": "noisy", "arguments": {}},
         })
-        resp = client.recv()
-        assert resp["id"] == 70
-        assert "noisy=ok" in resp["result"]["content"][0]["text"]
-        assert len(client.raw_stdout_lines) >= 3
+        assert "noisy=ok" in client.recv()["result"]["content"][0]["text"]
+
+        client.send({
+            "jsonrpc": "2.0",
+            "id": 71,
+            "method": "tools/call",
+            "params": {"name": "json_noise", "arguments": {}},
+        })
+        assert "json_noise=ok" in client.recv()["result"]["content"][0]["text"]
+
         for raw_line in client.raw_stdout_lines:
             parsed = json.loads(raw_line.decode("utf-8"))
             assert isinstance(parsed, dict) and parsed.get("jsonrpc") == "2.0"
+            assert "level" not in parsed
     finally:
         rc, stderr = client.close()
         assert rc == 0
         assert "dropping non-JSON stdout line" in stderr
+        assert "dropping non-JSON-RPC message" in stderr
 
-    # 2. Content-Length framing works seamlessly over cached handshake + live tools/call.
+    # 2. Oversized NDJSON frame from child retires child and resolves pending call with -32603, then respawns.
+    fixture_env["pid_log"].unlink()
+    c_cap = fixture_env["start"](extra_env={"MCP_LAZY_MAX_FRAME_BYTES": "1024"})
+    try:
+        c_cap.handshake()
+        c_cap.send({
+            "jsonrpc": "2.0",
+            "id": 72,
+            "method": "tools/call",
+            "params": {"name": "oversized", "arguments": {}},
+        })
+        err_r = c_cap.recv(timeout=5.0)
+        assert err_r["id"] == 72 and err_r["error"]["code"] == -32603
+
+        c_cap.send({
+            "jsonrpc": "2.0",
+            "id": 73,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "after-oversized"}},
+        })
+        ok_r = c_cap.recv(timeout=5.0)
+        assert ok_r["id"] == 73 and "msg=after-oversized" in ok_r["result"]["content"][0]["text"]
+    finally:
+        assert c_cap.close()[0] == 0
+
+    # 3. Startup failure must NOT dump arbitrary server-supplied error payloads to stderr.
+    (fixture_env["cache_dir"] / "fixture-srv.json").unlink(missing_ok=True)
+    sentinel_secret = "ARBITRARY-SERVER-ERROR-PAYLOAD-DO-NOT-LOG-" + ("Z" * 200)
+    fixture_env["fail_init_file"].write_text(sentinel_secret, encoding="utf-8")
+    c_fail = fixture_env["start"]()
+    try:
+        c_fail.send({
+            "jsonrpc": "2.0",
+            "id": 74,
+            "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+        })
+        err_init = c_fail.recv(timeout=5.0)
+        assert err_init["id"] == 74 and err_init["error"]["code"] == -32603
+    finally:
+        rc, stderr = c_fail.close()
+        assert rc == 0
+        assert "jsonrpc error code=-32001" in stderr
+        assert sentinel_secret not in stderr
+    fixture_env["fail_init_file"].unlink()
+
+    # 4. Content-Length framing works seamlessly over cached handshake + live tools/call.
+    c_warm = fixture_env["start"]()
+    c_warm.handshake()
+    c_warm.close()
     fixture_env["pid_log"].unlink()
     client_cl = fixture_env["start"](framing="content-length")
     try:
@@ -690,7 +1130,7 @@ def test_stdout_only_valid_jsonrpc_and_content_length_framing(fixture_env):
         assert fixture_env["read_pids"]() == []
         client_cl.send({
             "jsonrpc": "2.0",
-            "id": 71,
+            "id": 75,
             "method": "tools/call",
             "params": {"name": "echo", "arguments": {"msg": "cl"}},
         })
@@ -728,7 +1168,8 @@ def test_hardening_rejects_relative_or_dotdot_command(fixture_env, bad_cmd: str)
     assert "mcp-lazy:" in r.stderr
 
 
-def test_hardening_rejects_symlink_and_bad_mode_cache_and_ignores_cached_command(fixture_env):
+def test_hardening_rejects_symlink_fifo_bad_mode_and_untrusted_ancestor_cache(fixture_env):
+    """MEDIUM #1 + L3: symlink, FIFO (no hang!), bad perms, untrusted ancestor, and ignored cached command."""
     cache_dir: Path = fixture_env["cache_dir"]
     cache_dir.mkdir(parents=True, mode=0o700)
     cache_file = cache_dir / "fixture-srv.json"
@@ -745,7 +1186,21 @@ def test_hardening_rejects_symlink_and_bad_mode_cache_and_ignores_cached_command
         "tools": {"tools": [{"name": "poisoned_tool"}]},
     }
 
-    # Case 1: Symlink cache file -> ignored and rebuilt atomically as a real 0600 file.
+    # Case 1: FIFO at cache file path must NOT hang initialize; ignored and atomically replaced with 0600 file.
+    os.mkfifo(cache_file, 0o600)
+    c_fifo = fixture_env["start"]()
+    try:
+        init_r, _ = c_fifo.handshake()
+        assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
+        assert len(fixture_env["read_pids"]()) == 1
+    finally:
+        assert c_fifo.close()[0] == 0
+    st = os.lstat(cache_file)
+    assert stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == 0o600
+
+    # Case 2: Symlink cache file -> ignored and rebuilt atomically as a real 0600 file.
+    fixture_env["pid_log"].unlink(missing_ok=True)
+    cache_file.unlink()
     target = fixture_env["tmp"] / "symlink-target.json"
     target.write_text(json.dumps(fake_payload), encoding="utf-8")
     target.chmod(0o600)
@@ -753,42 +1208,59 @@ def test_hardening_rejects_symlink_and_bad_mode_cache_and_ignores_cached_command
 
     c1 = fixture_env["start"]()
     try:
-        init_r, _tools_r = c1.handshake()
+        init_r, _ = c1.handshake()
         assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
         assert len(fixture_env["read_pids"]()) == 1
     finally:
         assert c1.close()[0] == 0
     assert not cache_file.is_symlink() and stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
-    # Case 2: World-writable (0666) and group-readable (0640) cache files -> ignored and rebuilt.
+    # Case 3: World-writable / group-readable cache files -> ignored and rebuilt.
     for bad_mode in (0o666, 0o644, 0o640, 0o620):
         fixture_env["pid_log"].unlink(missing_ok=True)
         cache_file.write_text(json.dumps(fake_payload), encoding="utf-8")
         cache_file.chmod(bad_mode)
         c2 = fixture_env["start"]()
         try:
-            init_r, _tools_r = c2.handshake()
+            init_r, _ = c2.handshake()
             assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
             assert len(fixture_env["read_pids"]()) == 1
         finally:
             assert c2.close()[0] == 0
         assert stat.S_IMODE(cache_file.stat().st_mode) == 0o600
 
-    # Case 3: World-writable cache dir (0777) -> ignored on load, tightened to 0700 on rebuild.
+    # Case 4: World-writable cache dir (0777) -> ignored on load, tightened to 0700 on rebuild.
     fixture_env["pid_log"].unlink(missing_ok=True)
     cache_file.write_text(json.dumps(fake_payload), encoding="utf-8")
     cache_file.chmod(0o600)
     cache_dir.chmod(0o777)
     c3 = fixture_env["start"]()
     try:
-        init_r, _tools_r = c3.handshake()
+        init_r, _ = c3.handshake()
         assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
         assert len(fixture_env["read_pids"]()) == 1
     finally:
         assert c3.close()[0] == 0
     assert stat.S_IMODE(cache_dir.stat().st_mode) == 0o700
 
-    # Case 4: Valid 0600 cache containing extra "command"/"argv" keys -> those keys are stripped/never executed.
+    # Case 5: User-owned symlink ancestor -> untrusted, ignored on load and never written through.
+    fixture_env["pid_log"].unlink(missing_ok=True)
+    real_parent = fixture_env["tmp"] / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    (real_parent / "sub").mkdir(mode=0o700)
+    (real_parent / "sub" / "fixture-srv.json").write_text(json.dumps(fake_payload), encoding="utf-8")
+    (real_parent / "sub" / "fixture-srv.json").chmod(0o600)
+    sym_parent = fixture_env["tmp"] / "sym-parent"
+    sym_parent.symlink_to(real_parent)
+    c_sym_anc = fixture_env["start"](cache_dir_override=sym_parent / "sub")
+    try:
+        init_r, _ = c_sym_anc.handshake()
+        assert init_r["result"]["serverInfo"]["name"] == "fixture-mcp"
+        assert len(fixture_env["read_pids"]()) == 1
+    finally:
+        assert c_sym_anc.close()[0] == 0
+
+    # Case 6: Valid 0600 cache containing extra "command"/"argv" keys -> ignored/stripped, never executed.
     fixture_env["pid_log"].unlink(missing_ok=True)
     cache_file.write_text(json.dumps(fake_payload), encoding="utf-8")
     cache_file.chmod(0o600)
@@ -801,7 +1273,7 @@ def test_hardening_rejects_symlink_and_bad_mode_cache_and_ignores_cached_command
             "method": "tools/call",
             "params": {"name": "echo", "arguments": {"msg": "cli-cmd-used"}},
         })
-        msgs = [c4.recv(), c4.recv()]  # list_changed + tools/call result
+        msgs = [c4.recv(), c4.recv()]
         call_r = next(m for m in msgs if m.get("id") == 80)
         assert "msg=cli-cmd-used" in call_r["result"]["content"][0]["text"]
     finally:
@@ -810,11 +1282,21 @@ def test_hardening_rejects_symlink_and_bad_mode_cache_and_ignores_cached_command
     assert "command" not in rebuilt and "argv" not in rebuilt
 
 
+def test_hardening_sanitize_path_unit():
+    """LOW #1: unit test PATH sanitization directly without touching any launcher PATH."""
+    mod = _load_mcp_lazy_module()
+    dirty = os.pathsep.join(["", ".", "./node_modules/.bin", "relative/dir", "/usr/bin", "/bin", "/opt/../etc"])
+    assert mod.sanitize_path(dirty) == os.pathsep.join(["/usr/bin", "/bin"])
+
+
 def test_hardening_child_cwd_is_home_and_relative_path_stripped(fixture_env):
-    dirty_path = os.pathsep.join(["", ".", "./node_modules/.bin", "relative/dir", "/usr/bin", "/bin", "/opt/../etc"])
+    """LOW #1: invoke via fixed sys.executable while preserving real PATH entries alongside dirty entries."""
+    base_path = os.environ.get("PATH", "/usr/bin:/bin")
+    dirty_path = os.pathsep.join(["", ".", "./node_modules/.bin", "relative/dir", base_path, "/opt/../etc"])
     client = fixture_env["start"](
         extra_env={"PATH": dirty_path},
         cwd=fixture_env["session_cwd"],
+        via_python=True,
     )
     try:
         client.handshake()
@@ -833,5 +1315,9 @@ def test_hardening_child_cwd_is_home_and_relative_path_stripped(fixture_env):
     assert Path(observed["cwd"]).resolve() == fixture_env["home"].resolve()
     assert Path(observed["cwd"]).resolve() != fixture_env["session_cwd"].resolve()
     path_entries = [p for p in observed["PATH"].split(os.pathsep) if p != ""]
-    assert observed["PATH"] == os.pathsep.join(["/usr/bin", "/bin"])
+    assert "" not in observed["PATH"].split(os.pathsep)
+    assert "." not in path_entries
+    assert "./node_modules/.bin" not in path_entries
+    assert "relative/dir" not in path_entries
+    assert "/opt/../etc" not in path_entries
     assert all(os.path.isabs(p) and ".." not in p.split("/") for p in path_entries)

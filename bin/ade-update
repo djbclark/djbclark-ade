@@ -677,34 +677,83 @@ def install_libexec_copy(repo, name, rel, check, can_install, revision, authoriz
             if reason:
                 row.update(state="refused", detail=reason)
                 return row
-        if live.is_dir() and not live.is_symlink():
-            raise OSError(f"destination {live} is a directory")
-        previous = live.read_bytes() if live.exists() else None
-        row["state"] = "missing" if previous is None else "differs"
-        if previous == wanted and not live.is_symlink() and stat.S_IMODE(live.stat().st_mode) == 0o755:
+        # Inspect destination via lstat (no symlink dereference); reject special files/FIFOs before any read.
+        previous = None
+        dest_kind = "missing"
+        link_target = None
+        try:
+            live_st = os.lstat(live)
+        except FileNotFoundError:
+            live_st = None
+        if live_st is not None:
+            mode = live_st.st_mode
+            if stat.S_ISDIR(mode):
+                raise OSError(f"destination {live} is a directory")
+            if stat.S_ISLNK(mode):
+                dest_kind = "symlink"
+                link_target = os.readlink(live)
+            elif stat.S_ISREG(mode):
+                dest_kind = "regular"
+                read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                rfd = os.open(str(live), read_flags)
+                try:
+                    fst = os.fstat(rfd)
+                    if not stat.S_ISREG(fst.st_mode):
+                        raise OSError(f"destination {live} changed to a non-regular file")
+                    with os.fdopen(rfd, "rb") as rf:
+                        rfd = -1
+                        previous = rf.read()
+                finally:
+                    if rfd >= 0:
+                        os.close(rfd)
+            else:
+                raise OSError(
+                    f"destination {live} is a special file (mode {oct(stat.S_IFMT(mode))}); refusing to read or replace"
+                )
+
+        if dest_kind == "missing":
+            row["state"] = "missing"
+        elif dest_kind == "regular" and previous == wanted and stat.S_IMODE(live_st.st_mode) == 0o755:
             row["state"] = "ok"
             return row
+        else:
+            row["state"] = "differs"
+            if dest_kind == "symlink":
+                row["symlink_target"] = link_target
         if not can_install:
             return row
         row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
         if check:
             return row
         live.parent.mkdir(parents=True, exist_ok=True)
-        if previous is not None:
+        if dest_kind == "regular" and previous is not None:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             backup = live.with_name(live.name + ".bak-" + stamp)
+            bak_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             for n in range(100):
                 candidate = backup if n == 0 else backup.with_name(backup.name + f".{n}")
+                bak_fd = -1
                 try:
-                    with candidate.open("xb") as f:
+                    # Create regular-file backup with 0600 permissions BEFORE writing any bytes.
+                    bak_fd = os.open(str(candidate), bak_flags, 0o600)
+                    os.fchmod(bak_fd, 0o600)
+                    with os.fdopen(bak_fd, "wb") as f:
+                        bak_fd = -1
                         f.write(previous)
-                    candidate.chmod(stat.S_IMODE(live.stat().st_mode))
+                        f.flush()
+                        os.fsync(f.fileno())
                     row["backup"] = str(candidate)
                     break
                 except FileExistsError:
                     continue
+                finally:
+                    if bak_fd >= 0:
+                        os.close(bak_fd)
             else:
                 raise OSError("no free backup name")
+        elif dest_kind == "symlink":
+            # Never dereference or duplicate a symlink target's bytes into a backup; record link metadata only.
+            row["replaced_symlink"] = link_target
         fd, tmp = tempfile.mkstemp(prefix=live.name + ".", dir=live.parent)
         with os.fdopen(fd, "wb") as f:
             f.write(wanted)

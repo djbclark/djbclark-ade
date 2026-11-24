@@ -2101,7 +2101,7 @@ def test_libexec_copy_apply_installs_standalone_copy_with_backup_and_is_silent(e
     if old is not None:
         live.parent.mkdir(parents=True)
         live.write_text(old)
-        live.chmod(0o755)
+        live.chmod(0o700)
     r = env.run("--json")
     assert r.returncode == 0, r.stdout + r.stderr
     row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
@@ -2111,6 +2111,9 @@ def test_libexec_copy_apply_installs_standalone_copy_with_backup_and_is_silent(e
     assert stat.S_IMODE(live.stat().st_mode) == 0o755
     backups = list(live.parent.glob("mcp-lazy.bak-*"))
     assert len(backups) == int(old is not None)
+    if old is not None:
+        assert backups[0].read_text() == old
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
     # Second run is silent and idempotent.
     for flags in (("--check",), ()):
         r2 = env.run(*flags)
@@ -2118,19 +2121,45 @@ def test_libexec_copy_apply_installs_standalone_copy_with_backup_and_is_silent(e
         assert "libexec copy" not in r2.stdout
 
 
-def test_libexec_copy_replaces_symlink_with_standalone_file(env):
+@pytest.mark.parametrize("dangling", [False, True])
+def test_libexec_copy_replaces_symlink_without_dereferencing_target(env, dangling):
     env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
     sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
     live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
     live.parent.mkdir(parents=True)
-    live.symlink_to(env.machine / "bin" / "mcp-lazy")
-    assert env.run("--check").returncode == 10
+    target = env.tmp / "symlink-target-secret"
+    if not dangling:
+        target.write_text("target secret bytes\n")
+        target.chmod(0o600)
+    live.symlink_to(target)
+    r_check = env.run("--check", "--json")
+    assert r_check.returncode == 10
+    assert json.loads(r_check.stdout)["libexec_copies"]["mcp-lazy"]["symlink_target"] == str(target)
     assert live.is_symlink()
     r = env.run("--json")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]["state"] == "installed"
+    row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+    assert row["state"] == "installed"
+    assert row["replaced_symlink"] == str(target)
     assert not live.is_symlink() and live.read_text() == VALID_MCP_LAZY
     assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    # Never duplicate symlink target bytes into a backup file.
+    assert list(live.parent.glob("mcp-lazy.bak-*")) == []
+    if not dangling:
+        assert target.read_text() == "target secret bytes\n"
+
+
+def test_libexec_copy_fifo_destination_rejected_without_hanging(env):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    live.parent.mkdir(parents=True)
+    os.mkfifo(live, 0o600)
+    for flags in (("--check", "--json"), ("--json",)):
+        r = env.run(*flags)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "special file" in json.loads(r.stdout)["error"]
+    assert stat.S_ISFIFO(os.lstat(live).st_mode)
 
 
 def test_libexec_copy_noncanonical_repo_is_report_only(env):
