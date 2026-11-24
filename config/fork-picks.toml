@@ -192,6 +192,141 @@ order = 56
 notes = "operator-approved 2026-11-24 in /steps via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-agent-id-p2-445d802d; follow-up to feat/command-center-agent-id-search @ 7c670ad4c, upstream discussion comment https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425): (a) include agent.id in matchesAgentHistoryQuery (packages/server/src/server/agent-history-search.ts:17-22) so archived-agent ID lookups return candidates from the host; (b) skip agent-ID target selection when changeRequestHit is true (packages/app/src/command-center/workspace-search.ts:218) so numeric PR-number searches keep normal workspace-level behavior"
 
 [[pick]]
+id = "paseo-defer-mermaid-runtime"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10494
+expected_head = "dffd7c027e9682f202a60431abb3059f61c6c1ba"
+intent = "defer loading the web Mermaid runtime until a diagram mounts (-3.58 MB startup JS)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10494"
+order = 60
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-defer-web-terminal"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10497
+expected_head = "11b18c933384cd9de877d2b50ea115cb85bbc845"
+intent = "defer the web terminal renderer until it is needed (-1.0 MB startup JS)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10497"
+order = 61
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-batch-unistyles-web"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10605
+expected_head = "a36ff010f7006e6b6614bb1a7cbeb8818cb59791"
+intent = "batch Unistyles web stylesheet writes (358->32 writes)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10605"
+order = 62
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-release-inactive-decks"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10234
+expected_head = "41e508201c950e80c58151e674a622b9776cd8db"
+intent = "release inactive workspace decks and bound renderer memory"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10234"
+order = 63
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-cached-chat-timeline-sync"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10653
+expected_head = "7292790d1aed659feb9361db697fa0133ad2ddbe"
+intent = "fix timeline sync when reopening a cached chat"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10653"
+order = 64
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-ws-permessage-deflate"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10622
+expected_head = "35217464544d2cb439d3ffc9ed3ef4f977f35b91"
+intent = "enable permessage-deflate on direct /ws server"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10622"
+trial_required = true
+order = 65
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-ws-chunked-transfers"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10651
+expected_head = "27ad48212974a32bbc7b97740204b24b7ac8fe61"
+intent = "keep slow direct connections alive during large transfers (512 KiB WS chunking)"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10651"
+trial_required = true
+order = 66
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-defer-archived-snapshots"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10664
+expected_head = "d9f2b4b115376b3dea9069b513783f995291ee04"
+intent = "defer stored agent snapshots until an archive page needs them"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10664"
+trial_required = true
+order = 67
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps session.ts, paseo-tools.ts, and queued agent-history-search.ts P2 fix; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-slow-plugin-rpc-names"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10074
+expected_head = "9a7da2c166587a705b66a87bc5f2cdb9b33bafb2"
+intent = "name the plugin and method on slow and timed-out plugin RPCs"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10074"
+trial_required = true
+order = 68
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-android-idle-repaints"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 7556
+expected_head = "cdf9ae43305d40063e18f5d0e6a64b484671c99b"
+intent = "cut idle repaints and streaming parse cost on Android"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/7556"
+trial_required = true
+order = 69
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); Android/app secondary pick; skipped #7629 relay compression and #7624 cached plugin catalog per djbclark; pinned to head seen 2026-11-24"
+
+[[pick]]
 id = "paseo-bump-wrangler-sharp-0-35"
 component = "paseo"
 repo = "frdminc/paseo"
