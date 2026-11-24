@@ -43,19 +43,18 @@ churn can no longer break skill loading):
   `SKILL_EVERYWHERE_CHROME` overrides it — resolves after public, private and site, so a
   same-named ADE skill wins over a chrome-use one.
 
-**Site-root transition reconciliation & provenance ledger (2026-11-24).** Link runs record the
-managed site/private skills roots they install from in `${XDG_STATE_HOME:-~/.local/state}/skill-everywhere/managed-roots.txt`
-(`--check` and `--dry-run` never write it; before any ledger exists on a first-ever transition to
-`tendcf`, the two canonical legacy default roots `~/ops/site-{private,public-djbclark}/skills`
-count as prior managed roots). Switching active roots between recorded managed roots reconciles
-only provably managed entries: same-name skills pointing to a previously managed root are
-classified as `migrating from ...` (`--check --all` exits 1) and atomically relinked to the active
-root in link mode (and Grok Bot copies are re-rendered); old-root-only links and Grok Bot managed
-copies (verified by a regular non-symlink `.skill-everywhere` marker naming a previously managed
-site/private repo) are flagged by `--check --all` and removed by `--all`. Manually installed
-symlinks — even ones pointing into another syntactically valid inactive site layout that
-`skill-everywhere` never managed — and foreign directories are always left untouched. Shared
-path/slug helpers live in `bin/ade_ops_paths.py` (CLI verbs:
+**Site-root transition reconciliation & per-entry provenance ledger (2026-11-24).** Link runs
+record each individual site/private symlink (`link\t<dest>\t<target>`) and Grok Bot copy
+(`copy\t<dest>\t<source>`) that `skill-everywhere` itself installs in
+`${XDG_STATE_HOME:-~/.local/state}/skill-everywhere/managed-links.tsv` (`--check` and `--dry-run`
+never write it, and ADE-only runs never claim ownership of site links). Switching active roots
+reconciles only entries whose exact `(dest, target)` or `(dest, source)` matches a recorded
+ledger entry: same-name managed links are classified as `migrating from ...` (`--check --all`
+exits 1) and atomically relinked to the active root in link mode (and Grok Bot copies are
+re-rendered); old-root-only managed links and Grok Bot copies are flagged by `--check --all` and
+removed by `--all`. Manually installed symlinks — even ones pointing into a previously selected
+site root or another syntactically valid inactive site layout — and foreign directories are
+always left untouched. Shared path/slug helpers live in `bin/ade_ops_paths.py` (CLI verbs:
 `python3 bin/ade_ops_paths.py {skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store}`).
 
 Editing the git copy updates every agent. Never copy: a

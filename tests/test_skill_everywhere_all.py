@@ -986,3 +986,59 @@ def test_manually_installed_link_to_inactive_valid_site_layout_is_preserved(cata
     assert "migrating from" not in r_collide.stdout
     assert (links / "active-site-skill").readlink() == manual_collide_src
 
+
+def test_named_ade_run_and_manual_links_under_previously_selected_root_are_preserved(catalog, tmp_path):
+    """Round 4 MEDIUM #2: per-link provenance prevents ADE-only runs or root selection from claiming manual links."""
+    home, public, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+
+    skill(public, "ade-only")
+    lpriv = home / "ops" / "site-private" / "skills"
+    lpriv.mkdir(parents=True)
+    manual_before_src = skill(lpriv, "manual-before-switch")
+    manual_collide_src = skill(lpriv, "shared-manual")
+    managed_legacy_src = skill(lpriv, "managed-legacy")
+
+    tpriv = home / "tendcf-ops" / "tendcf-private-acme" / "skills"
+    tpriv.mkdir(parents=True)
+    skill(tpriv, "shared-manual")
+    tpriv_only = skill(tpriv, "acme-only")
+
+    links = home / ".agents" / "skills"
+    # Pre-existing manual links under legacy site-private root BEFORE any site install.
+    (links / "manual-before-switch").symlink_to(manual_before_src)
+    (links / "shared-manual").symlink_to(manual_collide_src)
+
+    # 1. Named ADE-only run MUST NOT claim ownership of legacy site roots or manual links under them.
+    r_ade = run(catalog, "ade-only")
+    assert r_ade.returncode == 0, r_ade.stdout + r_ade.stderr
+
+    # 2. Named install of ONE legacy site skill records ONLY that skill (not manual siblings under the same root).
+    r_one = run(catalog, "managed-legacy")
+    assert r_one.returncode == 0, r_one.stdout + r_one.stderr
+    assert (links / "managed-legacy").readlink() == managed_legacy_src
+
+    # 3. Switch to acme:
+    #    - `managed-legacy` (in ledger) IS flagged/removed;
+    #    - `manual-before-switch` (under same legacy root, NOT in ledger) IS preserved silently;
+    #    - `shared-manual` (same name as acme skill, NOT in ledger) stays `other link -> ...`, left alone!
+    active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
+    active_cfg.parent.mkdir(parents=True)
+    active_cfg.write_text("acme\n", encoding="utf-8")
+
+    r_switch = run(catalog, "--all")
+    assert r_switch.returncode == 1  # only because `shared-manual` is a foreign manual link collision
+    assert "other link ->" in r_switch.stdout
+    assert "migrating from" not in r_switch.stdout
+    assert not os.path.lexists(links / "managed-legacy")
+    assert (links / "acme-only").readlink() == tpriv_only.resolve()
+    assert (links / "manual-before-switch").readlink() == manual_before_src
+    assert (links / "shared-manual").readlink() == manual_collide_src
+

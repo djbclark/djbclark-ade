@@ -154,93 +154,95 @@ _is_valid_site_skills_root() {
   return 1
 }
 
-# Managed site-root provenance ledger (Finding 2, 2026-11-24): only roots `skill-everywhere` itself
-# previously installed from (or the canonical legacy default ~/ops/site-{private,public-djbclark}/skills
-# roots on a first-ever transition to a tendcf site pair before any ledger exists) are eligible for
-# automatic migration or stale-link/copy cleanup. Manually installed symlinks to arbitrary inactive
-# site layouts are never replaced or removed.
+# Managed per-entry provenance ledger (Round 4 MEDIUM #2, 2026-11-24): tracks exact individual
+# site/private skill links (`link\t<dest>\t<target>`) and Grok Bot copies (`copy\t<dest>\t<source>`)
+# actually installed by `skill-everywhere` itself. Never written in `--check` or `--dry-run`, and
+# never populated by ADE-only or unrelated runs, so manually installed symlinks — even under a
+# previously selected site root or another valid inactive site — are never replaced or deleted.
 _state_base="$HOME/.local/state"
 if [[ -n ${XDG_STATE_HOME:-} && ${XDG_STATE_HOME} == /* ]]; then
   _state_base="$XDG_STATE_HOME"
 fi
-managed_roots_file="${SKILL_EVERYWHERE_STATE_FILE:-$_state_base/skill-everywhere/managed-roots.txt}"
-prior_managed_roots=()
-_add_prior_root() {
-  local r=$1 x
-  [[ -n $r ]] || return 0
-  _is_valid_site_skills_root "$r" || return 0
-  for x in "${prior_managed_roots[@]:-}"; do
-    [[ $x == "$r" ]] && return 0
-  done
-  prior_managed_roots+=("$r")
-}
-if [[ -f $managed_roots_file && ! -L $managed_roots_file ]]; then
-  while IFS= read -r _mr_line; do
-    _add_prior_root "$_mr_line"
-  done <"$managed_roots_file"
-elif [[ $priv_root == */tendcf-private-*/skills || $site_root == */tendcf-public-*/skills ]]; then
-  # Pre-ledger Mac transitioning from legacy ~/ops to ~/tendcf-ops for the first time.
-  _add_prior_root "$HOME/ops/site-private/skills"
-  _add_prior_root "$HOME/ops/site-public-djbclark/skills"
+managed_links_file="${SKILL_EVERYWHERE_STATE_FILE:-$_state_base/skill-everywhere/managed-links.tsv}"
+managed_entries=()
+ledger_dirty=0
+if [[ -f $managed_links_file && ! -L $managed_links_file ]]; then
+  while IFS=$'\t' read -r _mk _md _mt; do
+    [[ -n $_mk && -n $_md && -n $_mt ]] || continue
+    [[ $_mk == link || $_mk == copy ]] || continue
+    managed_entries+=("${_mk}"$'\t'"${_md}"$'\t'"${_mt}")
+  done <"$managed_links_file"
 fi
 
-_is_managed_site_skill_path() {
-  local tgt=$1 sname=$2 root rroot
-  [[ -n $tgt && $tgt != */../* && $tgt != */.. && $tgt == */skills/"$sname" ]] || return 1
-  for root in "${prior_managed_roots[@]:-}"; do
-    [[ -n $root ]] || continue
-    for rroot in "$root" "$(grealpath -- "$root" 2>/dev/null || true)"; do
-      [[ -n $rroot ]] || continue
-      if [[ $tgt == "$rroot/$sname" ]]; then
-        return 0
-      fi
-    done
+_is_site_or_priv_src() {
+  local s=$1
+  [[ $s == "$priv_root"/* || $s == "$site_root"/* ]]
+}
+_ledger_has_link() {
+  local want_dest=$1 want_tgt=$2 entry kind d t rt wt
+  wt="$(grealpath -- "$want_tgt" 2>/dev/null || true)"
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == link && $d == "$want_dest" ]] || continue
+    if [[ $t == "$want_tgt" ]]; then return 0; fi
+    if [[ -n $wt ]]; then
+      rt="$(grealpath -- "$t" 2>/dev/null || true)"
+      [[ -n $rt && $rt == "$wt" ]] && return 0
+    fi
   done
   return 1
 }
-_root_to_grokbot_repo() {
-  local root=$1 repo_dir rname
-  repo_dir="${root%/skills}"
-  rname="${repo_dir##*/}"
-  case $rname in
-    tendcf-private-*|tendcf-public-*) printf '%s' "$rname" ;;
-    site-private|site-private-*) printf '%s' "site-private" ;;
-    site-public-*|site-djbclark) printf '%s' "site-djbclark" ;;
-    *) return 1 ;;
-  esac
-}
-_is_managed_site_grokbot_source() {
-  local line=$1 sname=$2 rest repo root expected
-  [[ $line == "source="* ]] || return 1
-  rest="${line#source=}"
-  [[ $rest == */skills/"$sname" ]] || return 1
-  repo="${rest%"/skills/$sname"}"
-  [[ $repo != */* ]] || return 1
-  for root in "${prior_managed_roots[@]:-}"; do
-    [[ -n $root ]] || continue
-    expected="$(_root_to_grokbot_repo "$root" 2>/dev/null || true)"
-    [[ -n $expected && $repo == "$expected" ]] && return 0
+_ledger_has_copy() {
+  local want_dest=$1 want_src=$2 entry kind d t
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == copy && $d == "$want_dest" && $t == "$want_src" ]] && return 0
   done
   return 1
 }
-_record_managed_roots() {
-  [[ $mode == link && $dry == 0 && $paseo_only == 0 ]] || return 0
-  [[ ! -L $managed_roots_file ]] || return 0
-  local dir tmp r merged=() x
-  for r in "${prior_managed_roots[@]:-}" "$priv_root" "$site_root"; do
-    [[ -n $r ]] || continue
-    _is_valid_site_skills_root "$r" || continue
-    local seen=0
-    for x in "${merged[@]:-}"; do
-      [[ $x == "$r" ]] && { seen=1; break; }
-    done
-    ((seen)) || merged+=("$r")
+_ledger_set_entry() {
+  local new_kind=$1 new_dest=$2 new_tgt=$3 entry kind d t next=()
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == "$new_kind" && $d == "$new_dest" ]] && continue
+    next+=("$entry")
   done
-  ((${#merged[@]})) || return 0
-  dir="$(dirname "$managed_roots_file")"
+  next+=("${new_kind}"$'\t'"${new_dest}"$'\t'"${new_tgt}")
+  managed_entries=("${next[@]}")
+  ledger_dirty=1
+}
+_ledger_del_entry() {
+  local del_kind=$1 del_dest=$2 entry kind d t next=() removed=0
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    if [[ $kind == "$del_kind" && $d == "$del_dest" ]]; then
+      removed=1
+      continue
+    fi
+    next+=("$entry")
+  done
+  if ((removed)); then
+    managed_entries=("${next[@]:-}")
+    ledger_dirty=1
+  fi
+}
+_save_ledger() {
+  ((ledger_dirty)) || return 0
+  [[ $dry == 0 ]] || return 0
+  [[ ! -L $managed_links_file ]] || return 0
+  local dir tmp entry
+  dir="$(dirname "$managed_links_file")"
   mkdir -p "$dir" 2>/dev/null || return 0
-  tmp="$dir/.managed-roots.tmp.$$"
-  printf '%s\n' "${merged[@]}" >"$tmp" && mv -f "$tmp" "$managed_roots_file" || rm -f "$tmp"
+  tmp="$dir/.managed-links.tmp.$$"
+  : >"$tmp"
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] && printf '%s\n' "$entry" >>"$tmp"
+  done
+  mv -f "$tmp" "$managed_links_file" || rm -f "$tmp"
 }
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
@@ -429,7 +431,10 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
       if ((all)) && [[ $state != copied ]]; then rc=1; fi ;;
     remove)
       if [[ $state == missing || $state == real* ]]; then printf '  %-13s %s (left alone)\n' "$bin" "$state"
-      else act "remove $dest" rm -rf "$dest"; ((dry)) || printf '  %-13s removed %s\n' "$bin" "$dest"; fi ;;
+      else
+        act "remove $dest" rm -rf "$dest"
+        ((dry)) || { _ledger_del_entry copy "$dest"; printf '  %-13s removed %s\n' "$bin" "$dest"; }
+      fi ;;
     link)
       if [[ $state == copied ]]; then printf '  %-13s already copied\n' "$bin"
       elif [[ $state == missing || $state == "stale copy" ]]; then
@@ -446,7 +451,16 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
           mv "$d/.ade-$n.new" "$dest"
         }
         if act "copy to $dest ($state)" _copy_swap "$dir" "$name" "$src" "$dest"; then
-          ((dry)) || printf '  %-13s copied (was %s)\n' "$bin" "$state"
+          if ((!dry)); then
+            if _is_site_or_priv_src "$src" && [[ -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
+              local _csrc
+              _csrc="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
+              [[ $_csrc == source=* ]] && _ledger_set_entry copy "$dest" "${_csrc#source=}"
+            else
+              _ledger_del_entry copy "$dest"
+            fi
+            printf '  %-13s copied (was %s)\n' "$bin" "$state"
+          fi
         else
           printf '  %-13s copy failed; left alone\n' "$bin"
           rc=1
@@ -508,7 +522,7 @@ for name in "$@"; do
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
     elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
-    elif [[ -L $link ]] && _is_managed_site_skill_path "$(greadlink "$link")" "$name"; then
+    elif [[ -L $link ]] && _ledger_has_link "$link" "$(greadlink "$link")"; then
       state="migrating from $(greadlink "$link")"
     elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
@@ -522,25 +536,37 @@ for name in "$@"; do
           if ((all)) && [[ $state != linked ]]; then rc=1; fi
         fi ;;
       remove)
-        if [[ $state == linked || $state == migrating\ * ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
+        if [[ $state == linked || $state == migrating\ * ]]; then
+          act "remove $link" rm "$link"
+          ((dry)) || { _ledger_del_entry link "$link"; printf '  %-13s removed\n' "$bin"; }
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         if [[ $state == missing ]]; then
-          act "link $link" eval 'mkdir -p "$dir" && ln -s "$src" "$link"'; ((dry)) || printf '  %-13s linked\n' "$bin"
+          act "link $link" eval 'mkdir -p "$dir" && ln -s "$src" "$link"'
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s linked\n' "$bin"
+          fi
         elif [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"
         elif [[ $state == chained\ * ]]; then
           # ln -sfn (not ln+mv): macOS mv follows a symlink-to-dir
           # destination and moves the temp link INSIDE the target dir
           # instead of replacing the link.
           act "relink $link direct" ln -sfn "$src" "$link"
-          ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
+          fi
         elif [[ $state == dangling\ * || $state == migrating\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
           # a TUI's skills dir still pointed at the pre-2026-10-09 site-private
-          # path), and a link to another managed site root migrates cleanly on
-          # root transitions (2026-11-24, queue #123).
+          # path), and a link recorded in our per-entry provenance ledger migrates
+          # cleanly on root transitions (2026-11-24, queue #123).
           act "relink $link" ln -sfn "$src" "$link"
-          ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+          fi
         elif ((third_party)) && [[ $state == "real dir/file (not ours)" ]]; then
           printf '  %-13s %s; left alone (third-party skill: a note, not an error)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
@@ -716,14 +742,15 @@ stale_site_step() {
         sname="${dest##*/ade-}"
         [[ " ${names[*]:-} " == *" $sname "* ]] && continue
         src_line="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
-        _is_managed_site_grokbot_source "$src_line" "$sname" || continue
+        [[ $src_line == source=* ]] || continue
+        _ledger_has_copy "$dest" "${src_line#source=}" || continue
         if [[ $mode == check ]]; then
           printf 'warning: stale site skill copy still present: %s (run skill-everywhere --all to remove)\n' "$dest" >&2
           rc=1
         else
           _stale_site_header
           act "remove stale site $dest" rm -rf -- "$dest"
-          ((dry)) || printf '  %-13s removed stale site %s\n' "$bin" "$dest"
+          ((dry)) || { _ledger_del_entry copy "$dest"; printf '  %-13s removed stale site %s\n' "$bin" "$dest"; }
         fi
       done
       continue
@@ -743,20 +770,20 @@ stale_site_step() {
          || $tgt == "$site_root/$sname" || $tgt == "$chrome_root/$sname" ]]; then
         continue
       fi
-      _is_managed_site_skill_path "$tgt" "$sname" || continue
+      _ledger_has_link "$l" "$tgt" || continue
       if [[ $mode == check ]]; then
         printf 'warning: stale site skill link still present: %s -> %s (run skill-everywhere --all to remove)\n' "$l" "$tgt" >&2
         rc=1
       else
         _stale_site_header
         act "remove stale site $l" rm -- "$l"
-        ((dry)) || printf '  %-13s removed stale site %s\n' "$bin" "$l"
+        ((dry)) || { _ledger_del_entry link "$l"; printf '  %-13s removed stale site %s\n' "$bin" "$l"; }
       fi
     done
   done <<<"$targets"
 }
 stale_site_step
-_record_managed_roots
+_save_ledger
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

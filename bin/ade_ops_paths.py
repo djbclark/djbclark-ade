@@ -472,17 +472,21 @@ def find_bgrun(
     return None
 
 
-def real_account_home() -> Path:
-    """Return the OS account home directory from the passwd database (immune to `$HOME` spoofing)."""
+def real_account_home() -> Path | None:
+    """Return the OS account home directory from the passwd database (immune to `$HOME` spoofing).
+
+    Fails closed (returns None) if `pwd.getpwuid` fails or yields an invalid/non-absolute path.
+    """
     try:
         pw_dir = pwd.getpwuid(os.getuid()).pw_dir
-        if pw_dir and "\x00" not in pw_dir:
-            candidate = Path(pw_dir)
-            if candidate.is_absolute():
-                return candidate
     except (KeyError, OSError, AttributeError):
-        pass
-    return Path.home()
+        return None
+    if not isinstance(pw_dir, str) or not pw_dir or "\x00" in pw_dir:
+        return None
+    candidate = Path(pw_dir)
+    if not candidate.is_absolute():
+        return None
+    return candidate
 
 
 def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
@@ -490,7 +494,8 @@ def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
 
     Strictly ignores caller environment overrides (`HOME`, `OPS_ROOT`, `TENDCF_OPS_ROOT`, `TENDCF_SITE`,
     `XDG_CONFIG_HOME`) so a caller cannot redirect approval checks into an arbitrary checkout.
-    Unit tests may pass an explicit `home=` path.
+    Fails closed (returns `[]`) if `home` is not provided and `real_account_home()` cannot resolve
+    the OS account home. Unit tests may pass an explicit `home=` path.
     Resolution order under `h = real_account_home() if home is None else home`:
       1. `h/.local/bin/bgrun`
       2. `h/tendcf-ops/tendcf-{public,private}-<slug>/bin/bgrun` only when `h/.config/tendcf/active-site`
@@ -498,6 +503,8 @@ def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
       3. legacy `h/ops/site-{private-djbclark,private,public-djbclark,djbclark}/bin/bgrun`
     """
     h = real_account_home() if home is None else home
+    if h is None:
+        return []
     empty_env: dict[str, str] = {}
     candidates: list[Path] = [h / ".local" / "bin" / "bgrun"]
 

@@ -300,6 +300,30 @@ def test_real_account_home_and_trusted_bgrun_immune_to_spoofed_home_env(tmp_path
     assert found is None or not str(found).startswith(str(evil_home))
 
 
+def test_real_account_home_fails_closed_when_passwd_lookup_fails_or_invalid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 4 HIGH #1(b): failed or invalid pwd.getpwuid MUST return None / no ticket authority (never Path.home())."""
+    import pwd
+    from types import SimpleNamespace
+
+    fake_home = tmp_path / "fallback-home"
+    _mk_exec(fake_home / ".local" / "bin" / "bgrun")
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    def raise_key_error(_uid: int):
+        raise KeyError("no such uid")
+
+    monkeypatch.setattr(pwd, "getpwuid", raise_key_error)
+    assert ops.real_account_home() is None
+    assert ops.trusted_bgrun_paths() == []
+    assert ops.find_trusted_bgrun() is None
+
+    for bad_dir in ("", "relative/home", "/bad\x00home"):
+        monkeypatch.setattr(pwd, "getpwuid", lambda _uid, d=bad_dir: SimpleNamespace(pw_dir=d))
+        assert ops.real_account_home() is None
+        assert ops.trusted_bgrun_paths() == []
+        assert ops.find_trusted_bgrun() is None
+
+
 # --- bgrun dual-read discovery & path validation ------------------------------------------
 
 def _mk_exec(path: Path) -> Path:

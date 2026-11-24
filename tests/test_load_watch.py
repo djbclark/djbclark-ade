@@ -588,6 +588,41 @@ def test_spoofed_home_env_cannot_redirect_touch_id_ticket_authority(tmp_path, mo
     assert not evil_tendcf_calls.exists()
 
 
+def test_live_bgrun_ticket_pins_verifier_home_to_account_home_and_fails_closed(tmp_path, monkeypatch):
+    """Round 4 HIGH #1(a,b): verifier receives HOME=ACCOUNT_HOME (not caller HOME), and fails closed if ACCOUNT_HOME is None."""
+    spoofed_home = tmp_path / "spoofed-home"
+    acct_home = tmp_path / "real-account-home"
+    spoofed_home.mkdir()
+    captured_home = tmp_path / "captured-home.txt"
+    verifier = acct_home / ".local" / "bin" / "bgrun"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s" "$HOME" > "{captured_home}"\n'
+        'printf "1234abcd until 2099-01-01 00:00 EST\\n"\n'
+        "exit 0\n"
+    )
+    verifier.chmod(0o755)
+
+    monkeypatch.setenv("HOME", str(spoofed_home))
+    lw = load_module()
+    monkeypatch.setattr(lw, "HOME", spoofed_home)
+    monkeypatch.setattr(lw, "ACCOUNT_HOME", acct_home)
+    resolved = lw.resolve_bgrun_bin(acct_home)
+    monkeypatch.setattr(lw, "BGRUN_BIN", resolved)
+    monkeypatch.setattr(lw, "_DEFAULT_BGRUN_BIN", resolved)
+
+    ticket = lw.live_bgrun_ticket("/some/repo")
+    assert ticket is not None and ticket[0] == "1234abcd"
+    assert captured_home.read_text() == str(acct_home)
+    assert captured_home.read_text() != str(spoofed_home)
+
+    # When passwd lookup fails (ACCOUNT_HOME is None), fail closed with no ticket authority.
+    monkeypatch.setattr(lw, "ACCOUNT_HOME", None)
+    assert lw.resolve_bgrun_bin() is None
+    assert lw.live_bgrun_ticket("/some/repo") is None
+
+
 def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_path, monkeypatch, capsys):
     """Queue #123 / Finding 1: Touch ID ticket authority reads ONLY trusted OS account home paths and ignores caller env overrides."""
     repo = _repo(tmp_path)
