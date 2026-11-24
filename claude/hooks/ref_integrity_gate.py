@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""Stop: check that the last line of the final post, when it is a `Ref:` line, was really issued.
+"""Stop / SessionStart / UserPromptSubmit: enforce script-issued `Ref:` lines and auto-mint on block.
 
 2026-11-21: a session ended several posts with "Ref: youtube-tv-proxy 82118f5", a git short hash
 typed by hand, and nothing noticed. A Ref is a unique, script-issued id for one operator-facing
 post (docs/ref-labels.md Part B): `ref <BOT>` prints `Ref: <BOT>-<base36>` and logs it in
 ~/.local/state/djbclark-ade/refs/issued.log (REFS_DIR overrides). This hook is the check.
 
+2026-11-24 (Rule 11 harness fix for session 90acbb75):
+  - Missing `Ref:` on a 200+ char final post now blocks once (same loop guards as invalid Ref)
+    instead of emitting a non-blocking systemMessage that neither logged telemetry nor gave a Ref.
+  - On any block (missing Ref or invalid Ref), the hook infers `<BOT>` (`ADE_REF_BOT` / `REF_BOT`,
+    else `CLAUDE` for Claude Code), runs `bin/ref <BOT>` directly, and hands the freshly minted
+    `Ref: <BOT>-<id>` line directly in the block reason so the model needs no extra Bash round
+    (graceful fallback to naming `ref <BOT>` explicitly if `bin/ref` is unavailable or fails).
+  - Every Stop decision (including the no-Ref branch and allowed-stop-hook-active /
+    allowed-already-blocked) is logged to decisions.log with `session_id`, `reason`, `minted_ref`,
+    `post_len`, and `stop_hook_active`, and writes the per-session `.blocked` marker.
+  - On `SessionStart` (fires on startup, resume, clear, compact, fork) and `UserPromptSubmit`
+    (once per compaction epoch), emits a crisp one-line `additionalContext` reminder so
+    auto-compaction cannot drop the Ref rule.
+
 When the last non-blank line of the final assistant message starts with `Ref:` it must:
   (a) have the form `Ref: <BOT>-<base36>` (BOT has no spaces or hyphens);
   (b) name an id that is in issued.log;
   (c) carry the bot prefix the log recorded for that id;
   (d) not have been used by an earlier post of the same transcript.
-Any failure returns {"decision": "block", "reason": ...} telling the model to run `ref <BOT>` and
-send the post again with the line replaced. No `Ref:` line: only a non-blocking `systemMessage`
-note, and none at all for a short post (under 200 characters, the progress-note exemption of
-Part B item 1).
+Any failure, or a 200+ char post with no `Ref:` last line, returns {"decision": "block", "reason": ...}
+with a freshly minted `Ref: <BOT>-<id>` line ready to paste. Short progress notes under 200 chars
+without a `Ref:` line are exempt (docs/ref-labels.md Part B item 1).
 
 Never loops: nothing is blocked when `stop_hook_active` is set, and a message (by hash) is blocked
 at most once per session. Sub-agents (`agent_id` in the payload) are skipped: their final message
@@ -26,8 +39,9 @@ blocks. REF_GATE_OFF=1 disables it. The log is read as `ref lookup`
 reason never repeats text from the post, so a Ref line cannot smuggle an instruction into it.
 tests/test_ref_integrity_gate.py keeps the two in step.
 
-Environment: REFS_DIR (issued.log directory), REF_GATE_STATE_DIR (once-per-message state and the
-decisions log, default ~/.local/state/ade/ref-gate).
+Environment: REFS_DIR (issued.log directory), REF_GATE_STATE_DIR (once-per-message state, reminder
+epoch state and decisions.log, default ~/.local/state/ade/ref-gate), ADE_REF_BOT / REF_BOT (bot
+prefix override, default CLAUDE), REF_GATE_REF_BIN (override path to bin/ref).
 """
 
 from __future__ import annotations
@@ -38,7 +52,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
+import subprocess
 import sys
 import time
 
@@ -48,7 +64,10 @@ REF_LINE = re.compile(r"^Ref:")
 # Ref line can carry text from untrusted content, and the reason reads like a harness order).
 REF_FORM = re.compile(r"^Ref: ([A-Z0-9_]{1,32})-([0-9a-z]{1,13})$")
 SAFE_BOT = re.compile(r"[A-Z0-9_]{1,32}")
+COMPACT_BOUNDARY = re.compile(rb'"subtype":\s*"compact_boundary"')
+DEFAULT_BOT = "CLAUDE"
 LOCK_WAIT = 1.0  # seconds to wait for a writer holding the log before reading anyway
+REF_MINT_TIMEOUT = 3.0  # seconds to wait for `bin/ref <BOT>` before falling back
 SHORT_POST = 200  # docs/ref-labels.md Part B item 1: a progress note under 200 chars is exempt
 TRANSCRIPT_TAIL = 64 * 1024 * 1024
 STATE_MAX_AGE = 14 * 86400
@@ -62,6 +81,100 @@ def state_dir() -> str:
     d = os.environ.get("REF_GATE_STATE_DIR") or os.path.expanduser("~/.local/state/ade/ref-gate")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def normalize_bot(name: str) -> str:
+    return name.upper().replace(" ", "").replace("-", "")
+
+
+def infer_bot() -> str:
+    """Infer the Ref bot prefix for this Claude Code session.
+
+    Honors ADE_REF_BOT (or REF_BOT) when it normalizes to a valid SAFE_BOT (excluding reserved
+    LOOKUP); defaults to CLAUDE for Claude Code sessions (docs/ref-labels.md Prefixes).
+    """
+    for key in ("ADE_REF_BOT", "REF_BOT"):
+        raw = os.environ.get(key)
+        if raw and raw.strip():
+            bot = normalize_bot(raw.strip())
+            if bot != "LOOKUP" and SAFE_BOT.fullmatch(bot):
+                return bot
+    return DEFAULT_BOT
+
+
+def find_ref_bin() -> str | None:
+    """Locate `bin/ref` without relying on PATH mutation."""
+    if "REF_GATE_REF_BIN" in os.environ:
+        override = os.environ["REF_GATE_REF_BIN"].strip()
+        return override if override and os.path.isfile(override) else None
+    repo_ref = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))),
+        "bin",
+        "ref",
+    )
+    if os.path.isfile(repo_ref):
+        return repo_ref
+    local_ref = os.path.expanduser("~/.local/bin/ref")
+    if os.path.isfile(local_ref):
+        return local_ref
+    return shutil.which("ref")
+
+
+def _ref_argv(ref_bin: str, bot: str) -> list[str]:
+    try:
+        with open(ref_bin, "rb") as fh:
+            head = fh.readline(128)
+        if head.startswith(b"#!") and b"python" in head.lower():
+            return [sys.executable, ref_bin, bot]
+    except OSError:
+        pass
+    return [ref_bin, bot]
+
+
+def mint_ref(bot: str, session: str, exclude: str | None = None) -> str | None:
+    """Run `bin/ref <BOT>` to mint a fresh valid `Ref: <BOT>-<id>` line; None on any failure."""
+    if bot == "LOOKUP" or not SAFE_BOT.fullmatch(bot):
+        return None
+    ref_bin = find_ref_bin()
+    if not ref_bin:
+        return None
+    env = dict(os.environ)
+    if not any(
+        env.get(k, "").strip()
+        for k in ("REF_AGENT", "PASEO_AGENT_ID", "AGENT_ID", "CURSOR_CONVERSATION_ID")
+    ):
+        if session and session != "unknown":
+            env["REF_AGENT"] = session
+    argv = _ref_argv(ref_bin, bot)
+    attempts = 2 if exclude else 1
+    for _ in range(attempts):
+        try:
+            res = subprocess.run(
+                argv,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=REF_MINT_TIMEOUT,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if res.returncode != 0:
+            return None
+        minted = res.stdout.strip()
+        form = REF_FORM.match(minted)
+        if not form or form.group(1) != bot:
+            return None
+        if exclude and minted == exclude:
+            continue
+        return minted
+    return None
+
+
+def ref_reminder_text(bot: str) -> str:
+    return (
+        f"End every operator-facing reply of {SHORT_POST}+ chars with a fresh script-issued "
+        f"Ref: line from `ref {bot}`."
+    )
 
 
 def last_line(text: str) -> str:
@@ -119,9 +232,22 @@ def issued_bot(ident: str) -> str:
     return ""
 
 
+def _entry_texts(msg: dict) -> list[str]:
+    content = msg.get("content")
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [
+            b["text"]
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+        ]
+    return []
+
+
 def assistant_texts(path: str) -> list[tuple[str, str]]:
-    """[(message id, text of one block)] for assistant text blocks that contain `Ref:`, oldest
-    first, from the tail of the transcript. Prefiltered on bytes so a big transcript stays fast."""
+    """[(message id, text of one block)] for main-thread assistant text blocks that contain `Ref:`,
+    oldest first, from the tail of the transcript. Prefiltered on bytes so a big transcript stays fast."""
     out: list[tuple[str, str]] = []
     try:
         size = os.path.getsize(path)
@@ -137,24 +263,22 @@ def assistant_texts(path: str) -> list[tuple[str, str]]:
             entry = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
             continue
         msg = entry.get("message")
         if not isinstance(msg, dict):
             continue
-        content = msg.get("content")
-        blocks = [content] if isinstance(content, str) else content if isinstance(content, list) else []
         mid = str(msg.get("id") or entry.get("uuid") or "")
-        for b in blocks:
-            text = b if isinstance(b, str) else b.get("text") if isinstance(b, dict) and b.get("type") == "text" else None
-            if isinstance(text, str):
-                out.append((mid, text))
+        for text in _entry_texts(msg):
+            out.append((mid, text))
     return out
 
 
 def last_transcript_text(path: str) -> str:
-    """Text of the final assistant message in the transcript (fallback when the payload has no
-    `last_assistant_message`); the newest assistant entry only, from the tail; "" when it has no text."""
+    """Text of the final main-thread assistant message in the transcript (fallback when the payload
+    has no `last_assistant_message`). Collects all text blocks sharing the newest assistant
+    `message.id` (Claude Code streams thinking/text/tool_use as separate JSONL records with the
+    same id), skips sidechain records, and returns "" when that newest message has no text."""
     try:
         size = os.path.getsize(path)
         with open(path, "rb") as fh:
@@ -162,24 +286,72 @@ def last_transcript_text(path: str) -> str:
             raw = fh.read()
     except OSError:
         return ""
+    target_mid: str | None = None
+    chunks: list[str] = []
     for line in reversed(raw.split(b"\n")):
         if b'"assistant"' not in line:
+            if target_mid is not None and b'"user"' in line:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and entry.get("type") == "user" and not entry.get("isSidechain"):
+                    break
             continue
         try:
             entry = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        if not isinstance(entry, dict) or entry.get("type") != "assistant" or entry.get("isSidechain"):
             continue
         msg = entry.get("message")
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return "\n".join(b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text"
-                             and isinstance(b.get("text"), str))
-        return ""  # the newest assistant entry carries no text: there is no final post to judge
-    return ""
+        if not isinstance(msg, dict):
+            if target_mid is None:
+                return ""
+            break
+        mid = str(msg.get("id") or "")
+        texts = _entry_texts(msg)
+        if target_mid is None:
+            if not mid:
+                return "\n".join(texts)
+            target_mid = mid
+            if texts:
+                chunks.append("\n".join(texts))
+        else:
+            if mid != target_mid:
+                break
+            if texts:
+                chunks.append("\n".join(texts))
+    return "\n".join(reversed(chunks))
+
+
+def compact_epoch(path: str) -> int:
+    """Number of main-thread compact_boundary records in the transcript tail (0 if none/unreadable)."""
+    if not path:
+        return 0
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            fh.seek(max(0, size - TRANSCRIPT_TAIL))
+            raw = fh.read()
+    except OSError:
+        return 0
+    count = 0
+    for line in raw.split(b"\n"):
+        if not COMPACT_BOUNDARY.search(line):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("type") == "system"
+            and obj.get("subtype") == "compact_boundary"
+            and not obj.get("isSidechain")
+        ):
+            count += 1
+    return count
 
 
 def used_earlier(path: str, ref_line: str, message: str) -> bool:
@@ -215,12 +387,51 @@ def check(message: str, transcript: str) -> str | None:
     return None
 
 
-def log_decision(session: str, outcome: str, line: str, problem: str = "") -> None:
+def log_decision(
+    session: str,
+    outcome: str,
+    line: str,
+    problem: str = "",
+    *,
+    reason: str = "",
+    minted_ref: str | None = None,
+    post_len: int | None = None,
+    stop_hook_active: bool | None = None,
+) -> None:
     try:
-        rec = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "session": session, "outcome": outcome,
-               "line": line[:200], "problem": problem[:300]}
+        rec: dict[str, object] = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session": session,
+            "session_id": session,
+            "outcome": outcome,
+            "line": line[:200],
+            "problem": problem[:300],
+        }
+        if reason:
+            rec["reason"] = reason[:500]
+        if minted_ref:
+            rec["minted_ref"] = minted_ref
+        if post_len is not None:
+            rec["post_len"] = post_len
+        if stop_hook_active is not None:
+            rec["stop_hook_active"] = stop_hook_active
         with open(os.path.join(state_dir(), "decisions.log"), "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def _safe_session_name(session: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", session)[:120]
+
+
+def _prune_state_files(root: str) -> None:
+    cutoff = time.time() - STATE_MAX_AGE
+    try:
+        for name in os.listdir(root):
+            full = os.path.join(root, name)
+            if (name.endswith(".blocked") or name.endswith(".reminded")) and os.path.getmtime(full) < cutoff:
+                os.unlink(full)
     except OSError:
         pass
 
@@ -228,8 +439,7 @@ def log_decision(session: str, outcome: str, line: str, problem: str = "") -> No
 def already_blocked(session: str, digest: str) -> bool:
     """Record that this message was blocked; True when it had been (so it is never blocked twice)."""
     root = state_dir()
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session)[:120]
-    path = os.path.join(root, safe + ".blocked")
+    path = os.path.join(root, _safe_session_name(session) + ".blocked")
     try:
         with open(path, encoding="utf-8") as fh:
             if digest in fh.read().split():
@@ -238,15 +448,163 @@ def already_blocked(session: str, digest: str) -> bool:
         pass
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(digest + "\n")
-    cutoff = time.time() - STATE_MAX_AGE
+    _prune_state_files(root)
+    return False
+
+
+def should_remind_epoch(session: str, epoch: int) -> bool:
+    """True once per (session, compaction epoch), persisting the reminded epoch to disk."""
+    root = state_dir()
+    path = os.path.join(root, _safe_session_name(session) + ".reminded")
+    token = str(epoch)
     try:
-        for name in os.listdir(root):
-            full = os.path.join(root, name)
-            if name.endswith(".blocked") and os.path.getmtime(full) < cutoff:
-                os.unlink(full)
+        with open(path, encoding="utf-8") as fh:
+            if fh.read().strip() == token:
+                return False
     except OSError:
         pass
-    return False
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+    except OSError:
+        pass
+    _prune_state_files(root)
+    return True
+
+
+def _no_ref_block_reason(post_len: int, bot: str, minted: str | None) -> str:
+    prefix = (
+        f"ref-integrity: this post ({post_len} chars) has no `Ref:` last line. "
+        f"Operator-facing posts of {SHORT_POST}+ chars must end with a fresh script-issued Ref "
+        "(docs/ref-labels.md Part B)."
+    )
+    if minted:
+        return f"{prefix} No Bash call is needed; append this exact last line to your reply: {minted}"
+    return (
+        f"{prefix} Run `ref {bot}` with Bash, then send your reply again with the exact line `ref` "
+        "printed as the last line."
+    )
+
+
+def _invalid_ref_block_reason(why: str, bot: str, minted: str | None) -> str:
+    prefix = (
+        f"Invalid Ref line: {why}. A Ref is a unique id issued by a script for one operator-facing "
+        "post; never a commit hash, PR number or text you typed."
+    )
+    if minted:
+        return (
+            f"{prefix} No Bash call is needed; replace the last line of your reply with this exact "
+            f"freshly minted line: {minted}"
+        )
+    return (
+        f"{prefix} Run `ref {bot}` with Bash, then send the post again with its last line replaced "
+        "by the exact line `ref` printed."
+    )
+
+
+def handle_session_start(data: dict) -> int:
+    if data.get("agent_id"):
+        return 0
+    bot = infer_bot()
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": ref_reminder_text(bot),
+        }
+    }))
+    return 0
+
+
+def handle_user_prompt_submit(data: dict) -> int:
+    if data.get("agent_id"):
+        return 0
+    session = str(data.get("session_id") or "unknown")
+    transcript = data.get("transcript_path") if isinstance(data.get("transcript_path"), str) else ""
+    epoch = compact_epoch(transcript)
+    if should_remind_epoch(session, epoch):
+        bot = infer_bot()
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": ref_reminder_text(bot),
+            }
+        }))
+    return 0
+
+
+def handle_stop(data: dict) -> int:
+    if data.get("agent_id"):
+        return 0  # a sub-agent's final message goes to its parent, not the operator
+    session = str(data.get("session_id") or "unknown")
+    transcript = data.get("transcript_path") if isinstance(data.get("transcript_path"), str) else ""
+    message = data.get("last_assistant_message")
+    if not isinstance(message, str):
+        message = last_transcript_text(transcript) if transcript else ""
+    stripped = message.strip()
+    if not stripped:
+        return 0
+    post_len = len(stripped)
+    stop_active = bool(data.get("stop_hook_active"))
+    line = last_line(message)
+    if not REF_LINE.match(line):
+        if post_len < SHORT_POST:
+            return 0
+        why = f"no Ref: last line on a {post_len}-char post (posts of {SHORT_POST}+ chars require a fresh Ref)"
+        digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
+        if stop_active:
+            log_decision(
+                session, "allowed-stop-hook-active", line, why,
+                post_len=post_len, stop_hook_active=True,
+            )
+            return 0
+        if already_blocked(session, digest):
+            log_decision(
+                session, "allowed-already-blocked", line, why,
+                post_len=post_len, stop_hook_active=False,
+            )
+            return 0
+        bot = infer_bot()
+        minted = mint_ref(bot, session)
+        reason = _no_ref_block_reason(post_len, bot, minted)
+        log_decision(
+            session, "blocked-no-ref", line, why,
+            reason=reason, minted_ref=minted, post_len=post_len, stop_hook_active=False,
+        )
+        print(json.dumps({"decision": "block", "reason": reason}))
+        return 0
+    try:
+        problem = check(message, transcript)
+    except LogUnreadable as exc:
+        log_decision(
+            session, "allowed-unreadable-log", line, str(exc),
+            post_len=post_len, stop_hook_active=stop_active,
+        )
+        return 0
+    if problem is None:
+        return 0
+    why = problem
+    digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
+    if stop_active:
+        log_decision(
+            session, "allowed-stop-hook-active", line, why,
+            post_len=post_len, stop_hook_active=True,
+        )
+        return 0
+    if already_blocked(session, digest):
+        log_decision(
+            session, "allowed-already-blocked", line, why,
+            post_len=post_len, stop_hook_active=False,
+        )
+        return 0
+    bot = infer_bot()
+    minted = mint_ref(bot, session, exclude=line)
+    reason = _invalid_ref_block_reason(why, bot, minted)
+    log_decision(
+        session, "blocked", line, why,
+        reason=reason, minted_ref=minted, post_len=post_len, stop_hook_active=False,
+    )
+    print(json.dumps({"decision": "block", "reason": reason}))
+    return 0
 
 
 def main() -> int:
@@ -256,48 +614,15 @@ def main() -> int:
         data = json.load(sys.stdin)
     except ValueError:
         return 0
-    if not isinstance(data, dict) or data.get("hook_event_name") != "Stop":
+    if not isinstance(data, dict):
         return 0
-    if data.get("agent_id"):
-        return 0  # a sub-agent's final message goes to its parent, not the operator
-    session = str(data.get("session_id") or "unknown")
-    transcript = data.get("transcript_path") if isinstance(data.get("transcript_path"), str) else ""
-    message = data.get("last_assistant_message")
-    if not isinstance(message, str):
-        message = last_transcript_text(transcript) if transcript else ""
-    if not message.strip():
-        return 0
-    line = last_line(message)
-    if not REF_LINE.match(line):
-        if len(message.strip()) >= SHORT_POST and not data.get("stop_hook_active"):
-            print(json.dumps({"systemMessage": (
-                "ref-integrity: this post has no `Ref:` last line. Operator-facing posts end with one "
-                "from `ref <BOT>` (docs/ref-labels.md Part B); a short progress note is exempt.")}))
-        return 0
-    try:
-        problem = check(message, transcript)
-    except LogUnreadable as exc:
-        log_decision(session, "allowed-unreadable-log", line, str(exc))
-        return 0
-    if problem is None:
-        return 0
-    why = problem
-    digest = hashlib.sha256(message.encode("utf-8", "replace")).hexdigest()[:16]
-    if data.get("stop_hook_active"):
-        log_decision(session, "allowed-stop-hook-active", line, why)
-        return 0
-    if already_blocked(session, digest):
-        log_decision(session, "allowed-already-blocked", line, why)
-        return 0
-    log_decision(session, "blocked", line, why)
-    reason = (
-        f"Invalid Ref line: {why}. A Ref is a unique id issued by a script for one operator-facing "
-        "post; never a commit hash, PR number or text you typed. Run `ref <BOT>` with Bash, where BOT is "
-        "your own prefix from the table in docs/ref-labels.md (CLAUDE for a Claude Code session unless "
-        "your instructions name another), then send the post again with its last line replaced by the "
-        "exact line `ref` printed."
-    )
-    print(json.dumps({"decision": "block", "reason": reason}))
+    event = data.get("hook_event_name")
+    if event == "Stop":
+        return handle_stop(data)
+    if event == "SessionStart":
+        return handle_session_start(data)
+    if event == "UserPromptSubmit":
+        return handle_user_prompt_submit(data)
     return 0
 
 

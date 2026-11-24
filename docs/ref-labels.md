@@ -56,26 +56,40 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    the agent hint, read-only. Exit 1: never issued (or issued to a different bot
    than the one named); exit 2: not an id. That is all a Ref can tell you; the
    post's content lives in the transcript.
-6. **The check is a hook, not a promise.** The Claude Code Stop hook
+6. **The check is a hook, not a promise.** The Claude Code hook
    `claude/hooks/ref_integrity_gate.py` (registered in
-   `agents/claude/settings.json.tmpl`) reads the last non-blank line of the final
-   post. When it starts with `Ref:` it must (a) read `Ref: <BOT>-<base36>`,
-   (b) name an id in `issued.log`, (c) carry the bot prefix the log recorded and
-   (d) not have ended an earlier post of the same transcript. Any failure blocks
-   the stop. A post with no Ref line gets only a non-blocking note, and none when
-   it is a short progress note (item 1). The hook never loops: it allows the stop
-   when Claude Code reports `stop_hook_active`, blocks a given message once per
-   session, skips sub-agents, makes no network call, fails open on an error (an `issued.log` that exists but cannot be read
-   is allowed and logged; an absent one, or one without the id, is "never issued" and blocks) and is
-   switched off with `REF_GATE_OFF=1`. Its decisions go to
+   `agents/claude/settings.json.tmpl` under both `Stop` and `SessionStart`) reads
+   the last non-blank line of the final post on `Stop`. When it starts with
+   `Ref:` it must (a) read `Ref: <BOT>-<base36>`, (b) name an id in `issued.log`,
+   (c) carry the bot prefix the log recorded and (d) not have ended an earlier
+   post of the same transcript. Any failure — and any post of 200+ characters
+   with no `Ref:` last line — blocks the stop once and auto-mints a fresh
+   `Ref: <BOT>-<id>` (`ADE_REF_BOT` / `REF_BOT`, else `CLAUDE` for Claude Code)
+   directly into the block reason so the model can paste it verbatim without an
+   extra Bash round (if `bin/ref` is unavailable or fails, the reason falls back
+   to naming `ref CLAUDE` explicitly). A short progress note under 200 chars
+   without a `Ref:` line is exempt (item 1). On `SessionStart` (which fires on
+   `startup`, `resume`, `clear`, `compact`, and `fork`) — and on
+   `UserPromptSubmit` once per compaction epoch if registered there — the hook
+   injects a crisp one-line `additionalContext` reminder so auto-compaction
+   cannot drop the rule. The hook never loops: it allows the stop when Claude
+   Code reports `stop_hook_active`, blocks a given message once per session
+   (recording its digest in `<session>.blocked`), skips sub-agents (`agent_id`),
+   makes no network call, fails open on an error (an `issued.log` that exists
+   but cannot be read is allowed and logged; an absent one, or one without the
+   id, is "never issued" and blocks) and is switched off with `REF_GATE_OFF=1`.
+   Every `Stop` decision (including missing-Ref blocks, `minted_ref`,
+   `post_len`, `stop_hook_active`, and `session_id`) goes to
    `~/.local/state/ade/ref-gate/decisions.log`. Other TUIs (Codex, Pi, Cursor,
    Hermes) have no such hook yet and rely on this page. Never end a post with any other
    `Ref:` line (a URL, `#861`): the hook blocks it as not of the form.
-7. **If the hook blocks you**, its reason names the problem. Run `ref <BOT>`, then
-   send the post again with its last line replaced by the exact line the script
-   printed (do not edit it, and do not fix it by hand: that is the failure the
-   hook exists to catch). A retry that is still wrong is let through once, so
-   check it yourself with `ref lookup`.
+7. **If the hook blocks you**, its reason names the problem and already includes
+   a freshly minted `Ref: <BOT>-<id>` line ready to paste. Send the post again
+   with that exact line appended (on missing Ref) or replacing the bad last line
+   (on invalid Ref), with no extra Bash call needed. Only if the reason says
+   `bin/ref` was unavailable, run `ref CLAUDE` (or your named `<BOT>`) and paste
+   its output verbatim. A retry that is still wrong is let through once, so
+   never edit the minted id by hand.
 8. **No `ref_audit.py`.** The older audit script named in earlier drafts was never
    in this repo and ran nowhere. It is dropped, not shipped: the hook checks
    every post when it is written, which is when a wrong Ref can still be
@@ -99,8 +113,10 @@ all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/a
 
 - `bin/ref` (issues; `ref lookup ID` reads), `bin/ref-append` — the issuing scripts.
   `ade-update` reports a missing `~/.claude/hooks/` link with its `ln -sfn` fix (the template's
-  `[ -f ] || exit 0` guard leaves an unlinked hook silently off); the `Stop` entry of the
-  settings template wires it. Refs directory defaults to
+  `[ -f ] || exit 0` guard leaves an unlinked hook silently off); the `Stop` and `SessionStart`
+  entries of `agents/claude/settings.json.tmpl` wire `ref_integrity_gate.py` (run
+  `ade-settings-apply` or add the same `SessionStart` hook block to `~/.claude/settings.json`
+  for the compaction-proof reminder). Refs directory defaults to
   `~/.local/state/djbclark-ade/refs/` (`REFS_DIR` or `--dir` overrides; the flag
   wins). Agent hint comes from `REF_AGENT` / `PASEO_AGENT_ID` / `AGENT_ID` /
   `CURSOR_CONVERSATION_ID`.
