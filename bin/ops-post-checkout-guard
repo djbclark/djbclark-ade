@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# post-checkout guard for ~/ops/* deploy checkouts.
+# post-checkout guard for ~/tendcf-ops/* (TENDCF_OPS_ROOT) and legacy ~/ops/* deploy checkouts.
 #
-# Deploy checkouts must stay on master (see CLAUDE.md's "Where work happens"
-# policy — dev work belongs in ~/src/ops-worktrees task worktrees, never here).
+# Deploy checkouts must stay on their default branch (master or main; see CLAUDE.md's
+# "Where work happens" policy — dev work belongs in ~/src/ or ~/tendcf-ops/.worktrees/
+# task worktrees, never here).
 # Nothing previously stopped a stray `git checkout -b` from leaving a deploy
 # checkout stuck on a feature branch, silently blocking later deploy/release
 # operations until a human (or an agent) noticed and fixed it by hand — this
@@ -10,7 +11,7 @@
 # issue-152-termux-pkg-jobber branch, blocking a release deploy).
 #
 # git has no pre-checkout hook, so this reacts immediately after the fact:
-# auto-heal (checkout back to master, pull, prune the stale branch) ONLY when
+# auto-heal (checkout back to the default branch, pull, prune the stale branch) ONLY when
 # it's provably safe — clean tree AND the branch's PR is already merged.
 # Anything else (dirty tree, or a branch with real unmerged content) is left
 # alone and loudly flagged — never silently discarded.
@@ -28,22 +29,34 @@ if [[ "$is_branch_checkout" != "1" ]]; then
 fi
 
 # A linked worktree shares this hook (hooks live in the common git dir) but is not the deploy
-# checkout: `git worktree add -b X` runs it inside the NEW worktree, which printed "deploy
-# checkout is now on 'X'" although the deploy checkout never moved (seen three times on
-# 2026-10-25), and with a merged PR it would have tried to heal the wrong tree. Only the main
-# working tree is guarded.
+# checkout: `git worktree add -b X` runs it inside the NEW worktree (including under
+# ~/tendcf-ops/.worktrees/ or ~/src/*-wt), which printed "deploy checkout is now on 'X'"
+# although the deploy checkout never moved (seen three times on 2026-10-25), and with a
+# merged PR it would have tried to heal the wrong tree. Only the main working tree is guarded.
 git_dir="$(git rev-parse --path-format=absolute --absolute-git-dir 2>/dev/null || echo "")"
 common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "")"
 if [[ -n "$git_dir" && "$git_dir" != "$common_dir" ]]; then
   exit 0
 fi
 
+default_branch=""
+origin_head="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || echo "")"
+if [[ "$origin_head" == origin/* ]]; then
+  default_branch="${origin_head#origin/}"
+elif git show-ref --verify --quiet refs/heads/master 2>/dev/null; then
+  default_branch="master"
+elif git show-ref --verify --quiet refs/heads/main 2>/dev/null; then
+  default_branch="main"
+else
+  default_branch="master"
+fi
+
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-if [[ -z "$branch" || "$branch" == "master" || "$branch" == "HEAD" ]]; then
+if [[ -z "$branch" || "$branch" == "$default_branch" || "$branch" == "HEAD" ]]; then
   exit 0
 fi
 
-echo "⚠️  post-checkout-guard: deploy checkout is now on '$branch', not master." >&2
+echo "⚠️  post-checkout-guard: deploy checkout is now on '$branch', not $default_branch." >&2
 
 if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   echo "⚠️  post-checkout-guard: working tree is DIRTY — refusing to auto-heal." >&2
@@ -51,7 +64,7 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   exit 0
 fi
 
-git fetch origin master -q 2>/dev/null || true
+git fetch origin "$default_branch" -q 2>/dev/null || true
 
 merged="no"
 remote_url="$(git config --get remote.origin.url 2>/dev/null || echo "")"
@@ -65,11 +78,11 @@ if [[ -n "$repo_slug" && -n "$owner_slug" ]] && command -v gh >/dev/null 2>&1; t
 fi
 
 if [[ "$merged" == "yes" ]]; then
-  echo "✅ post-checkout-guard: '$branch' has a merged PR and the tree is clean — auto-healing to master." >&2
-  git checkout master -q
-  git pull -q origin master
+  echo "✅ post-checkout-guard: '$branch' has a merged PR and the tree is clean — auto-healing to $default_branch." >&2
+  git checkout "$default_branch" -q
+  git pull -q origin "$default_branch"
   git branch -D "$branch" >/dev/null 2>&1 || true
-  echo "✅ post-checkout-guard: back on master ($(git log --oneline -1))." >&2
+  echo "✅ post-checkout-guard: back on $default_branch ($(git log --oneline -1))." >&2
 else
   echo "⚠️  post-checkout-guard: could not confirm '$branch' is merged — leaving it checked out." >&2
   echo "    If this branch's work is done, merge its PR (or check it out from a" >&2

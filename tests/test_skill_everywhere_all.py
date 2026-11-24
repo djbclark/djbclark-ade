@@ -835,3 +835,55 @@ def test_gemini_only_retired_cleanup_runs_once_without_duplicates(catalog, tmp_p
     assert (gemini_dir / "self-handoff").readlink() == src
     assert run(catalog, "--check", "--all").returncode == 0
 
+
+def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, tmp_path):
+    """Queue #123: skill-everywhere dual-reads active tendcf site pair and falls back fail-closed to ~/ops."""
+    home, public, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+
+    troot = home / "tendcf-ops"
+    tpriv = troot / "tendcf-private-acme" / "skills"
+    tpub = troot / "tendcf-public-acme" / "skills"
+    tpriv.mkdir(parents=True)
+    tpub.mkdir(parents=True)
+    tpriv_skill = skill(tpriv, "priv-tendcf")
+    tpub_skill = skill(tpub, "pub-tendcf")
+
+    lpriv = home / "ops" / "site-private" / "skills"
+    lsite = home / "ops" / "site-public-djbclark" / "skills"
+    lpriv.mkdir(parents=True)
+    lsite.mkdir(parents=True)
+    lpriv_skill = skill(lpriv, "legacy-priv")
+    lsite_skill = skill(lsite, "legacy-site")
+
+    # Without selector, sole tendcf-ops pair is NOT globbed -> legacy ~/ops roots win.
+    r_legacy = run(catalog, "--all")
+    assert r_legacy.returncode == 0, r_legacy.stdout + r_legacy.stderr
+    links = home / ".agents" / "skills"
+    assert (links / "legacy-priv").readlink() == lpriv_skill
+    assert (links / "legacy-site").readlink() == lsite_skill
+    assert not (links / "priv-tendcf").exists()
+    assert not (links / "pub-tendcf").exists()
+
+    # With XDG active-site set to `acme`, tendcf pair roots resolve cleanly.
+    active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
+    active_cfg.parent.mkdir(parents=True)
+    active_cfg.write_text("acme\n", encoding="utf-8")
+    r_tendcf = run(catalog, "--all")
+    assert r_tendcf.returncode == 0, r_tendcf.stdout + r_tendcf.stderr
+    assert (links / "priv-tendcf").readlink() == tpriv_skill.resolve()
+    assert (links / "pub-tendcf").readlink() == tpub_skill.resolve()
+
+    # Grok Bot copy provenance labels tendcf-public-<slug> accurately.
+    env["SKILL_EVERYWHERE_ONLY"] = "grokbot"
+    (home / "agent-data" / "workflows").mkdir(parents=True)
+    r_grok = run(catalog, "pub-tendcf")
+    assert r_grok.returncode == 0, r_grok.stdout + r_grok.stderr
+    marker = (home / "agent-data" / "workflows" / "ade-pub-tendcf" / ".skill-everywhere").read_text()
+    assert marker.startswith("source=tendcf-public-acme/skills/pub-tendcf\n")
+

@@ -18,8 +18,10 @@
 # Content lives in exactly one place (2026-10-14 chain collapse):
 #   public skills: ~/src/djbclark-ade/skills/<name> when that checkout exists; otherwise skills/
 #     of the repo this script's real path sits in (SKILL_EVERYWHERE_ADE overrides; #279 / revived #292)
-#   ~/ops/site-private/skills/<name>            private skills (e.g. 1password)
-#   ~/ops/site-public-djbclark/skills/<name>    site skills (site-djbclark repo; moved out of this repo 2026-11-06)
+#   ~/tendcf-ops/tendcf-private-<slug>/skills/<name>  private skills (active tendcf site pair; Stage 0 dual-read)
+#   ~/tendcf-ops/tendcf-public-<slug>/skills/<name>   site skills (active tendcf site pair; Stage 0 dual-read)
+#   ~/ops/site-private/skills/<name>                  legacy private skills (fallback when tendcf active-site absent)
+#   ~/ops/site-public-djbclark/skills/<name>          legacy site skills (fallback when tendcf active-site absent)
 #   ~/src/chrome-use/skill-data/<name>          chrome-use skills (third-party git repo; SKILL_EVERYWHERE_CHROME overrides)
 # and every TUI links DIRECTLY at that path — no hub layers, no chained
 # symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
@@ -80,8 +82,23 @@ if [[ -z ${SKILL_EVERYWHERE_ADE:-} ]]; then
   else SKILL_EVERYWHERE_ADE=$HOME/src/djbclark-ade/skills; fi
 fi
 ade_root=$SKILL_EVERYWHERE_ADE
-priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
-site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills}"
+default_priv_root="${OPS_ROOT:-$HOME/ops}/site-private/skills"
+default_site_root="${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills"
+if [[ -z ${OPS_ROOT:-} && ( -z ${SKILL_EVERYWHERE_PRIVATE:-} || -z ${SKILL_EVERYWHERE_SITE:-} ) ]]; then
+  _se_script_dir="$(cd -P "$(dirname "$(grealpath -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
+  if [[ -f $_se_script_dir/ade_ops_paths.py ]] && command -v python3 >/dev/null 2>&1; then
+    _se_roots=()
+    while IFS= read -r _se_line; do
+      _se_roots+=("$_se_line")
+    done < <(python3 "$_se_script_dir/ade_ops_paths.py" skill-roots 2>/dev/null || true)
+    if ((${#_se_roots[@]} == 2)) && [[ -n ${_se_roots[0]} && -n ${_se_roots[1]} ]]; then
+      default_priv_root="${_se_roots[0]}"
+      default_site_root="${_se_roots[1]}"
+    fi
+  fi
+fi
+priv_root="${SKILL_EVERYWHERE_PRIVATE:-$default_priv_root}"
+site_root="${SKILL_EVERYWHERE_SITE:-$default_site_root}"
 chrome_root="${SKILL_EVERYWHERE_CHROME:-$HOME/src/chrome-use/skill-data}"
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
@@ -200,10 +217,24 @@ render_copy() {  # render_copy <src> <out>; refuses (rc 1, nothing copied) a sou
   # Provenance follows the root the skill came from (a public djbclark-ade copy renders exactly as before).
   local repo from_md
   case $1 in
-    "$site_root"/*) repo=site-djbclark
-      from_md="site-djbclark [\`skills/$name\`](https://github.com/djbclark/site-djbclark/tree/master/skills/$name)" ;;
-    "$priv_root"/*) repo=site-private
-      from_md="site-private \`skills/$name\` (a private repository)" ;;
+    "$site_root"/*)
+      case $site_root in
+        */tendcf-public-*/skills)
+          repo="${site_root%/skills}"; repo="${repo##*/}"
+          from_md="${repo} \`skills/$name\`" ;;
+        *)
+          repo=site-djbclark
+          from_md="site-djbclark [\`skills/$name\`](https://github.com/djbclark/site-djbclark/tree/master/skills/$name)" ;;
+      esac ;;
+    "$priv_root"/*)
+      case $priv_root in
+        */tendcf-private-*/skills)
+          repo="${priv_root%/skills}"; repo="${repo##*/}"
+          from_md="${repo} \`skills/$name\` (a private repository)" ;;
+        *)
+          repo=site-private
+          from_md="site-private \`skills/$name\` (a private repository)" ;;
+      esac ;;
     "$chrome_root"/*) repo=chrome-use
       from_md="chrome-use [\`skill-data/$name\`](https://github.com/leeguooooo/chrome-use/tree/main/skill-data/$name)" ;;
     *) repo=djbclark-ade

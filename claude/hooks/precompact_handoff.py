@@ -112,6 +112,20 @@ def _git_root(directory):
     return None
 
 
+def _load_ops_paths():
+    """Best-effort import of bin/ade_ops_paths.py (PreCompact must never fail on import)."""
+    try:
+        for cand in (Path(__file__).resolve().parents[2] / "bin", Path.home() / "src" / "djbclark-ade" / "bin"):
+            if (cand / "ade_ops_paths.py").is_file():
+                if str(cand) not in sys.path:
+                    sys.path.insert(0, str(cand))
+                import ade_ops_paths  # noqa: PLC0415
+                return ade_ops_paths
+    except Exception:
+        return None
+    return None
+
+
 def resolve_workspace(directory):
     """Return a safe ``(repo, task)`` tuple for every directory."""
     try:
@@ -123,12 +137,18 @@ def resolve_workspace(directory):
                 return parts[1], parts[0]  # repo, task
         except ValueError:
             pass
-        try:
-            parts = d.relative_to(home / "ops").parts
-            if parts:
-                return parts[0], "ops"
-        except ValueError:
-            pass
+        ops_paths = _load_ops_paths()
+        if ops_paths is not None:
+            checkout = ops_paths.resolve_ops_checkout_name(d, home=home)
+            if checkout:
+                return checkout, "ops"
+        else:
+            try:
+                parts = d.relative_to(home / "ops").parts
+                if parts:
+                    return parts[0], "ops"
+            except ValueError:
+                pass
 
         root = _git_root(d)
         if root is not None:

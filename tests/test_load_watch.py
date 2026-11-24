@@ -537,6 +537,35 @@ def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path
     assert r.returncode == 1
 
 
+def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_path, monkeypatch):
+    """Queue #123: ticket lookup dual-reads ~/.local/bin/bgrun and active tendcf pair, fail-closed without selector."""
+    monkeypatch.delenv("TENDCF_SITE", raising=False)
+    monkeypatch.delenv("TENDCF_OPS_ROOT", raising=False)
+    repo = _repo(tmp_path)
+    stub_sudo_ask(tmp_path, 1)
+    home = tmp_path / "home"
+    (home / "tendcf-ops" / "tendcf-private-acme").mkdir(parents=True)
+    tendcf_pub_bgrun = home / "tendcf-ops" / "tendcf-public-acme" / "bin" / "bgrun"
+    stub_bgrun(tendcf_pub_bgrun, 0, out="11223344 until 2026-11-25 02:10 EST")
+
+    # Without a site selector, sole tendcf-ops site is NOT globbed -> dialog denies.
+    r_no_sel = run(tmp_path, "ci", "decide", str(repo), "local", "no selector", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
+    assert r_no_sel.returncode == 1
+
+    # With TENDCF_SITE=acme, tendcf-public-acme/bin/bgrun covers the local decision.
+    r_sel = run(tmp_path, "ci", "decide", str(repo), "local", "tendcf ticket", TENDCF_SITE="acme", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
+    assert r_sel.returncode == 0, r_sel.stderr
+    assert rows(tmp_path)[0][2] == "[ticket 11223344] tendcf ticket"
+
+    # ~/.local/bin/bgrun works even without TENDCF_SITE and takes precedence.
+    local_bgrun = home / ".local" / "bin" / "bgrun"
+    stub_bgrun(local_bgrun, 0, out="55667788 until 2026-11-25 03:10 EST")
+    (tmp_path / "ci-only.tsv").unlink()
+    r_local = run(tmp_path, "ci", "decide", str(repo), "local", "local bin ticket", XDG_CONFIG_HOME=str(tmp_path / "empty-xdg"))
+    assert r_local.returncode == 0, r_local.stderr
+    assert rows(tmp_path)[0][2] == "[ticket 55667788] local bin ticket"
+
+
 def test_a_ticket_never_overwrites_a_ci_decision_or_records_a_glob(tmp_path):
     repo = _repo(tmp_path)
     ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
@@ -1087,6 +1116,26 @@ def test_bg_rules_and_lookalikes():
         assert lw.bg_args(f"cat {path}") is None
         assert lw.bg_args(f"python other/bin/{name}") is None
     assert lw.bg_args("/Users/x/ops/site-private/bin/bgrunner pytest t.py") is None
+    for path in (
+        "/Users/x/.local/bin/bgrun",
+        "/Users/x/.local/bin/bg",
+        "~/.local/bin/bgrun",
+        "/Users/x/tendcf-ops/tendcf-public-djbclark/bin/bgrun",
+        "/Users/x/tendcf-ops/tendcf-private-djbclark-lab/bin/bgrun",
+        "~/tendcf-ops/tendcf-public-djbclark/bin/bg",
+    ):
+        assert lw.bg_args(f"{path} pytest t.py") == ["pytest", "t.py"], path
+        assert lw.bg_args(f"/bin/bash {path} pytest t.py") == ["pytest", "t.py"], path
+        assert lw.bg_args(f"cat {path}") is None, path
+    for bad in (
+        "/Users/x/tendcf-ops/tendcf-public-foo-wt/bin/bgrun",
+        "/Users/x/tendcf-ops/tendcf-private/bin/bgrun",
+        "/Users/x/tendcf-ops/tendcf-public-Foo/bin/bgrun",
+        "/Users/x/tendcf-ops/site-private/bin/bgrun",
+        "/Users/x/.local/bin/bgrunner",
+        "/tmp/bgrun",
+    ):
+        assert lw.bg_args(f"{bad} pytest t.py") is None, bad
     assert lw.bg_rule(["just", "release-all"]) == "release"
     assert lw.bg_rule(["just", "build"]) == ""
     assert lw.bg_rule(["just", "release", "--local-tests"]) == ""

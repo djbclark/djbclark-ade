@@ -72,8 +72,31 @@ for (const name of ["bg", "bgrun"]) {
     allow.push(`~/ops/${site}/bin/${name} cargo test`);
     deny.push(`~/ops/${site}/bin/${name} cargo test; cargo build`);
   }
+  allow.push(`~/.local/bin/${name} cargo test`);
+  allow.push(`$HOME/.local/bin/${name} cargo test`);
+  allow.push("${HOME}/.local/bin/" + name + " cargo test");
+  allow.push(`/Users/me/.local/bin/${name} cargo test`);
+  for (const kind of ["public", "private"]) {
+    for (const slug of ["djbclark", "djbclark-lab"]) {
+      allow.push(`~/tendcf-ops/tendcf-${kind}-${slug}/bin/${name} cargo test`);
+      allow.push(`/Users/me/tendcf-ops/tendcf-${kind}-${slug}/bin/${name} cargo test`);
+      deny.push(`~/tendcf-ops/tendcf-${kind}-${slug}/bin/${name} cargo test; cargo build`);
+    }
+  }
 }
-deny.push("bgrun cargo build", "/tmp/bgrun cargo build");
+deny.push(
+  "bgrun cargo build",
+  "/tmp/bgrun cargo build",
+  "~/ops/site-private/bin/bgrunner cargo build",
+  "~/.local/bin/bgrunner cargo build",
+  "~/tendcf-ops/tendcf-public-foo-wt/bin/bgrun cargo build",
+  "~/tendcf-ops/tendcf-private-foo-wt/bin/bgrun cargo build",
+  "~/tendcf-ops/tendcf-private/bin/bgrun cargo build",
+  "~/tendcf-ops/tendcf-public-Foo/bin/bgrun cargo build",
+  "~/tendcf-ops/site-private/bin/bgrun cargo build",
+  "~/tendcf-ops/tendcf-public-a/../tendcf-public-b/bin/bgrun cargo build",
+  `~/tendcf-ops/tendcf-public-${"a".repeat(65)}/bin/bgrun cargo build`,
+);
 for (const cmd of deny) assert.equal(requiresBg(cmd), true, cmd);
 for (const cmd of allow) assert.equal(requiresBg(cmd), false, cmd);
 const hooks = []; let disposed = 0;

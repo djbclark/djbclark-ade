@@ -47,3 +47,31 @@ def test_checkout_inside_linked_worktree_is_silent(tmp_path):
     git(repo, "worktree", "add", "-q", "-b", "feature", str(wt))
     r = git(wt, "checkout", "-b", "another")
     assert "post-checkout-guard" not in r.stderr
+
+
+def test_main_branch_tendcf_deploy_checkout_and_worktree_silence(tmp_path):
+    """Queue #123: ~/tendcf-ops deploy checkouts on `main` warn on feature branches; `.worktrees/` stay silent."""
+    origin = tmp_path / "origin-main.git"
+    git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+    tendcf_ops = tmp_path / "tendcf-ops"
+    repo = tendcf_ops / "tendcf-private-acme"
+    git(tmp_path, "clone", "-q", str(origin), str(repo))
+    git(repo, "checkout", "-q", "-b", "main")
+    (repo / "f").write_text("x")
+    git(repo, "add", "f")
+    git(repo, "commit", "-q", "-m", "init")
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "remote", "set-head", "origin", "main")
+    hook = repo / ".git" / "hooks" / "post-checkout"
+    shutil.copy(HOOK, hook)
+    hook.chmod(0o755)
+
+    # Linked worktree under ~/tendcf-ops/.worktrees/ stays silent.
+    wt = tendcf_ops / ".worktrees" / "feat-wt"
+    r_wt = git(repo, "worktree", "add", "-b", "feat-wt", str(wt))
+    assert "post-checkout-guard" not in r_wt.stderr
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "main"
+
+    # Switching the deploy checkout itself off `main` warns naming `main`.
+    r_main = git(repo, "checkout", "-b", "stray")
+    assert "post-checkout-guard: deploy checkout is now on 'stray', not main." in r_main.stderr
