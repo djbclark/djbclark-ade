@@ -60,7 +60,10 @@ def pin_legacy(args: list[str]) -> int:
 
 def effective_name(workspace: dict) -> str:
     title = workspace.get("title")
-    return title if isinstance(title, str) else workspace.get("name") or ""
+    if isinstance(title, str):
+        return title
+    name = workspace.get("name")
+    return name if isinstance(name, str) else ""
 
 
 def pin_workspaces(client: pc.PaseoClient, *, check: bool) -> int:

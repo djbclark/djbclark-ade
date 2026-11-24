@@ -37,6 +37,7 @@ def client(pin, monkeypatch):
             return [
                 {"id": "lead", "title": "LEAD ade", "name": "WORKER overridden"},
                 {"id": "custom", "title": None, "name": "custom window"},
+                {"id": "bad-name", "name": 123},
                 {"id": "pinned", "title": "OTHER ade", "pinnedAt": "stamp"},
                 {"id": "worker", "title": "WORKER ade"},
                 {"id": "workers", "name": "WORKERS ade"},
@@ -63,20 +64,21 @@ def test_check_and_apply(pin, client, capsys):
     assert capsys.readouterr().out.splitlines() == [
         "would-pin lead  LEAD ade",
         "would-pin custom  custom window",
+        "would-pin bad-name  ",
         "already-pinned pinned  OTHER ade",
-        "2/3 window(s) to pin",
+        "3/4 window(s) to pin",
     ]
     assert pin.main(["pin"]) == 0
-    assert client.calls == ["lead", "custom"]
-    assert capsys.readouterr().out.endswith("pinned 2/2 window(s)\n")
+    assert client.calls == ["lead", "custom", "bad-name"]
+    assert capsys.readouterr().out.endswith("pinned 3/3 window(s)\n")
 
 
 def test_pin_failure_keeps_sweeping(pin, client, capsys):
     client.failures.add("lead")
     assert pin.main(["pin"]) == 1
-    assert client.calls == ["lead", "custom"]
+    assert client.calls == ["lead", "custom", "bad-name"]
     out, err = capsys.readouterr()
-    assert out.endswith("pinned 1/2 window(s)\n")
+    assert out.endswith("pinned 2/3 window(s)\n")
     assert err == "pin failed lead: denied\n"
 
 
