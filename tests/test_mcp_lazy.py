@@ -1751,6 +1751,7 @@ def test_cancellation_at_pending_transition_never_overtakes_request(fixture_env)
             release_a.wait(timeout=5.0)
 
     proxy_a = BarrierProxyA("t", [sys.executable, str(fixture_env["server"])], 60.0, fixture_env["cache_dir"])
+    proxy_a.client_initialized = True
     fake_a = FakeChild()
     fake_a.write_release.set()
     proxy_a.child = fake_a
@@ -1768,6 +1769,7 @@ def test_cancellation_at_pending_transition_never_overtakes_request(fixture_env)
     # Part B: Cancel arrives AFTER pending_client insert while worker is still inside child.write_unlocked.
     # Because worker holds child._wlock, the cancellation MUST wait and appear AFTER tools/call on the wire.
     proxy_b = mod.LazyProxy("t", [sys.executable, str(fixture_env["server"])], 60.0, fixture_env["cache_dir"])
+    proxy_b.client_initialized = True
     fake_b = FakeChild()
     proxy_b.child = fake_b
     msg_b = {"jsonrpc": "2.0", "id": 601, "method": "tools/call", "params": {"name": "echo", "arguments": {}}}
@@ -1934,3 +1936,163 @@ def test_cache_store_rejects_tmp_as_leaf_cache_dir():
     assert store.load() is None
     assert store.save(payload) is False
     assert not Path("/tmp/mcp-lazy-tmp-leaf-reject.json").exists()
+
+
+# --- Round 5 Adversary Regression Tests ---
+
+
+@pytest.mark.parametrize("fault_kind", ["set_blocking", "thread_start"])
+def test_failed_child_constructor_reaps_process_and_clears_registration(fixture_env, monkeypatch, fault_kind: str):
+    """Round 5 HIGH #1: fault after Popen + registration must reap process and clear spawning_children."""
+    import threading
+
+    mod = _load_mcp_lazy_module()
+    seen_pids: list[int] = []
+
+    class TrackingProxy(mod.LazyProxy):
+        def _register_spawning_child(self, child):
+            seen_pids.append(child.pid)
+            super()._register_spawning_child(child)
+
+    proxy = TrackingProxy(
+        server_id="fault-srv",
+        child_argv=[sys.executable, str(fixture_env["server"])],
+        idle_seconds=60.0,
+        cache_dir=fixture_env["cache_dir"],
+    )
+
+    if fault_kind == "set_blocking":
+        def _boom_set_blocking(_fd, _flag):
+            raise OSError("injected set_blocking failure")
+        monkeypatch.setattr(mod.os, "set_blocking", _boom_set_blocking)
+    else:
+        def _boom_thread_start(self):
+            raise RuntimeError("injected Thread.start failure")
+        monkeypatch.setattr(threading.Thread, "start", _boom_thread_start)
+
+    res = proxy._spawn_child_raw()
+    assert res is None
+    assert len(seen_pids) == 1, "expected Popen + registration before injected fault"
+    assert not _pid_alive(seen_pids[0]), f"leaked process pid={seen_pids[0]} after constructor fault"
+    assert proxy.child is None
+    assert proxy.spawning_count == 0
+    assert not proxy.spawning_children
+
+
+def test_pre_ready_non_ping_requests_rejected_on_cold_and_warm_cache(fixture_env):
+    """Round 5 MEDIUM #1: non-ping requests after initialize but before notifications/initialized return -32600."""
+    call_log = fixture_env["tmp"] / "preready_calls.jsonl"
+
+    # 1. Cold cache path: send initialize, skip notifications/initialized, send tools/call + tools/list + ping.
+    c_cold = fixture_env["start"](extra_env={
+        "FIXTURE_ASK_ROOTS_ON_INITIALIZED": "1",
+        "FIXTURE_CALL_LOG": str(call_log),
+    })
+    try:
+        c_cold.send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "preready-cold", "version": "1"},
+            },
+        })
+        init_r = c_cold.recv(timeout=5.0)
+        assert init_r["id"] == 1 and "result" in init_r
+
+        # Ping is allowed before notifications/initialized.
+        c_cold.send({"jsonrpc": "2.0", "id": 700, "method": "ping", "params": {}})
+        assert c_cold.recv(timeout=5.0)["result"] == {}
+
+        # Non-ping requests before notifications/initialized MUST return -32600 and NOT trigger _ensure_child!
+        c_cold.send({
+            "jsonrpc": "2.0",
+            "id": 701,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "too-early-cold"}},
+        })
+        err1 = c_cold.recv(timeout=5.0)
+        assert err1["id"] == 701 and err1["error"]["code"] == -32600
+
+        c_cold.send({"jsonrpc": "2.0", "id": 702, "method": "tools/list", "params": {}})
+        err2 = c_cold.recv(timeout=5.0)
+        assert err2["id"] == 702 and err2["error"]["code"] == -32600
+
+        assert not call_log.exists(), "pre-ready tools/call must never reach server"
+        # Only the single warm-up child spawned (and was retired with gate closed).
+        pids_cold = fixture_env["read_pids"]()
+        assert len(pids_cold) == 1
+        assert _wait_pid_dead(pids_cold[0], timeout=3.0)
+
+        # Once client sends real notifications/initialized, subsequent tools/call succeeds cleanly.
+        c_cold.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        c_cold.send({
+            "jsonrpc": "2.0",
+            "id": 703,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "now-ready-cold"}},
+        })
+        roots_req = c_cold.recv(timeout=5.0)
+        assert roots_req.get("method") == "roots/list"
+        c_cold.send({"jsonrpc": "2.0", "id": roots_req["id"], "result": {"roots": []}})
+        ok_cold = c_cold.recv(timeout=5.0)
+        assert ok_cold["id"] == 703 and "msg=now-ready-cold" in ok_cold["result"]["content"][0]["text"]
+    finally:
+        assert c_cold.close()[0] == 0
+
+    # 2. Warm cache path: cache is now populated; fresh proxy skips notifications/initialized -> -32600 & 0 spawns!
+    fixture_env["pid_log"].unlink(missing_ok=True)
+    call_log.unlink(missing_ok=True)
+    c_warm = fixture_env["start"](extra_env={"FIXTURE_CALL_LOG": str(call_log)})
+    try:
+        c_warm.send({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"roots": {}},
+                "clientInfo": {"name": "preready-warm", "version": "1"},
+            },
+        })
+        init_w = c_warm.recv(timeout=5.0)
+        assert init_w["id"] == 1 and "result" in init_w
+
+        c_warm.send({"jsonrpc": "2.0", "id": 710, "method": "ping", "params": {}})
+        assert c_warm.recv(timeout=5.0)["result"] == {}
+
+        c_warm.send({
+            "jsonrpc": "2.0",
+            "id": 711,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "too-early-warm"}},
+        })
+        err_w1 = c_warm.recv(timeout=5.0)
+        assert err_w1["id"] == 711 and err_w1["error"]["code"] == -32600
+
+        c_warm.send({"jsonrpc": "2.0", "id": 712, "method": "tools/list", "params": {}})
+        err_w2 = c_warm.recv(timeout=5.0)
+        assert err_w2["id"] == 712 and err_w2["error"]["code"] == -32600
+
+        assert fixture_env["read_pids"]() == [], "warm pre-ready rejection must spawn ZERO children"
+        assert not call_log.exists()
+
+        # After client sends notifications/initialized, cached tools/list (0 spawns) and tools/call (1 spawn) work.
+        c_warm.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        c_warm.send({"jsonrpc": "2.0", "id": 713, "method": "tools/list", "params": {}})
+        tools_w = c_warm.recv(timeout=5.0)
+        assert tools_w["id"] == 713 and any(t["name"] == "echo" for t in tools_w["result"]["tools"])
+        assert fixture_env["read_pids"]() == []
+
+        c_warm.send({
+            "jsonrpc": "2.0",
+            "id": 714,
+            "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"msg": "now-ready-warm"}},
+        })
+        ok_w = c_warm.recv(timeout=5.0)
+        assert ok_w["id"] == 714 and "msg=now-ready-warm" in ok_w["result"]["content"][0]["text"]
+    finally:
+        assert c_warm.close()[0] == 0

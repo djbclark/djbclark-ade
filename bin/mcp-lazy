@@ -106,6 +106,10 @@ class ProtocolMismatchError(Exception):
     """Raised when a live child negotiates a protocol version incompatible with cached init."""
 
 
+class ClientNotInitializedError(Exception):
+    """Raised when a non-ping request arrives before the client sent notifications/initialized."""
+
+
 def log_err(msg: str) -> None:
     try:
         sys.stderr.write(f"mcp-lazy: {msg}\n")
@@ -694,6 +698,7 @@ class ChildProcess:
         on_io_error: Callable[["ChildProcess", str], None],
         *,
         on_popen: Optional[Callable[["ChildProcess"], None]] = None,
+        on_init_failed: Optional[Callable[["ChildProcess"], None]] = None,
         max_frame_bytes: int = MAX_FRAME_BYTES,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
     ) -> None:
@@ -731,14 +736,23 @@ class ChildProcess:
         if on_popen is not None:
             on_popen(self)
 
-        assert self.proc.stdin is not None and self.proc.stdout is not None
-        os.set_blocking(self.proc.stdin.fileno(), False)
-        self._stdout_reader = io.BufferedReader(self.proc.stdout)
+        try:
+            assert self.proc.stdin is not None and self.proc.stdout is not None
+            os.set_blocking(self.proc.stdin.fileno(), False)
+            self._stdout_reader = io.BufferedReader(self.proc.stdout)
 
-        self._reader = threading.Thread(target=self._read_loop, name=f"child-read-{self.pid}", daemon=True)
-        self._waiter = threading.Thread(target=self._wait_loop, name=f"child-wait-{self.pid}", daemon=True)
-        self._reader.start()
-        self._waiter.start()
+            self._reader = threading.Thread(target=self._read_loop, name=f"child-read-{self.pid}", daemon=True)
+            self._waiter = threading.Thread(target=self._wait_loop, name=f"child-wait-{self.pid}", daemon=True)
+            self._reader.start()
+            self._waiter.start()
+        except BaseException:
+            self.reaped = True
+            try:
+                self.terminate(polite=False)
+            finally:
+                if on_init_failed is not None:
+                    on_init_failed(self)
+            raise
 
     def write_unlocked(self, payload: bytes, timeout: Optional[float] = None) -> bool:
         """Write one framed message to child stdin; caller MUST already hold self._wlock."""
@@ -1151,6 +1165,10 @@ class LazyProxy:
         params_dict = params if isinstance(params, dict) else {}
 
         if not has_id:
+            with self.lock:
+                ready = self.client_initialized
+            if not ready:
+                return
             self._forward_if_running(msg)
             return
 
@@ -1168,6 +1186,21 @@ class LazyProxy:
                 with self.lock:
                     self.queued_requests.discard(req_key)
                     self.cancelled_requests.discard(req_key)
+            return
+
+        # Shared readiness gate: all non-ping, non-initialize requests require the client's real
+        # `notifications/initialized` first (both cold and warm cache paths). Never synthesize it.
+        with self.lock:
+            client_ready = self.client_initialized
+            if not client_ready:
+                self.queued_requests.discard(req_key)
+                self.cancelled_requests.discard(req_key)
+        if not client_ready:
+            self.send_error(
+                mid,
+                -32600,
+                f"Invalid Request: client not initialized (notifications/initialized required before {method})",
+            )
             return
 
         if method == "logging/setLevel":
@@ -1337,11 +1370,22 @@ class LazyProxy:
             self.spawning_children.add(child)
             self.cond.notify_all()
 
+    def _unregister_spawning_child(self, child: ChildProcess) -> None:
+        with self.cond:
+            self.spawning_children.discard(child)
+            self.cond.notify_all()
+
     def _spawn_child_raw(self) -> Optional[ChildProcess]:
         with self.cond:
             if self.stopping:
                 return None
             self.spawning_count += 1
+
+        registered: list[ChildProcess] = []
+
+        def _on_popen(c: ChildProcess) -> None:
+            registered.append(c)
+            self._register_spawning_child(c)
 
         child: Optional[ChildProcess] = None
         try:
@@ -1354,25 +1398,32 @@ class LazyProxy:
                 on_message=self._on_child_message,
                 on_exit=self._on_child_exit,
                 on_io_error=self._on_child_io_error,
-                on_popen=self._register_spawning_child,
+                on_popen=_on_popen,
+                on_init_failed=self._unregister_spawning_child,
                 max_frame_bytes=self.max_frame_bytes,
                 write_timeout=self.write_timeout,
             )
             self._after_child_popen(child)
-        except OSError as e:
-            log_err(f"failed to spawn child {self.child_argv[0]!r}: {e}")
+        except (OSError, RuntimeError) as e:
+            log_err(f"failed to spawn child {self.child_argv[0]!r}: {type(e).__name__}: {e}")
+            leaked = child or (registered[0] if registered else None)
+            if leaked is not None:
+                leaked.reaped = True
+                leaked.terminate(polite=False)
             with self.cond:
-                if child is not None:
-                    self.spawning_children.discard(child)
+                if leaked is not None:
+                    self.spawning_children.discard(leaked)
                 self.spawning_count -= 1
                 self.cond.notify_all()
             return None
         except BaseException:
-            if child is not None:
-                child.force_kill_pg()
+            leaked = child or (registered[0] if registered else None)
+            if leaked is not None:
+                leaked.reaped = True
+                leaked.terminate(polite=False)
             with self.cond:
-                if child is not None:
-                    self.spawning_children.discard(child)
+                if leaked is not None:
+                    self.spawning_children.discard(leaked)
                 self.spawning_count -= 1
                 self.cond.notify_all()
             raise
@@ -1443,11 +1494,19 @@ class LazyProxy:
 
     def _ensure_child(self) -> Optional[ChildProcess]:
         with self.lock:
+            if not self.client_initialized:
+                raise ClientNotInitializedError(
+                    "Invalid Request: client not initialized (notifications/initialized required)"
+                )
             if self.child is not None and self.child.ready:
                 return self.child
 
         with self.spawn_lock:
             with self.lock:
+                if not self.client_initialized:
+                    raise ClientNotInitializedError(
+                        "Invalid Request: client not initialized (notifications/initialized required)"
+                    )
                 if self.child is not None and self.child.ready:
                     return self.child
 
@@ -1660,6 +1719,14 @@ class LazyProxy:
 
             try:
                 child = self._ensure_child()
+            except ClientNotInitializedError as e:
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32600, str(e))
+                return
             except ProtocolMismatchError as e:
                 with self.lock:
                     was_cancelled = key in self.cancelled_requests
