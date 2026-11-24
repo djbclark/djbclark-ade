@@ -1105,10 +1105,16 @@ def test_pre_ledger_installed_base_adoption_and_explicit_migration(catalog, tmp_
         (links / "manual-inactive").symlink_to(manual_inactive)
         (links / "manual-ext").symlink_to(manual_ext)
 
-    # --- Path A: Pre-upgrade seeding on normal legacy `--all` run -> seamless subsequent switch ---
+    # --- Path A: Ordinary --all does NOT silently adopt; explicit --adopt-legacy-links adopts -> seamless switch ---
     _seed_pre_ledger_legacy_state()
     assert not ledger.exists()
-    r_seed = run(catalog, "--all")
+    r_ordinary = run(catalog, "--all")
+    assert r_ordinary.returncode == 0, r_ordinary.stdout + r_ordinary.stderr
+    assert "already linked" in r_ordinary.stdout
+    assert "already copied" in r_ordinary.stdout
+    assert not ledger.exists()  # ordinary sync MUST NOT silently adopt unrecorded pre-existing links/copies
+
+    r_seed = run(catalog, "--adopt-legacy-links", "--all")
     assert r_seed.returncode == 0, r_seed.stdout + r_seed.stderr
     assert "already linked" in r_seed.stdout
     assert "already copied" in r_seed.stdout
@@ -1216,4 +1222,115 @@ def test_concurrent_skill_installs_preserve_all_ledger_entries(catalog, tmp_path
     for n in names:
         assert (links / n).readlink() == srcs[n]
         assert f"link\t{links / n}\t{srcs[n]}" in lines
+
+
+def test_ordinary_all_sync_does_not_adopt_manual_link_under_active_root(catalog, tmp_path):
+    """Round 6 MED #1: ordinary --all MUST NOT silently adopt a manually installed link under the active root."""
+    home, _, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+    env["SKILL_EVERYWHERE_NO_COPY"] = "1"
+
+    lpriv = home / "ops" / "site-private" / "skills"
+    lpriv.mkdir(parents=True)
+    manual_old_src = skill(lpriv, "manual-active-old")
+    manual_shared_src = skill(lpriv, "manual-active-shared")
+    managed_src = skill(lpriv, "auto-installed")
+
+    tpriv = home / "tendcf-ops" / "tendcf-private-acme" / "skills"
+    tpriv.mkdir(parents=True)
+    skill(tpriv, "manual-active-shared")
+    acme_manual_src = skill(tpriv, "manual-acme-only")
+    acme_auto_src = skill(tpriv, "acme-auto")
+
+    links = home / ".agents" / "skills"
+    ledger = tmp_path / "state" / "skill-everywhere" / "managed-links.tsv"
+
+    # Pre-existing manual symlinks under the active legacy root BEFORE an ordinary `--all`.
+    (links / "manual-active-old").symlink_to(manual_old_src)
+    (links / "manual-active-shared").symlink_to(manual_shared_src)
+
+    # 1. Ordinary `--all` visits every active skill: installs `auto-installed`, sees manual links as `already linked`,
+    #    and MUST record ONLY `auto-installed` in managed-links.tsv.
+    r_sync = run(catalog, "--all")
+    assert r_sync.returncode == 0, r_sync.stdout + r_sync.stderr
+    assert ledger.exists()
+    ledger_text = ledger.read_text(encoding="utf-8")
+    assert f"link\t{links / 'auto-installed'}\t{managed_src}" in ledger_text
+    assert "manual-active-old" not in ledger_text
+    assert "manual-active-shared" not in ledger_text
+
+    # 2. Switch to acme and run ordinary `--all`:
+    #    - `auto-installed` (installed by skill-everywhere) IS removed;
+    #    - `manual-active-old` and `manual-active-shared` (NOT adopted) are BOTH preserved!
+    active_cfg = tmp_path / "xdg" / "tendcf" / "active-site"
+    active_cfg.parent.mkdir(parents=True, exist_ok=True)
+    active_cfg.write_text("acme\n", encoding="utf-8")
+
+    # Also pre-install a manual symlink under the newly active tendcf root before running `--all`.
+    (links / "manual-acme-only").symlink_to(acme_manual_src.resolve())
+
+    r_switch = run(catalog, "--all")
+    assert r_switch.returncode == 1  # unrecorded legacy collision on `manual-active-shared`
+    assert not os.path.lexists(links / "auto-installed")
+    assert (links / "manual-active-old").readlink() == manual_old_src
+    assert (links / "manual-active-shared").readlink() == manual_shared_src
+    assert (links / "acme-auto").readlink() == acme_auto_src.resolve()
+    assert "manual-acme-only" not in ledger.read_text(encoding="utf-8")
+
+    # 3. Switch back to legacy: `acme-auto` IS removed, while `manual-acme-only` (never adopted) IS preserved.
+    active_cfg.unlink()
+    r_back = run(catalog, "--all")
+    assert r_back.returncode == 0, r_back.stdout + r_back.stderr
+    assert not os.path.lexists(links / "acme-auto")
+    assert (links / "manual-acme-only").readlink() == acme_manual_src.resolve()
+
+
+def test_symlinked_ledger_lock_surfaces_error_and_preserves_existing_ledger(catalog, tmp_path):
+    """Round 6 MED #2: refused merge-ledger (symlinked lock) MUST surface error and preserve prior ledger."""
+    home, _, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+    env["SKILL_EVERYWHERE_NO_COPY"] = "1"
+
+    lpriv = home / "ops" / "site-private" / "skills"
+    lpriv.mkdir(parents=True)
+    skill(lpriv, "first-skill")
+    skill(lpriv, "second-skill")
+
+    ledger_dir = tmp_path / "state" / "skill-everywhere"
+    ledger = ledger_dir / "managed-links.tsv"
+    lock_file = ledger_dir / "managed-links.lock"
+
+    # 1. Seed a clean ledger via a normal install of `first-skill`.
+    r1 = run(catalog, "first-skill")
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    prior_ledger = ledger.read_text(encoding="utf-8")
+    assert "first-skill" in prior_ledger
+
+    # 2. Replace the lock file with a symlink pointing outside the ledger directory.
+    outside_lock = tmp_path / "outside-lock"
+    lock_file.unlink()
+    lock_file.symlink_to(outside_lock)
+
+    # 3. Run the real `bin/skill-everywhere` entrypoint for `second-skill`:
+    #    MUST surface the failure (exit 1 + stderr error) and preserve `managed-links.tsv` verbatim (no unlocked fallback!).
+    r2 = run(catalog, "second-skill")
+    assert r2.returncode == 1
+    assert "failed to update skill ledger" in r2.stderr
+    assert "refusing symlinked" in r2.stderr
+    assert ledger.read_text(encoding="utf-8") == prior_ledger
+    assert not outside_lock.exists()
 

@@ -246,19 +246,23 @@ _ledger_del_entry() {
 _save_ledger() {
   ((${#ledger_deltas[@]})) || return 0
   [[ $dry == 0 ]] || return 0
-  [[ ! -L $managed_links_file ]] || return 0
-  if [[ -f $_se_script_dir/ade_ops_paths.py ]] && command -v python3 >/dev/null 2>&1; then
-    printf '%s\n' "${ledger_deltas[@]}" | python3 "$_se_script_dir/ade_ops_paths.py" merge-ledger "$managed_links_file" 2>/dev/null && return 0
+  if [[ -L $managed_links_file ]]; then
+    printf 'error: refusing symlinked skill ledger %s; preserving existing ledger\n' "$managed_links_file" >&2
+    rc=1
+    return 0
   fi
-  local dir tmp entry
-  dir="$(dirname "$managed_links_file")"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  tmp="$dir/.managed-links.tmp.$$"
-  : >"$tmp"
-  for entry in "${managed_entries[@]:-}"; do
-    [[ -n $entry ]] && printf '%s\n' "$entry" >>"$tmp"
-  done
-  mv -f "$tmp" "$managed_links_file" || rm -f "$tmp"
+  if [[ ! -f $_se_script_dir/ade_ops_paths.py ]] || ! command -v python3 >/dev/null 2>&1; then
+    printf 'error: cannot update skill ledger %s (ade_ops_paths.py or python3 unavailable); preserving existing ledger\n' "$managed_links_file" >&2
+    rc=1
+    return 0
+  fi
+  local merge_err
+  if ! merge_err="$(printf '%s\n' "${ledger_deltas[@]}" | python3 "$_se_script_dir/ade_ops_paths.py" merge-ledger "$managed_links_file" 2>&1)"; then
+    printf 'error: failed to update skill ledger %s (%s); preserving existing ledger\n' \
+      "$managed_links_file" "${merge_err:-merge-ledger exited non-zero}" >&2
+    rc=1
+    return 0
+  fi
 }
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
@@ -454,10 +458,10 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
       fi ;;
     link)
       if [[ $state == copied ]]; then
-        if ((!dry)) && _is_site_or_priv_src "$src" && [[ -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
+        if ((!dry)) && ((adopt_legacy)) && _is_site_or_priv_src "$src" && [[ -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
           local _csrc
           _csrc="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
-          if [[ $_csrc == source=* ]] && ! _ledger_has_copy "$dest" "${_csrc#source=}"; then
+          if _is_canonical_legacy_grokbot_copy "$_csrc" "$name" && ! _ledger_has_copy "$dest" "${_csrc#source=}"; then
             _ledger_set_entry copy "$dest" "${_csrc#source=}"
           fi
         fi
@@ -579,7 +583,7 @@ for name in "$@"; do
             printf '  %-13s linked\n' "$bin"
           fi
         elif [[ $state == linked ]]; then
-          if ((!dry)) && _is_site_or_priv_src "$src" && ! _ledger_has_link "$link" "$src"; then
+          if ((!dry)) && ((adopt_legacy)) && _is_site_or_priv_src "$src" && _is_canonical_legacy_link "$src" "$name" && ! _ledger_has_link "$link" "$src"; then
             _ledger_set_entry link "$link" "$src"
           fi
           printf '  %-13s already linked\n' "$bin"
