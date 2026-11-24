@@ -37,13 +37,13 @@ Builder and parser: `bin/ade_ws_names.py`; the layout rules are in
 Run the observe pass first, read it, then `--apply` (which needs an explicit `--lead` and refuses to run as a worker):
 
 ```
-bin/ade-tidy --repo ~/src/<repo> --lead <your full agent id> --reports-dir <report folder>   # observe only
-bin/ade-tidy ... --apply                                                                      # prints the plan, then acts
+bin/ade-tidy --repo ~/src/<repo> --lead <your full agent id> --reports-dir <report folder> [--idle-hours 4]   # observe only
+bin/ade-tidy ... --apply                                                                                       # prints the plan, then acts
 ```
 
-`--reports-dir` (repeatable; without it nothing is verified done, so nothing is archived) is where the workers' `unit-<slice>.md` reports and `.done` markers live; `--handled
+`--reports-dir` (repeatable; without it nothing is verified done, so nothing is archived) is where the workers' `unit-<slice>.md` (or `<slice>-report.md`) reports and `.done` markers live; `--handled
 ID,ID` marks workers whose completion you handled without writing a `.done.ack`; `--work KIND=TEXT` sets a window's
-current-work text; `--json` prints the machine form. Sections of the output:
+current-work text; `--idle-hours N` enables idle-hibernation candidate detection (default off; observe-only unless `--apply` is also passed; `--watcher-file PATH` overrides `$LW_STATE_DIR/watcher.json`); `--json` prints the machine form. Sections of the output:
 
 1. **A. Inventory** — every live agent whose own cwd is the repo or one of its linked worktrees: owner class (`self`, `own-worker`, `other-worker`, `lead`, `operator`, `helper`), window, status,
    and a verdict `working | waiting-on-lead | waiting-on-operator | done | unknown`. Agent text is untrusted data:
@@ -86,6 +86,10 @@ current-work text; `--json` prints the machine form. Sections of the output:
    running agent's window or a tab holding an active claim) or it stays. The lineage is the lead plus the archived leads it replaced
    through completed self-handoffs (`bin/ade_lead_succession.py`), so a successor tidies the windows its predecessors left. **`--apply`
    is never the default**: the observe pass only lists.
+9. **I. Idle hibernation (`--idle-hours N`, 2026-11-24; Queue #91 & #96)** — off by default; observe-only unless `--apply` is also passed.
+   Lists `idle` or `closed` agents whose last activity exceeds `N` hours, together with idle age, best-effort process RSS, and the
+   exact `bin/ade-revive <id>` reversibility note (archiving closes the resident provider OS process tree while preserving the session
+   and agent ID on disk; see [docs/ram-relief-p2.md](../../docs/ram-relief-p2.md)). Strictly excludes running turns, pending permission/question cards, standing watchers (registered `load-watch` watcher, `ade.role`/`ade.kind` watcher label, or watcher title; unreadable `watcher.json` fails closed), active worktree claims, parents of unarchived children, and unreported or unacked paid work (`STATUS: working`, `BLOCKED:`, `NO-REPORT:`, missing slice report, missing `.done`, missing `.done.ack` without `--handled`, or post-completion re-task). Operator sessions and other leads' workers are listed only as operator-call items (`I#o`) and never archived by `--apply`. Under `--apply --idle-hours N`, every guard is re-verified live before each `paseo agent archive` (without `--force`).
 
 `--apply` takes the lead's lock and then `_global.lock`, the same order as `bin/ade-worker-run`, for the whole run (every
 other lead's launch, archive-window and rename-main waits meanwhile, so run it when the repo is quiet), so a launch cannot

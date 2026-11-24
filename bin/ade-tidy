@@ -2,7 +2,7 @@
 """Tidy one repo's Paseo agents and windows: inventory, reconnect, waiting report, names, finished agents.
 
   ade-tidy [--repo DIR] [--lead ID] [--json] [--reports-dir DIR ...] [--handled ID,...] [--work KIND=TEXT ...]
-           [--apply]
+           [--idle-hours HOURS] [--watcher-file PATH] [--apply]
   ade-tidy ack AGENT_ID [--lead ID]        record proven contact (the agent's `ack <lead id>` reached the lead)
   ade-tidy prune [--apply] [--json|--json-line] [--min-idle S] [--exclude ID ...] [--max-kills N] [--orphan-grace S]   machine-wide: archive finished Baton `[Handoff writer]`
                                            helpers; report/stop orphan provider processes of archived agents (below)
@@ -30,6 +30,13 @@ precondition re-read right before its action. Steps (skills/tidy/SKILL.md):
      when empty (every unarchived agent record, no terminal), `isolation` is local, it is not LEAD and it is provably
      this lead's (or a predecessor's in its self-handoff chain); occupancy is read last. An agent holding an active claim
      (bin/ade_claims.py owner) is never archived. Other empty windows are listed.
+  7. Idle hibernation (`--idle-hours N`, default off, observe-only unless `--apply` is also passed; queue #91 & #96):
+     identifies `idle` or `closed` own-chain workers whose last activity exceeds `N` hours and that are proven safe to
+     archive (never `running`, never a pending permission card, never a standing watcher, never active-claim holders,
+     never parents of unarchived children, and never paid work whose report/`.done`/`.done.ack` is missing or shows
+     `STATUS: working`/`BLOCKED:`/`NO-REPORT:`). Operator-owned sessions and other leads' workers are listed only as
+     operator-call candidates and never archived by `--apply`. Lists idle age, process RSS (if available), and the
+     reversibility note `bin/ade-revive <id>`.
 
 `prune` (2026-11-14) is a separate, machine-wide mode (no repo, no lead): it archives only Baton helpers (title `[Handoff writer]` AND
 label `baton-writer=1`; parent in label `paseo.parent-agent-id`) that are idle for --min-idle seconds (default 300), have no pending
@@ -75,6 +82,9 @@ KINDS = ("LEAD", "WORKER", "OTHER")  # the three boxes (operator ruling 2026-11-
 KIND_FOR_CLASS = {"self": "LEAD", "lead": "LEAD", "own-worker": "WORKER", "operator": "OTHER"}
 LEAD_NAME_RE = re.compile(r"(?:LEAD|MAIN)\b")
 SKIP_CLASSES = ("helper",)
+MAX_WATCHER_BYTES = 65536
+WATCHER_TITLE_RE = re.compile(r"\b(load[- ]?watch(?:er)?|watcher|watch[- ]?load)\b", re.I)
+WATCHER_ROLE_RE = re.compile(r"watch", re.I)
 
 
 class Refused(Exception):
@@ -87,11 +97,16 @@ class ExcludeRefused(Refused):
 
 # ----------------------------------------------------------------------------------------------- paseo plumbing
 
+def paseo_bin() -> str:
+    """Explicit test-fake path (`ADE_TIDY_PASEO`) or `paseo` on PATH (Rule 2: no PATH replacement in new tests)."""
+    return os.environ.get("ADE_TIDY_PASEO") or "paseo"
+
+
 def paseo(args: list[str], timeout: int | None = CLI_TIMEOUT) -> tuple[int, str, str]:
     """One paseo call, argv list, stdout and stderr read back from files (never a pipe)."""
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         try:
-            rc = subprocess.run(["paseo", *args], stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+            rc = subprocess.run([paseo_bin(), *args], stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                                 timeout=timeout).returncode
         except FileNotFoundError:
             raise Refused("paseo is not on PATH")
@@ -320,6 +335,219 @@ def report_for(slice_name: str | None, reports_dirs: list[str]) -> Path | None:
         if ok:
             return Path(rp)
     return None
+
+
+def reports_for_slice(slice_name: str | None, reports_dirs: list[str]) -> list[Path]:
+    """All regular report files for `slice_name` inside `reports_dirs` (`unit-<slice>.md`, `<slice>-report.md`,
+    `<slice>-N-report.md`), never following symlinks."""
+    if not slice_name or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", slice_name):
+        return []
+    suffixed = re.compile(re.escape(slice_name) + r"-\d+-report\.md")
+    found: list[Path] = []
+    seen: set[str] = set()
+    for d in reports_dirs:
+        root = os.path.realpath(os.path.expanduser(d))
+        if not os.path.isdir(root):
+            continue
+        candidates = [f"unit-{slice_name}.md", f"{slice_name}-report.md"]
+        try:
+            for entry in sorted(os.listdir(root)):
+                if suffixed.fullmatch(entry) and entry not in candidates:
+                    candidates.append(entry)
+        except OSError:
+            continue
+        for name in candidates:
+            raw = os.path.join(root, name)
+            rp = os.path.realpath(raw)
+            try:
+                ok = rp == raw and rp.startswith(root + os.sep) and stat.S_ISREG(os.lstat(raw).st_mode)
+            except OSError:
+                continue
+            if ok and rp not in seen:
+                seen.add(rp)
+                found.append(Path(rp))
+    return found
+
+
+def default_watcher_file() -> Path:
+    lw = Path(os.environ.get("LW_STATE_DIR") or Path.home() / ".local/state/load-watch")
+    return lw / "watcher.json"
+
+
+def load_load_watch_watcher(path: Path | None = None) -> tuple[str | None, str | None]:
+    """Read load-watch `watcher.json` fail-closed (same contract as bin/ade-archive-retired).
+
+    Returns `(watcher_agent_id_lower, error_reason)`:
+    - Missing file or `channel == "relay"` -> `(None, None)`.
+    - Valid `channel == "paseo"` matching active `PASEO_HOME` -> `(target_uuid_lower, None)`.
+    - Anything unreadable, symlinked, non-regular, oversized, corrupt, or mismatched -> `(None, reason)`.
+    """
+    p = path or default_watcher_file()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(p, flags)
+    except FileNotFoundError:
+        return None, None
+    except OSError as exc:
+        return None, f"watcher unreadable ({p}): {clean(str(exc), 120)}"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, f"watcher is not a regular file ({p})"
+        raw = os.read(fd, MAX_WATCHER_BYTES + 1)
+    except OSError as exc:
+        return None, f"watcher read failed ({p}): {clean(str(exc), 120)}"
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_WATCHER_BYTES:
+        return None, f"watcher file exceeds {MAX_WATCHER_BYTES} bytes ({p})"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"watcher corrupt JSON ({p}): {clean(str(exc), 120)}"
+    if not isinstance(data, dict):
+        return None, f"watcher JSON is not an object ({p})"
+    channel = data.get("channel")
+    if not isinstance(channel, str) or channel not in ("paseo", "relay"):
+        return None, f"watcher has invalid channel ({p})"
+    if channel == "relay":
+        return None, None
+    target = data.get("target")
+    if not isinstance(target, str):
+        return None, f"watcher paseo channel missing valid target ({p})"
+    norm_target = target.strip().lower()
+    if not UUID_RE.fullmatch(norm_target):
+        return None, f"watcher paseo target is not a full UUID ({p})"
+    raw_home = data.get("paseo_home")
+    if raw_home is None:
+        watcher_home_path = Path.home() / ".paseo"
+    elif isinstance(raw_home, str) and raw_home and os.path.isabs(raw_home):
+        watcher_home_path = Path(raw_home)
+    else:
+        return None, f"watcher paseo_home is invalid ({p})"
+    try:
+        watcher_home = watcher_home_path.resolve()
+        expected_home = paseo_home().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"watcher paseo_home unresolvable ({p}): {clean(str(exc), 120)}"
+    if watcher_home != expected_home:
+        return None, f"watcher paseo_home mismatch ({p})"
+    return norm_target, None
+
+
+def standing_watcher_reason(row: dict, st: dict | None, watcher_id: str | None) -> str | None:
+    """Non-empty reason if this agent is a standing watcher (never archived/hibernated)."""
+    if watcher_id and row["id"].lower() == watcher_id:
+        return "registered load-watch watcher"
+    labels = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else (row.get("labels") or {})
+    if isinstance(labels, dict):
+        for k in ("ade.role", "ade.kind"):
+            val = labels.get(k)
+            if isinstance(val, str) and WATCHER_ROLE_RE.search(val):
+                return f"label {k}={clean(val, 40)}"
+        if str(labels.get("ade.watcher") or "").strip().lower() in ("1", "true", "yes"):
+            return "label ade.watcher"
+    name = str(row.get("name") or "")
+    if WATCHER_TITLE_RE.search(name):
+        return f"title matches watcher ({clean(name, 50)})"
+    return None
+
+
+def idle_paid_work_check(
+    row: dict,
+    st: dict | None,
+    reports_dirs: list[str],
+    handled: set[str],
+    log: str | None,
+    logstate: str,
+    retask_log: bool,
+) -> tuple[bool, str, str]:
+    """Verify an own-chain idle/closed worker has no unreported or unacked paid work (~/CLAUDE.md item 9).
+
+    Returns `(safe, code, detail)`. Fails closed on missing/unverified slice reports, `STATUS: working`,
+    `BLOCKED:`, `NO-REPORT:`, missing `.done`, missing `.done.ack` (unless `--handled`), re-tasks after completion,
+    unanswered inbound messages, pending cards, or unreadable logs without a verified done+acked report.
+    """
+    if logstate == "inbound":
+        return False, "unanswered-inbound", "last log entry is an inbound message not yet answered"
+    text, card, _ = last_text(log)
+    if card:
+        return False, "waiting-on-operator", "question or permission card in log tail"
+    if re.search(r"(^|\n)\s*BLOCKED:", text):
+        return False, "waiting-on-lead", "BLOCKED line in log tail"
+    if re.search(r"Please reply:\s*ack", text):
+        return False, "waiting-on-lead", "asks for ack in log tail"
+    labels = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else (row.get("labels") or {})
+    if isinstance(labels, dict) and labels.get("ade.placement") == "main" and row["id"] not in handled:
+        return False, "main-placement", "main-placed worker (pass --handled to include)"
+    slice_name = row.get("slice") or (labels.get("slice") if isinstance(labels, dict) else None)
+    if slice_name:
+        reps = reports_for_slice(slice_name, reports_dirs)
+        if not reps:
+            return False, "missing-report", f"slice {clean(slice_name, 40)} has no verifiable report in --reports-dir"
+        for rep in reps:
+            blocked, _ = report_scan(rep)
+            if blocked:
+                return False, "unreported-work", f"report {rep.name} contains STATUS: working / BLOCKED / NO-REPORT"
+        rep = max(reps, key=lambda p: mtime(p) or 0.0)
+        ok, acked = report_done(rep)
+        if not ok:
+            if row["id"] in handled and report_handled_ok(rep):
+                ok, acked = True, True
+            else:
+                return False, "missing-done-marker", f"report {rep.name} is not DONE with a current .done marker"
+        if not acked and row["id"] not in handled:
+            return False, "unacked-work", f"report {rep.name} completion not acked (missing .done.ack and not in --handled)"
+        done_m = mtime(Path(f"{rep}.done"))
+        done_ev = max(filter(None, (mtime(rep), done_m)), default=None)
+        rename_m = max((mtime(q) or 0.0 for q in rep.parent.glob(rep.name + ".done.r*")), default=None)
+        if (
+            retask_log
+            or (rename_m is not None and (done_m is None or done_m <= rename_m))
+            or (done_ev is not None and last_user_message(row["id"]) > done_ev + 2)
+        ):
+            return False, "retasked-unreported", f"worker re-tasked after {rep.name} without new .done/.done.ack"
+        return True, "verified-done-idle", f"report {rep.name} DONE + .done + acked"
+    if logstate == "unreadable":
+        return False, "log-unreadable", "no slice report and log is unreadable (fail closed)"
+    if re.search(r"(^|\n)\s*STATUS:\s*working\b", text):
+        return False, "unreported-work", "log tail shows STATUS: working"
+    return True, "idle-no-unreported-work", "ad-hoc own-worker, readable log, no pending work"
+
+
+def agent_rss_mb_map(agent_ids: set[str]) -> dict[str, float]:
+    """Best-effort map of agent_id -> resident RSS in MB (provider + direct children) via ps; empty if ps fails."""
+    if not agent_ids:
+        return {}
+    try:
+        rows = ps_rows()
+    except Refused:
+        return {}
+    sess_to_aids: dict[str, set[str]] = {}
+    for aid in agent_ids:
+        st = state_file(aid) or {}
+        for sid in record_sessions(st):
+            sess_to_aids.setdefault(sid, set()).add(aid)
+    kids: dict[int, list[dict]] = {}
+    for r in rows:
+        kids.setdefault(r["ppid"], []).append(r)
+    by_agent: dict[str, dict[int, int]] = {}
+    for r in rows:
+        matched: str | None = None
+        callers = provider_callers(r)
+        if len(callers) == 1 and callers[0] in agent_ids:
+            matched = callers[0]
+        else:
+            sid = provider_session(r)
+            if sid and len(sess_to_aids.get(sid, set())) == 1:
+                matched = next(iter(sess_to_aids[sid]))
+        if matched is None:
+            continue
+        pids = by_agent.setdefault(matched, {})
+        pids[r["pid"]] = r["rss_kb"]
+        for c in kids.get(r["pid"], []):
+            pids[c["pid"]] = c["rss_kb"]
+    return {aid: round(sum(pmap.values()) / 1024.0, 1) for aid, pmap in by_agent.items() if pmap}
 
 
 def mtime(path: Path) -> float | None:
@@ -957,6 +1185,94 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
         elif not claims_unknown:
             p["archive_windows"].append({"windowId": wks, "name": nm, "conditional": bool(occupancy.get(wks))})
     p["extra_windows"] = extra_windows(win["windows"], occupancy, opts, lead, names, {w["windowId"] for w in p["archive_windows"]})
+    p["idle_hours"] = getattr(opts, "idle_hours", None)
+    p["idle_hibernate"], p["idle_operator_candidates"], p["idle_skipped"] = [], [], []
+    if p["idle_hours"] is not None:
+        wpath = Path(opts.watcher_file) if getattr(opts, "watcher_file", None) else None
+        watcher_id, watcher_err = load_load_watch_watcher(wpath)
+        if watcher_err is not None:
+            if opts.apply:
+                raise Refused(f"standing watcher registry unreadable: {watcher_err}")
+            p["notes"].append(f"WARNING: standing watcher registry unreadable, so no idle-hibernate archive is listed and --apply refuses the run: {clean(watcher_err, 200)}")
+        else:
+            idle_seconds = p["idle_hours"] * 3600.0
+            handled_set = set(filter(None, (opts.handled or "").split(",")))
+            recs = agent_state_files()
+            unreadable_recs = any(d.get("_bad") for d in recs)
+            with_children = {
+                d["labels"][PARENT_LABEL]
+                for d in recs
+                if not d.get("_bad") and not d.get("archivedAt")
+                and isinstance(d.get("labels"), dict) and isinstance(d["labels"].get(PARENT_LABEL), str)
+            }
+            already_archiving = {a["agent"] for a in p["archive_agents"]}
+            rss_map = agent_rss_mb_map({r["id"] for r in mine if r["class"] != "self"})
+            for r in mine:
+                aid = r["id"]
+                if r["class"] == "self" or aid in already_archiving:
+                    continue
+                st_rec = state_file(aid)
+                w_why = standing_watcher_reason(r, st_rec, watcher_id)
+                if w_why:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "standing-watcher", "detail": w_why})
+                    continue
+                if r["status"] == "running":
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "running", "detail": "active turn"})
+                    continue
+                if r["status"] not in ("idle", "closed"):
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "not-idle", "detail": r["status"]})
+                    continue
+                if not permits_ok:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "permits-unreadable", "detail": "paseo permit ls failed"})
+                    continue
+                if aid in (opts.permits or {}):
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "permission-pending", "detail": opts.permits[aid]})
+                    continue
+                if r["verdict"] in ("waiting-on-operator", "waiting-on-lead"):
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": r["verdict"], "detail": r["reason"]})
+                    continue
+                act = iso_epoch((st_rec or {}).get("lastActivityAt"))
+                um = last_user_message(aid)
+                if act is None or not math.isfinite(um):
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "activity-unreadable", "detail": "missing or invalid lastActivityAt"})
+                    continue
+                idle_s = now - max(act, um)
+                if idle_s < idle_seconds:
+                    continue
+                idle_h = round(idle_s / 3600.0, 2)
+                rss_mb = rss_map.get(aid)
+                revive_cmd = f"bin/ade-revive {aid}"
+                if r["class"] != "own-worker":
+                    p["idle_operator_candidates"].append({
+                        "agent": aid, "name": r["name"], "class": r["class"], "status": r["status"],
+                        "idle_hours": idle_h, "rss_mb": rss_mb, "revive_cmd": revive_cmd,
+                        "why": f"{r['class']} session: operator's call (never archived by --apply)",
+                    })
+                    continue
+                if claims_unknown:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "claims-unknown", "detail": clean(claims_unknown, 120)})
+                    continue
+                if aid in held:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "active-claim", "detail": "holds an active worktree claim"})
+                    continue
+                if unreadable_recs:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "records-unreadable", "detail": "cannot rule out live children"})
+                    continue
+                if aid in with_children:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": "has-live-children", "detail": "archiving would cascade to an unarchived child"})
+                    continue
+                log = log_tail(aid)
+                _, _, lstate = last_text(log)
+                retask_log, _ = scan_log(log)
+                safe, pw_code, pw_detail = idle_paid_work_check(r, st_rec, opts.reports_dir or [], handled_set, log, lstate, retask_log)
+                if not safe:
+                    p["idle_skipped"].append({"agent": aid, "name": r["name"], "class": r["class"], "reason": pw_code, "detail": pw_detail})
+                    continue
+                p["idle_hibernate"].append({
+                    "agent": aid, "name": r["name"], "class": r["class"], "status": r["status"],
+                    "idle_hours": idle_h, "rss_mb": rss_mb, "revive_cmd": revive_cmd,
+                    "why": f"idle-hibernate ({pw_code}: {pw_detail})",
+                })
     return p
 
 
@@ -1026,6 +1342,21 @@ def render(p: dict) -> str:
             + ("--apply archives it" if e["archive"] else "stays (not empty or not provably finished)"))
     if not p.get("extra_windows"):
         add(" H-. none")
+    if p.get("idle_hours") is not None:
+        add("")
+        add(f"I. Idle hibernation (--idle-hours {p['idle_hours']:g}; observe-only unless --apply)")
+        for i, a in enumerate(p.get("idle_hibernate", []), 1):
+            rss = f"{a['rss_mb']:.1f} MB" if a.get("rss_mb") is not None else "n/a"
+            add(f" I{i}. archive (idle-hibernate) {a['agent']} ({a['status']}, idle {a['idle_hours']:.2f}h, rss {rss}) "
+                f"{a['name'][:40]} — reversible via: {a['revive_cmd']}")
+        for i, a in enumerate(p.get("idle_operator_candidates", []), 1):
+            rss = f"{a['rss_mb']:.1f} MB" if a.get("rss_mb") is not None else "n/a"
+            add(f" I{i}o. {a['agent']} ({a['class']}, {a['status']}, idle {a['idle_hours']:.2f}h, rss {rss}) "
+                f"{a['name'][:40]}: {a['why']} — reversible via: {a['revive_cmd']}")
+        for i, a in enumerate(p.get("idle_skipped", []), 1):
+            add(f" I{i}s. skipped {a['agent']} ({a['reason']}): {clean(a.get('detail', ''), 100)}")
+        if not (p.get("idle_hibernate") or p.get("idle_operator_candidates") or p.get("idle_skipped")):
+            add(" I-. no idle-hibernation candidates")
     return "\n".join(out)
 
 
@@ -1060,9 +1391,9 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
 
     if not p.get("permits_ok"):
         rec("apply", "", False, "permission list unreadable: no send and no archive")
-        sends, archive_agents = [], []
+        sends, archive_agents, idle_hibernate = [], [], []
     else:
-        sends, archive_agents = p["send"], p["archive_agents"]
+        sends, archive_agents, idle_hibernate = p["send"], p["archive_agents"], p.get("idle_hibernate", [])
     try:
         nowrows = {a["id"]: a for a in live_agents()}
         fresh_permits = pending_permissions()
@@ -1071,7 +1402,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
     if fresh_permits is None:
         return [{"op": "apply", "target": "", "ok": False, "why": "permission list unreadable: nothing done"}]
 
-    fresh_msg = {a["agent"]: last_user_message(a["agent"]) for a in archive_agents}  # message times at apply start
+    fresh_msg = {a["agent"]: last_user_message(a["agent"]) for a in [*archive_agents, *idle_hibernate]}  # message times at apply start
 
     def do_send(s):
         aid = s["agent"]
@@ -1154,6 +1485,57 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
 
     for a in archive_agents:
         attempt("archive-agent", a["agent"], lambda a=a: do_archive_agent(a))
+
+    def do_idle_hibernate(a):
+        aid = a["agent"]
+        if not valid_id(aid):
+            return rec("idle-hibernate", clean(aid, 60), False, "malformed id: skipped")
+        if aid == lead:
+            return rec("idle-hibernate", aid, False, "lead self: skipped")
+        wpath = Path(opts.watcher_file) if (opts and getattr(opts, "watcher_file", None)) else None
+        watcher_id, watcher_err = load_load_watch_watcher(wpath)
+        if watcher_err is not None:
+            return rec("idle-hibernate", aid, False, f"standing watcher registry unreadable: {clean(watcher_err, 100)}")
+        stt = state_file(aid) or {}
+        if (stt.get("labels") or {}).get("ade.lead") not in chain_of(lead):
+            return rec("idle-hibernate", aid, False, "not this lead's worker: skipped")
+        if aid in claim_holders():
+            return rec("idle-hibernate", aid, False, "holds an active claim: skipped")
+        freshrow = next((x for x in live_agents() if x["id"] == aid), None)
+        permits_now = pending_permissions()
+        if not freshrow or freshrow.get("status") not in ("idle", "closed") or permits_now is None or aid in permits_now:
+            return rec("idle-hibernate", aid, False, "not idle/closed now, card pending, gone, or permissions unreadable: skipped")
+        fresh_meta = {"id": aid, "name": clean(freshrow.get("name") or "", 120), "status": freshrow.get("status"),
+                      "class": "own-worker", "slice": (stt.get("labels") or {}).get("slice"), "labels": stt.get("labels") or {}}
+        w_why = standing_watcher_reason(fresh_meta, stt, watcher_id)
+        if w_why:
+            return rec("idle-hibernate", aid, False, f"standing watcher ({w_why}): skipped")
+        recs_now = agent_state_files(refresh=True)
+        if any(d.get("_bad") for d in recs_now):
+            return rec("idle-hibernate", aid, False, "agent records unreadable (cannot rule out live children): skipped")
+        if any(not d.get("archivedAt") and isinstance(d.get("labels"), dict) and d["labels"].get(PARENT_LABEL) == aid for d in recs_now):
+            return rec("idle-hibernate", aid, False, "has live child agent (archive would cascade): skipped")
+        idle_hours = p.get("idle_hours")
+        act = iso_epoch(stt.get("lastActivityAt"))
+        um = last_user_message(aid)
+        if idle_hours is None or act is None or not math.isfinite(um) or um > fresh_msg.get(aid, 0.0) + 2 or (time.time() - max(act, um)) < idle_hours * 3600.0:
+            return rec("idle-hibernate", aid, False, "activity changed or below --idle-hours threshold: skipped")
+        log = log_tail(aid)
+        text, card, lstate = last_text(log)
+        retask_log, receipt = scan_log(log)
+        handled_set = set(filter(None, ((opts.handled if opts else "") or "").split(",")))
+        verdict(fresh_meta, text, card, None, (opts.reports_dir if opts else None) or [], handled_set, lstate, retask_log, receipt)
+        if fresh_meta["verdict"] in ("waiting-on-lead", "waiting-on-operator"):
+            return rec("idle-hibernate", aid, False, f"now {fresh_meta['verdict']}: skipped")
+        safe, pw_code, pw_detail = idle_paid_work_check(fresh_meta, stt, (opts.reports_dir if opts else None) or [], handled_set, log, lstate, retask_log)
+        if not safe:
+            return rec("idle-hibernate", aid, False, f"paid-work guard ({pw_code}): {clean(pw_detail, 90)}")
+        rc, out, err = paseo(["agent", "archive", aid])  # no --force: a running agent is never interrupted
+        rec("idle-hibernate", aid, rc == 0,
+            f"archived (idle {a['idle_hours']}h; revive: bin/ade-revive {aid})" if rc == 0 else clean(err or out, 120))
+
+    for a in idle_hibernate:
+        attempt("idle-hibernate", a["agent"], lambda a=a: do_idle_hibernate(a))
 
     def do_archive_window(w):
         wks = w["windowId"]
@@ -1412,10 +1794,19 @@ PS_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2
 SESSION_RE = re.compile(r"(?:^|\s)--(?:resume|session-id)(?:=|\s+)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\s|$)")
 
 
+def _ps_bin() -> str:
+    if os.environ.get("ADE_TIDY_TEST") == "1" and os.environ.get("ADE_TIDY_PS"):
+        return os.environ["ADE_TIDY_PS"]
+    if os.path.exists(PS_BIN):
+        return PS_BIN
+    return "/usr/bin/ps" if PS_BIN == "/bin/ps" and os.path.exists("/usr/bin/ps") else PS_BIN
+
+
 def ps_rows(pid: int | None = None) -> list[dict]:
     """The process table (or one pid) as dicts: pid, ppid, lstart (as printed), rss_kb, command. Argv list, C locale; a line
     that does not parse is dropped, never guessed at. An empty answer for `-p PID` (rc 1 from ps) is a dead pid, not an error."""
-    argv = [PS_BIN, "-ax", "-o", PS_COLS] if pid is None else [PS_BIN, "-o", PS_COLS, "-p", str(pid)]
+    ps_exec = _ps_bin()
+    argv = [ps_exec, "-ax", "-o", PS_COLS] if pid is None else [ps_exec, "-o", PS_COLS, "-p", str(pid)]
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL,
                            env={**os.environ, "LC_ALL": "C", "LANG": "C"})
@@ -1890,6 +2281,16 @@ def nonneg_float(v: str) -> float:
     return n
 
 
+def pos_float(v: str) -> float:
+    try:
+        n = float(v)
+    except ValueError:
+        n = -1.0
+    if not (math.isfinite(n) and n > 0):
+        raise argparse.ArgumentTypeError("a finite positive number is required")
+    return n
+
+
 def full_id(v: str) -> str:
     if not UUID_RE.fullmatch(v.lower()):
         raise argparse.ArgumentTypeError("a full agent id (uuid) is required")
@@ -1955,6 +2356,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--reports-dir", action="append", help="folder with unit-<slice>.md reports (+ .done)")
     p.add_argument("--handled", help="comma-separated agent ids whose completion the lead has handled")
     p.add_argument("--work", action="append", help="KIND=TEXT current-work text for the renamed windows")
+    p.add_argument("--idle-hours", type=pos_float, default=None, metavar="HOURS",
+                   help="report (and with --apply, archive/hibernate) safe own-chain idle/closed workers older than HOURS (default: off)")
+    p.add_argument("--watcher-file", default=None, metavar="PATH",
+                   help="load-watch watcher.json path (default: $LW_STATE_DIR/watcher.json)")
     opts = p.parse_args(argv)
     try:
         lead = resolve_lead(opts.lead)

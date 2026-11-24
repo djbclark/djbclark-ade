@@ -306,3 +306,123 @@ def test_a_cut_that_lands_on_a_line_start_keeps_that_line(tmp_path: Path) -> Non
 def test_the_not_off_line_says_what_was_checked(tmp_path: Path) -> None:
     r = _text(tmp_path, "--roots", "--unguarded-log", str(tmp_path / "absent.log"), "--claude-settings", str(tmp_path / NONE))
     assert "other settings layers and running sessions are not checked" in r.stdout
+
+
+DAEMONS_NORMAL_PS = """  PID  PPID     RSS COMMAND
+  101     1   65536 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  102     1   40960 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+  103     1   20480 /System/Library/CoreServices/launchservicesd
+  104     1  153600 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon
+  105     1   30720 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+  106     1   10240 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds
+  107     1    2048 /usr/sbin/distnoted daemon
+  108     1    1024 /usr/sbin/distnoted agent
+  109     1    5120 /usr/sbin/cfprefsd daemon
+  201     1    1024 /opt/homebrew/bin/rg loginwindow /tmp/foo
+  202     1    2048 /usr/bin/vim mds.txt
+  203     1    4096 /usr/local/bin/mdsync --watch
+"""
+
+
+def _run_ps(tmp: Path, ps_text: str, *args: str) -> subprocess.CompletedProcess[str]:
+    f = tmp / "ps_daemons.txt"
+    _ = f.write_text(ps_text)
+    return subprocess.run([sys.executable, str(TOOL), "--ps-file", str(f), *args], capture_output=True, text=True, timeout=30)
+
+
+def test_daemons_normal_below_thresholds_and_exact_basename_matching(tmp_path: Path) -> None:
+    import time as _time
+
+    boot = str(int(_time.time() - 3 * 86400))
+    plain = _run_ps(tmp_path, DAEMONS_NORMAL_PS, "--json")
+    assert plain.returncode == 0
+    assert "_daemons" not in json.loads(plain.stdout)
+
+    r = _run_ps(tmp_path, DAEMONS_NORMAL_PS, "--daemons", "--boottime-epoch", boot, "--json")
+    assert r.returncode == 0, r.stderr
+    dm = json.loads(r.stdout)["_daemons"]
+    assert set(dm["daemons"]) == {
+        "loginwindow", "corespotlightd", "launchservicesd", "WindowServer",
+        "mds_stores", "mds", "distnoted", "cfprefsd",
+    }
+    assert dm["daemons"]["distnoted"] == {"n": 2, "rss_mb": 3.0}
+    assert dm["daemons"]["mds"] == {"n": 1, "rss_mb": 10.0}
+    assert dm["daemons"]["mds_stores"] == {"n": 1, "rss_mb": 30.0}
+    assert dm["reboot_due"] is False
+    assert dm["reboot_reasons"] == []
+    assert 2.9 <= dm["uptime_days"] <= 3.1
+
+    txt = _run_ps(tmp_path, DAEMONS_NORMAL_PS, "--daemons", "--boottime-epoch", boot)
+    assert txt.returncode == 0
+    assert "macOS system daemons (report-only" in txt.stdout
+    assert "reboot due: no (advisory)" in txt.stdout
+
+
+def test_daemons_single_daemon_and_total_bloat_triggers_reboot_due(tmp_path: Path) -> None:
+    import time as _time
+
+    bloated = """  PID  PPID     RSS COMMAND
+  101     1 2988441 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  102     1 2621440 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/corespotlightd
+  103     1  849920 /System/Library/CoreServices/launchservicesd
+"""
+    boot = str(int(_time.time() - 11.5 * 86400))
+    r = _run_ps(tmp_path, bloated, "--daemons", "--boottime-epoch", boot, "--json")
+    assert r.returncode == 0, r.stderr
+    dm = json.loads(r.stdout)["_daemons"]
+    assert dm["reboot_due"] is True
+    joined = " | ".join(dm["reboot_reasons"])
+    assert "total tracked daemons" in joined
+    assert "loginwindow" in joined
+    assert "corespotlightd" in joined
+    assert "launchservicesd" not in joined
+
+    txt = _run_ps(tmp_path, bloated, "--daemons", "--boottime-epoch", boot)
+    assert txt.returncode == 0 and "REBOOT DUE (advisory):" in txt.stdout
+
+
+def test_daemons_uptime_plus_elevated_memory_threshold(tmp_path: Path) -> None:
+    import time as _time
+
+    # Each daemon < 2.0 GB and total ~2.7 GB (< 4.0 GB total threshold, >= 2.5 GB elevated threshold)
+    elevated = """  PID  PPID     RSS COMMAND
+  101     1 1536000 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  102     1 1228800 /System/Library/CoreServices/launchservicesd
+"""
+    short_up = str(int(_time.time() - 5 * 86400))
+    long_up = str(int(_time.time() - 15 * 86400))
+    r_short = json.loads(_run_ps(tmp_path, elevated, "--daemons", "--boottime-epoch", short_up, "--json").stdout)["_daemons"]
+    assert r_short["reboot_due"] is False
+
+    r_long = json.loads(_run_ps(tmp_path, elevated, "--daemons", "--boottime-epoch", long_up, "--json").stdout)["_daemons"]
+    assert r_long["reboot_due"] is True
+    assert any("uptime" in reason and "elevated daemon memory" in reason for reason in r_long["reboot_reasons"])
+
+    # Long uptime alone with low daemon memory must not trigger reboot_due
+    r_clean = json.loads(_run_ps(tmp_path, DAEMONS_NORMAL_PS, "--daemons", "--boottime-epoch", long_up, "--json").stdout)["_daemons"]
+    assert r_clean["reboot_due"] is False
+
+
+def test_daemons_boottime_validation_sysctl_parse_and_footprint_linux_safe(tmp_path: Path, monkeypatch: Any) -> None:
+    m = _module()
+    assert m.parse_boottime_sysctl("{ sec = 1794269448, usec = 747501 } Mon Nov  9 19:10:48 2026") == 1794269448.0
+    assert m.parse_boottime_sysctl("not a boottime") is None
+
+    bad = _run_ps(tmp_path, DAEMONS_NORMAL_PS, "--daemons", "--boottime-epoch", "-5")
+    assert bad.returncode == 2 and "--boottime-epoch" in bad.stderr
+    warn = _run_ps(tmp_path, DAEMONS_NORMAL_PS, "--boottime-epoch", "1700000000")
+    assert warn.returncode == 0 and "--boottime-epoch only applies with --daemons" in warn.stderr
+
+    # With --footprint: compressed footprint triggers reboot_due even when RSS is small
+    rows = m.parse_ps("  PID PPID RSS COMMAND\n  101 1 102400 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console\n")
+    monkeypatch.setattr(m, "footprint_mb", lambda pid: 2400.0 if pid == 101 else None)
+    dm_fp = m.daemon_census(rows, want_fp=True, boottime_epoch=1_000_000.0, now_epoch=1_086_400.0)
+    assert dm_fp["reboot_due"] is True
+    assert dm_fp["total_footprint_mb"] == 2400.0
+    assert dm_fp["daemons"]["loginwindow"]["footprint_mb"] == 2400.0
+
+    # Linux-safe fallback when `footprint` is absent (footprint_mb returns None)
+    monkeypatch.setattr(m, "footprint_mb", lambda pid: None)
+    dm_nofp = m.daemon_census(rows, want_fp=True, boottime_epoch=1_000_000.0, now_epoch=1_086_400.0)
+    assert dm_nofp["reboot_due"] is False
+    assert dm_nofp["effective_total_mb"] == 100.0
