@@ -811,20 +811,30 @@ def build_mit_bridge(env: dict[str, str], log=sys.stderr) -> MitBridge | None:
     if "FIRECRAWL_ROUTER_MIT_ALLOWLIST" in env:
         raw_allowlist = (env.get("FIRECRAWL_ROUTER_MIT_ALLOWLIST") or "").strip()
         if not raw_allowlist:
-            print("firecrawl-router: empty FIRECRAWL_ROUTER_MIT_ALLOWLIST; failing closed", file=log, flush=True)
-            return None
-        parsed_allow: set[str] = set()
-        for raw_tok in raw_allowlist.split(","):
-            tok = raw_tok.strip()
-            if not tok or valid_host(tok) != tok:
+            print(
+                "firecrawl-router: empty FIRECRAWL_ROUTER_MIT_ALLOWLIST; denying all automated bridge fetches (snapshot fallback suppression kept)",
+                file=log,
+                flush=True,
+            )
+            allowlist = frozenset()
+        else:
+            parsed_allow: set[str] = set()
+            bad_tok = None
+            for raw_tok in raw_allowlist.split(","):
+                tok = raw_tok.strip()
+                if not tok or valid_host(tok) != tok:
+                    bad_tok = tok
+                    break
+                parsed_allow.add(tok)
+            if bad_tok is not None:
                 print(
-                    f"firecrawl-router: invalid FIRECRAWL_ROUTER_MIT_ALLOWLIST host {tok!r}; failing closed",
+                    f"firecrawl-router: invalid FIRECRAWL_ROUTER_MIT_ALLOWLIST host {bad_tok!r}; denying all automated bridge fetches (snapshot fallback suppression kept)",
                     file=log,
                     flush=True,
                 )
-                return None
-            parsed_allow.add(tok)
-        allowlist = frozenset(parsed_allow)
+                allowlist = frozenset()
+            else:
+                allowlist = frozenset(parsed_allow)
 
     cfg = MitBridgeConfig(
         mode=raw_mode,

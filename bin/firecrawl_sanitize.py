@@ -400,12 +400,37 @@ def sanitize_html(text: str) -> tuple[str, int]:
     return c_clean, n_unicode + n_comments
 
 
+def _sanitize_json_key(key: str) -> tuple[str, int]:
+    """Sanitize a user-schema JSON key without truncating length or collapsing benign spaces."""
+    u_clean, n_u = _clean_unicode_stream(key, allow_newlines=False, allow_tabs=False)
+    c_clean, n_c = _strip_html_comments(u_clean, preserve_fences=False)
+    events = n_u + n_c
+    if events == 0 and c_clean != key:
+        events = 1
+    return c_clean, events
+
+
+def _insert_unique_key(target: dict, sk: str, val: object) -> tuple[str, bool]:
+    """Insert `sk` into `target`, disambiguating collisions rather than silently overwriting."""
+    if sk not in target:
+        target[sk] = val
+        return sk, False
+    i = 2
+    while f"{sk}#dup{i}" in target:
+        i += 1
+    unique_k = f"{sk}#dup{i}"
+    target[unique_k] = val
+    return unique_k, True
+
+
 def sanitize_json_value(val: object, depth: int = 0) -> tuple[object, int]:
-    """Recursively sanitize all strings in a JSON-like value (capped depth)."""
-    if depth >= _MAX_JSON_DEPTH:
-        return val, 0
+    """Recursively sanitize all strings in a JSON-like value, failing closed past _MAX_JSON_DEPTH."""
     if isinstance(val, str):
         return sanitize_markdown(val)
+    if depth >= _MAX_JSON_DEPTH:
+        if isinstance(val, (list, dict)):
+            return "[redacted:max-depth]", 1
+        return val, 0
     if isinstance(val, list):
         total = 0
         changed = False
@@ -420,14 +445,14 @@ def sanitize_json_value(val: object, depth: int = 0) -> tuple[object, int]:
     if isinstance(val, dict):
         total = 0
         changed = False
-        out_dict = {}
+        out_dict: dict = {}
         for k, v in val.items():
-            sk, nk = _sanitize_field_counted(k, limit=200) if isinstance(k, str) else (k, 0)
+            sk, nk = _sanitize_json_key(k) if isinstance(k, str) else (k, 0)
             sv, nv = sanitize_json_value(v, depth + 1)
-            total += nk + nv
-            if nk or nv or sk != k or sv is not v:
+            _, collided = _insert_unique_key(out_dict, sk, sv)
+            total += nk + nv + (1 if collided else 0)
+            if nk or nv or collided or sk != k or sv is not v:
                 changed = True
-            out_dict[sk] = sv
         return (out_dict if changed else val), total
     return val, 0
 
@@ -448,33 +473,35 @@ def _meta_field_limit(key: object) -> int:
 
 
 def _sanitize_meta_list(items: list, depth: int) -> tuple[bool, int]:
-    if depth >= _MAX_JSON_DEPTH:
-        return False, 0
     mutated = False
     stripped = 0
     for idx, item in enumerate(items):
         if isinstance(item, str):
             cleaned, n = _sanitize_field_counted(item, limit=500)
-            if n or cleaned != item:
+            changed = cleaned != item
+            if n or changed:
                 items[idx] = cleaned
-                stripped += max(n, 1) if cleaned != item else n
+                stripped += max(n, 1) if changed else n
                 mutated = True
-        elif isinstance(item, dict):
-            sub_mut, sub_n = _sanitize_metadata_dict(item, depth + 1)
-            if sub_mut:
+        elif isinstance(item, (dict, list)):
+            if depth + 1 >= _MAX_JSON_DEPTH:
+                items[idx] = "[redacted:max-depth]"
+                stripped += 1
                 mutated = True
-            stripped += sub_n
-        elif isinstance(item, list):
-            sub_mut, sub_n = _sanitize_meta_list(item, depth + 1)
-            if sub_mut:
-                mutated = True
-            stripped += sub_n
+            elif isinstance(item, dict):
+                sub_mut, sub_n = _sanitize_metadata_dict(item, depth + 1)
+                if sub_mut:
+                    mutated = True
+                stripped += sub_n
+            else:
+                sub_mut, sub_n = _sanitize_meta_list(item, depth + 1)
+                if sub_mut:
+                    mutated = True
+                stripped += sub_n
     return mutated, stripped
 
 
 def _sanitize_metadata_dict(meta: dict, depth: int = 0) -> tuple[bool, int]:
-    if depth >= _MAX_JSON_DEPTH:
-        return False, 0
     mutated = False
     stripped = 0
     rebuilt: dict = {}
@@ -483,29 +510,40 @@ def _sanitize_metadata_dict(meta: dict, depth: int = 0) -> tuple[bool, int]:
         skey = key
         if isinstance(key, str):
             ck, nk = _sanitize_field_counted(key, limit=200)
-            if nk or ck != key:
+            k_diff = ck != key
+            if nk or k_diff:
                 skey = ck
-                stripped += max(nk, 1) if ck != key else nk
+                stripped += max(nk, 1) if k_diff else nk
                 mutated = True
                 key_changed = True
         lim = _meta_field_limit(skey)
         if isinstance(val, str):
             cleaned, n = _sanitize_field_counted(val, limit=lim)
-            if n or cleaned != val:
+            v_diff = cleaned != val
+            if n or v_diff:
                 val = cleaned
-                stripped += max(n, 1) if cleaned != val else n
+                stripped += max(n, 1) if v_diff else n
                 mutated = True
-        elif isinstance(val, list):
-            sub_mut, sub_n = _sanitize_meta_list(val, depth + 1)
-            if sub_mut:
+        elif isinstance(val, (list, dict)):
+            if depth + 1 >= _MAX_JSON_DEPTH:
+                val = "[redacted:max-depth]"
+                stripped += 1
                 mutated = True
-            stripped += sub_n
-        elif isinstance(val, dict):
-            sub_mut, sub_n = _sanitize_metadata_dict(val, depth + 1)
-            if sub_mut:
-                mutated = True
-            stripped += sub_n
-        rebuilt[skey] = val
+            elif isinstance(val, list):
+                sub_mut, sub_n = _sanitize_meta_list(val, depth + 1)
+                if sub_mut:
+                    mutated = True
+                stripped += sub_n
+            else:
+                sub_mut, sub_n = _sanitize_metadata_dict(val, depth + 1)
+                if sub_mut:
+                    mutated = True
+                stripped += sub_n
+        _, collided = _insert_unique_key(rebuilt, skey, val)
+        if collided:
+            stripped += 1
+            mutated = True
+            key_changed = True
     if key_changed or mutated:
         meta.clear()
         meta.update(rebuilt)

@@ -334,6 +334,51 @@ class RouterHardeningTests(unittest.TestCase):
         self.assertIn("iopscience.iop.org", fr._extract_url_hosts("//iopscience.iop.org/article/1"))
         self.assertIn("iopscience.iop.org", fr._extract_url_hosts("iopscience.iop.org/a?next=https://x"))
 
+        # Codex P2 #4680793797: >200-char user-schema JSON keys preserved without truncation/overwrite,
+        # and hostile-sanitization key collisions are disambiguated rather than dropped.
+        long_k1 = "field_" + ("a" * 210) + "_one"
+        long_k2 = "field_" + ("a" * 210) + "_two"
+        schema_payload = json.dumps({
+            "success": True,
+            "data": {
+                long_k1: "v1",
+                long_k2: "v2",
+                "k": "orig",
+                "k<!-- x -->": "collided",
+            },
+        }).encode("utf-8")
+        with mock.patch.object(fr, "call", return_value=fr.Reply(200, {"Content-Type": "application/json"}, schema_payload)):
+            skrep, _ = router.handle("GET", "/v2/extract/33333333-3333-3333-3333-333333333333", {}, None)
+        sdata = skrep.json()["data"]
+        self.assertEqual(sdata[long_k1], "v1")
+        self.assertEqual(sdata[long_k2], "v2")
+        self.assertEqual(sdata["k"], "orig")
+        self.assertEqual(sdata["k#dup2"], "collided")
+
+        # Codex P2 #4680793808: >16-deep nested JSON & metadata redact over-depth subtrees (never clean pass-through)
+        deep = "<!-- deep hidden payload -->"
+        for _ in range(18):
+            deep = [deep]
+        deep_payload = json.dumps({
+            "success": True,
+            "data": {"payload": deep},
+        }).encode("utf-8")
+        with mock.patch.object(fr, "call", return_value=fr.Reply(200, {"Content-Type": "application/json"}, deep_payload)):
+            dprep, _ = router.handle("GET", "/v2/extract/44444444-4444-4444-4444-444444444444", {}, None)
+        self.assertTrue(dprep.headers.get("X-Firecrawl-Sanitized", "").startswith("stripped:"))
+        self.assertNotIn("deep hidden payload", dprep.body.decode("utf-8"))
+        self.assertIn("[redacted:max-depth]", dprep.body.decode("utf-8"))
+
+        # Adversary N1-R3: purely length-truncated metadata string increments stripped count
+        long_title_payload = json.dumps({
+            "success": True,
+            "data": {"markdown": "Ok", "metadata": {"title": "A" * 600}},
+        }).encode("utf-8")
+        with mock.patch.object(fr, "call", return_value=fr.Reply(200, {"Content-Type": "application/json"}, long_title_payload)):
+            ltrep, _ = router.handle("POST", "/v2/scrape", {}, json.dumps({"url": "https://example.com"}).encode())
+        self.assertTrue(ltrep.headers.get("X-Firecrawl-Sanitized", "").startswith("stripped:"))
+        self.assertEqual(len(ltrep.json()["data"]["metadata"]["title"]), 500)
+
     def test_extractor_spotlights_sanitizes_json_and_rejects_empty_direct_quote(self):
         seen_bodies = []
 
@@ -491,10 +536,16 @@ class RouterHardeningTests(unittest.TestCase):
             res = b.maybe_bridge("POST", "/v2/scrape", json.dumps({"url": "https://academic.oup.com/a"}).encode(), cf403, "page status 403", fr.Reply)
             self.assertEqual(res, (None, None, "not-allowlisted", True))
 
-            # Explicit empty/whitespace or invalid allowlist fails closed (None)
+            # Codex P1 #4680793790: Explicit empty/whitespace or invalid allowlist builds an
+            # enrollment-aware deny-all bridge (bridges 0 hosts, still suppresses commercial fallback).
             for bad in ("", "   ", "*.nature.com", "WWW.NATURE.COM", "www.nature.com,", "127.0.0.1"):
-                self.assertIsNone(
-                    mb.build_mit_bridge({**base_env, "FIRECRAWL_ROUTER_MIT_ALLOWLIST": bad}, log=io.StringIO()),
+                bd = mb.build_mit_bridge({**base_env, "FIRECRAWL_ROUTER_MIT_ALLOWLIST": bad}, log=io.StringIO())
+                self.assertIsNotNone(bd, repr(bad))
+                self.assertEqual(bd.config.allowlist, frozenset(), repr(bad))
+                self.assertFalse(bd.is_enrolled_request("POST", "/v2/scrape", json.dumps({"url": "https://www.nature.com/a"}).encode()))
+                self.assertEqual(
+                    bd.maybe_bridge("POST", "/v2/scrape", json.dumps({"url": "https://academic.oup.com/a"}).encode(), cf403, "page status 403", fr.Reply),
+                    (None, None, "not-allowlisted", True),
                     repr(bad),
                 )
 

@@ -225,6 +225,16 @@ failure explicitly (URL, host/publisher, and observed error) and offer to coordi
 routing lead to enroll the domain or repair the fetch path). See [skills/research/SKILL.md](../skills/research/SKILL.md)
 item 7a and [docs/orchestration-practices.md](orchestration-practices.md) section 5 item 11.
 
+### Firecrawl router sanitization, spotlighting, and publisher AI-terms controls (2026-11-24)
+
+`bin/firecrawl-router` applies three default-safe boundary controls on untrusted web and scholarly responses:
+
+1. **Response sanitization (`FIRECRAWL_ROUTER_SANITIZE=on|off`, default `on`, `bin/firecrawl_sanitize.py`):** Strips invisible Unicode smuggling classes (`Cc`, `Cf` including zero-width/bidi/Unicode Tag block `U+E0000..U+E007F`, `Co`, `Cn`, `Cs`, `Zl`, `Zp`, variation selectors, Default_Ignorable fillers, bare `\r`, and excessive combining marks `> 2`) and HTML comments (`<!-- ... -->` outside verified CommonMark §4.5 closed code fences) across `/scrape`, `/search`, `/search/developer`, `/map`, `/crawl/{id}`, `/batch/scrape/{id}`, and `/extract/{id}`. Clean responses remain byte-for-byte untouched; responses carry `X-Firecrawl-Untrusted: 1` and `X-Firecrawl-Sanitized: clean|stripped:<n>` (failing closed with HTTP `503` if `bin/firecrawl_sanitize.py` is missing while `on`). Over-depth JSON/metadata subtrees past depth 16 are redacted (`[redacted:max-depth]`) rather than passed through unsanitized.
+2. **`Extractor` spotlighting:** Every `query`/`json` extraction prompt wraps page content and map-reduce excerpts in per-call 128-bit random-nonce delimiters (`<<<UNTRUSTED_WEB_DATA_<32hex> ... >>>`) with untrusted-data framing, sanitizes `answer`/`json` outputs, and rejects empty `directQuote` matches.
+3. **Automated `mit-bridge` allowlist & subscribed publisher cloud-LLM guard:**
+   - `FIRECRAWL_ROUTER_MIT_ALLOWLIST` (optional comma-separated exact lowercase FQDNs) intersects `enrolled-snapshot.json` in `bin/firecrawl_mit_bridge.py` so automated scraping stays decoupled from interactive Chrome or Tailscale enrollment. An empty or malformed value defaults to an enrollment-aware deny-all set (`not-allowlisted`) that bridges zero hosts while still suppressing commercial Firecrawl fallback for snapshot-enrolled publishers.
+   - `FIRECRAWL_ROUTER_NO_CLOUD_LLM_HOSTS` (default: `academic.oup.com`, `ieeexplore.ieee.org`, `iopscience.iop.org`, `journals.sagepub.com`, `onlinelibrary.wiley.com`, `pubs.acs.org`, `www.sciencedirect.com`; set to `none` to disable) blocks external `Extractor` LLM forwarding (`X-Firecrawl-LLM: blocked-policy`) on non-OA scrapes matching `doc.url` or landed `metadata.{url,sourceURL,ogUrl}` (including DOI redirects, scheme-less, protocol-relative, and backslash authority differentials), while keeping legal `oa-fallback` extractions enabled and preserving `wiley-tdm`'s explicit `FIRECRAWL_ROUTER_WILEY_ALLOW_CLOUD_LLM` switch.
+
 ## Hermes (added 2026-08-23)
 
 `hermes` (`~/.local/bin/hermes`) is the **Hermes Agent** — Nous Research's
