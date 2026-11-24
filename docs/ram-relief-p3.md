@@ -90,21 +90,20 @@ Operator directive (`2026-11-24`): *"also consider if some variety of consolidat
 
 - `ade_paseo_client.SnapshotCache` writes atomic snapshots (`0700` dir `~/.local/state/djbclark-ade/paseo-cache/`, `0600` temp file + `fsync` + `os.replace`, `O_NOFOLLOW` bounded reads) keyed by daemon target and query parameters.
 - **Disabled by default (`ttl_s = 0`)**; operators or launchd jobs can enable it via `ADE_PASEO_CACHE_TTL=<seconds>` (e.g. `5` seconds).
-- **Strict safety boundary:** Only advisory read-only pollers (`load-watch`, `ade-pi-stuck`) pass `use_cache=True`. Every safety-critical guard or pre-mutation check (`ade-auto-permit`, `ade-approval-window`, `ade-archive-retired`, `ade-net-resume`, `ade-progress`, `ade_send_guard`, `ade_subagent_stalls`) ALWAYS passes `use_cache=False` and reads live daemon state directly.
+- **Strict safety boundary:** Only advisory read-only pollers (`load-watch`, `ade-pi-stuck`) pass `use_cache=True`. Every safety-critical guard or pre-mutation check (`ade-auto-permit`, `ade-approval-window`, `ade-archive-retired`, `ade-net-resume`, `ade-progress`, `ade_send_guard`, `ade_subagent_stalls`) uses the default `use_cache=False` for listings or an uncached inspection, reading live daemon state directly.
 - **Why opt-in:** Because a live loopback WS `fetch_agents` call takes only **5.8 ms** and MCP `list_pending_permissions` takes **~2 ms**, removing Node.js subprocesses already eliminates >99% of CPU/RAM cost without introducing cache-staleness risk. The cache is available if multiple 20–60 s pollers later need to coalesce reads under heavy daemon load.
 
-### 3.3 Consolidating Overlapping `launchd` Pollers — **PROPOSAL ONLY (REQUIRES OPERATOR APPROVAL)**
+### 3.3 Consolidating Overlapping `launchd` Pollers
 
-No live `~/Library/LaunchAgents/*.plist` files or external repos are modified in this PR. Based on our live `LaunchAgents` inventory, two targeted consolidations make strong operational sense once approved:
+The permission sweeper proposal awaits approval. The operator approved building the five-minute agent sweep on 2026-11-24. Live migration is a separate apply step.
 
 1. **Permission sweepers (`StartInterval=60`): `com.djbclark.ade-auto-permit` + `com.djbclark.ade-approval-window`:**
    - Both run every 60 s against `list_pending_permissions` (and `ade-approval-window` runs an inner 2 s loop for 50 s while `/var/db/sudo-ask/grant` exists).
    - **Recommendation:** Keep their policy modules separate (different trust boundaries: `ade-approval-window` gates on root-owned `/var/db/sudo-ask/grant` and allows `rm` cards; `ade-auto-permit` scopes to lead lineage/labels and holds `HOLD_TOOLS`), OR combine only their launchd tick wrapper once `ade-auto-permit` is verified quiet at 0 CLI spawns/h. Because both are now ~2 ms stateless HTTP calls, the remaining RAM cost of two separate 60 s Python invocations is negligible (~15 MB transient Python for <50 ms).
-2. **5-minute fleet/agent health sweepers (`StartInterval=300`): `ade-supervisor-scan`, `ade-progress`, `ade-subagent-stalls`, and `fleet-watch`:**
-   - Currently 3 separate `launchd` jobs (`ade-supervisor-scan`, `ade-progress`, `fleet-watch`) fire every 300 s, and `ade-subagent-stalls` is waiting to hook into `fleet-watch`.
-   - **Recommendation:** Keep `fleet-watch` (`site-public-djbclark`: phones, VPS, GitHub PRs, S1, load) separate from `djbclark-ade` agent monitors, and consider a single `com.djbclark.ade-agent-sweep` (`StartInterval=300`) that runs `ade-supervisor-scan`, `ade-progress scan --yes`, and `ade-subagent-stalls --notify` sequentially under one `ade-job-run` lock — sharing one `ADE_PASEO_CACHE_TTL=10` snapshot for read-only scans while preserving independent state files and failure isolation (one failing step never aborts the others).
-   - **Do NOT merge `load-watch` (`StartInterval=20`)** into a 60 s or 300 s job: `load-watch` needs its 20 s sampling cadence for CPU/swap spike detection and admission control, and its steady-state sample already makes zero Paseo calls unless a spike occurs.
-   - **Do NOT introduce a persistent long-running Python watcher daemon yet:** Short-lived `launchd` jobs release 100% of their Python RSS immediately after each 50 ms tick; a persistent Python daemon would add a permanent RSS baseline and crash-recovery surface without saving meaningful RAM once Node.js spawns are gone.
+2. **Five-minute agent health sweep (`StartInterval=300`, operator-approved 2026-11-24):**
+   - [`bin/ade-agent-sweep`](../bin/ade-agent-sweep) runs `ade-supervisor-scan`, `ade-progress scan --yes`, and `ade-subagent-stalls --notify` sequentially. A nonzero exit, launch error, or timeout is logged and the later steps still run. Each monitor keeps its own state.
+   - [`launchd/com.djbclark.ade-agent-sweep.plist`](../launchd/com.djbclark.ade-agent-sweep.plist) runs the sweep under one `ade-job-run` admission lock. The default `ADE_PASEO_CACHE_TTL=10` lets advisory consumers such as `ade-pi-stuck` reuse matching snapshots. Progress scans and send guards use uncached listings and live inspections.
+   - Keep `fleet-watch` and the 20-second `load-watch` separate. The [macOS cutover](scheduling.md#macos-cutover) drains the old LaunchAgents and retires the existing detector hook in `fleet-watch` before starting the sweep.
 
 ---
 
@@ -132,8 +131,14 @@ Currently `fleet-watch` (`StartInterval=300`, 12 runs/h) runs `phantom_watch`, w
 
 ### 4.2 `djbclark-ade/plugins/ade-claim/server/hook.mjs`
 
-Line 422 calls `ctx.spawn(paseo, ["agent", "inspect", "--json", "--", oldOwner])` only on a claim collision (not a periodic poll). In a follow-up PR, replace that spawn with an in-process Paseo plugin SDK lookup or loopback `fetch("http://127.0.0.1:7263/mcp/agents", { method: "POST", ... })` calling `get_agent_status`, removing the last `paseo` CLI subprocess from enabled ADE plugins.
+Converted. On a claim collision, the hook reads the previous owner through the Paseo plugin
+SDK's `context.paseo.agents.ref(ownerId).refresh()`. An exact-ID archived snapshot or the SDK's
+explicit missing-agent result permits the existing compare-and-swap rebind. Failed, ambiguous or
+cancelled lookups leave the claim in place. Observe mode still only logs the plan.
 
-### 4.3 `bin/ade-pin-workspaces` (`ade-pin-workspaces.mjs`)
+### 4.3 `bin/ade-pin-workspaces`
 
-Runs 4 times/h via `ade-pin-sweep` using Paseo's bundled Electron Node (`ELECTRON_RUN_AS_NODE=1`) to call `fetchWorkspaces` and `workspace.pin.set` over WS. Because `ade_paseo_client.WsClient` already speaks Paseo's loopback `/ws` protocol, a small follow-up can add `set_workspace_pinned(workspace_id, pinned=True)` to `WsClient` and eliminate the 4/h Electron Node spawns too.
+Converted. The default sweep uses the stdlib `PaseoClient` to read full WebSocket workspace
+descriptors (including pin and archiving state) and send the native `workspace.pin.set.request`
+RPC. This removes the four scheduled Electron Node launches per hour. The legacy Electron
+launcher remains available through explicit `ADE_PASEO_TRANSPORT=cli`.

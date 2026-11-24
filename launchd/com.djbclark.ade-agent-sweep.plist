@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Five-minute ADE agent sweep. The command gives advisory reads a 10 s cache by default
+     and runs supervisor, progress and sub-agent stalls scans with separate state.
+     bin/ade-sched fills __ADE__, __HOME__, __STATE__ and __ADMISSION__. See docs/scheduling.md
+     for the cutover from the two standalone LaunchAgents. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.djbclark.ade-agent-sweep</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__ADE__/bin/ade-job-run</string><string>--lock-dir</string><string>__ADMISSION__</string><string>com.djbclark.ade-agent-sweep</string><string>--</string>
+    <string>__ADE__/bin/ade-agent-sweep</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key><string>__STATE__/sweep.out</string>
+  <key>StandardErrorPath</key><string>__STATE__/sweep.err</string>
+</dict>
+</plist>

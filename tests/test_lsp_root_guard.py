@@ -437,3 +437,29 @@ def test_kept_folder_removal_matches_by_real_path_and_needs_no_added_list(tmp_pa
                  "params": {"event": {"added": [], "removed": [{"uri": other.as_uri(), "name": "o"}]}}}
     g2.from_client(b"raw", unrelated)
     assert len(g2.kept) == 1
+
+
+def test_tendcf_ops_and_custom_root_are_containers(tmp_path: Path) -> None:
+    """Queue #123: ~/tendcf-ops (and custom TENDCF_OPS_ROOT) are LSP container roots even under --no-heuristic."""
+    mod = _guard_module()
+    assert "~/tendcf-ops" in mod.DEFAULT_CONTAINERS
+    home = _mk(tmp_path)
+    troot = home / "tendcf-ops"
+    site_repo = troot / "tendcf-private-djbclark"
+    (site_repo / ".git").mkdir(parents=True)
+    custom = tmp_path / "custom-tendcf-ops"
+    custom.mkdir()
+
+    env = dict(os.environ, HOME=str(home))
+    env.pop("TENDCF_OPS_ROOT", None)
+    r_root = subprocess.run([sys.executable, str(TOOL), "--no-heuristic", "--check", str(troot)],
+                            capture_output=True, text=True, env=env)
+    assert r_root.returncode == 0 and r_root.stdout.strip() == "container"
+    r_repo = subprocess.run([sys.executable, str(TOOL), "--no-heuristic", "--check", str(site_repo)],
+                            capture_output=True, text=True, env=env)
+    assert r_repo.returncode == 0 and r_repo.stdout.strip() == "project"
+
+    env_custom = dict(env, TENDCF_OPS_ROOT=str(custom))
+    r_custom = subprocess.run([sys.executable, str(TOOL), "--no-heuristic", "--check", str(custom)],
+                              capture_output=True, text=True, env=env_custom)
+    assert r_custom.returncode == 0 and r_custom.stdout.strip() == "container"

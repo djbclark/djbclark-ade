@@ -62,6 +62,31 @@ def test_recognized_ops_shapes_preserve_existing_results(tmp_path, monkeypatch):
     assert assert_resolved(ops_repo) == ("site-djbclark", "ops")
 
 
+def test_tendcf_ops_checkouts_recognized_and_worktrees_excluded(tmp_path, monkeypatch):
+    fake_home = tmp_path
+    troot = fake_home / "tendcf-ops"
+    priv = troot / "tendcf-private-acme"
+    pub = troot / "tendcf-public-acme"
+    wt_dir = troot / ".worktrees" / "acme-wt"
+    stray_wt = troot / "tendcf-private-acme-wt"
+    for d in (priv / "sub", pub, wt_dir, stray_wt):
+        d.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.delenv("TENDCF_OPS_ROOT", raising=False)
+
+    assert assert_resolved(priv) == ("tendcf-private-acme", "ops")
+    assert assert_resolved(priv / "sub") == ("tendcf-private-acme", "ops")
+    assert assert_resolved(pub) == ("tendcf-public-acme", "ops")
+    assert assert_resolved(wt_dir)[1] != "ops"
+    assert assert_resolved(stray_wt)[1] != "ops"
+
+    custom = tmp_path / "custom-tendcf-ops"
+    custom_priv = custom / "tendcf-private-lab"
+    custom_priv.mkdir(parents=True)
+    monkeypatch.setenv("TENDCF_OPS_ROOT", str(custom))
+    assert assert_resolved(custom_priv) == ("tendcf-private-lab", "ops")
+
+
 def test_normal_repo_resolution_is_deterministic(repo):
     directory = repo / "nested" / "directory"
     directory.mkdir(parents=True)

@@ -868,3 +868,33 @@ def test_ok_headline_names_the_skipped_count(tmp_path):
     assert "ok, no findings" in head
     assert "skipped" in head  # e.g. ", 2 skipped," (symlink + missing config)
     assert "notes: symlink: gone.md" in proc.stdout
+
+
+def test_default_store_stage0_dual_read_and_fail_closed(tmp_path):
+    """Queue #123: bm-lint default store dual-reads active tendcf-private-<slug>/memory and falls back fail-closed."""
+    home = tmp_path / "home"
+    tmem = home / "tendcf-ops" / "tendcf-private-acme" / "memory"
+    lmem = home / "ops" / "site-private" / "memory"
+    write_note(tmem, "t1.md", "see [[t2]]\n")
+    write_note(tmem, "t2.md", "see [[t1]]\n")
+    write_note(lmem, "l1.md", "see [[l2]]\n")
+    write_note(lmem, "l2.md", "see [[l1]]\n")
+
+    clean_env = {k: v for k, v in os.environ.items() if not k.startswith(("BM_LINT_", "TENDCF_"))}
+    clean_env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(tmp_path / "empty-xdg")})
+
+    # Without selector, sole tendcf-ops site is NOT globbed -> legacy ~/ops/site-private/memory wins.
+    r_leg = subprocess.run(
+        [sys.executable, str(TOOL), "--json", "--config", NO_CONFIG],
+        capture_output=True, text=True, env=clean_env, timeout=60,
+    )
+    assert r_leg.returncode == 0, r_leg.stdout + r_leg.stderr
+    assert Path(json.loads(r_leg.stdout)["store"]).resolve() == lmem.resolve()
+
+    # With TENDCF_SITE=acme, tendcf-private-acme/memory wins.
+    r_tendcf = subprocess.run(
+        [sys.executable, str(TOOL), "--json", "--config", NO_CONFIG],
+        capture_output=True, text=True, env={**clean_env, "TENDCF_SITE": "acme"}, timeout=60,
+    )
+    assert r_tendcf.returncode == 0, r_tendcf.stdout + r_tendcf.stderr
+    assert Path(json.loads(r_tendcf.stdout)["store"]).resolve() == tmem.resolve()

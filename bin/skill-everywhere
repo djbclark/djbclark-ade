@@ -2,6 +2,7 @@
 # Make a shared skill visible to every agent TUI on this machine by
 # symlinking it into each TUI's user-level skills dir.
 #     skill-everywhere --all                sync every public/private/site/chrome-use shared skill
+#     skill-everywhere --adopt-legacy-links --all  also migrate/clean pre-ledger canonical ~/ops/site-{private,public-djbclark} links/copies
 #     skill-everywhere --check --all        verify every installed target; exit 1 for gaps; one warning per absent root
 #     skill-everywhere <name>...            link (idempotent, collapses chains)
 #     skill-everywhere --check <name>...    report per-TUI status, change nothing; ends with a "== end" line
@@ -18,8 +19,12 @@
 # Content lives in exactly one place (2026-10-14 chain collapse):
 #   public skills: ~/src/djbclark-ade/skills/<name> when that checkout exists; otherwise skills/
 #     of the repo this script's real path sits in (SKILL_EVERYWHERE_ADE overrides; #279 / revived #292)
-#   ~/ops/site-private/skills/<name>            private skills (e.g. 1password)
-#   ~/ops/site-public-djbclark/skills/<name>    site skills (site-djbclark repo; moved out of this repo 2026-11-06)
+#   ~/tendcf-ops/tendcf-private-<slug>/skills/<name>  private skills (active tendcf site pair; Stage 0 dual-read)
+#   ~/tendcf-ops/tendcf-public-<slug>/skills/<name>   site skills (active tendcf site pair; Stage 0 dual-read)
+#   ~/ops/site-private/skills/<name>                  legacy private skills (fallback; OPS_ROOT forces legacy)
+#   ~/ops/site-public-djbclark/skills/<name>          legacy site skills (fallback; OPS_ROOT forces legacy)
+# Switching active roots between ~/ops and ~/tendcf-ops reconciles provably managed site links and
+# Grok Bot copies in --all / --check --all while leaving foreign entries untouched.
 #   ~/src/chrome-use/skill-data/<name>          chrome-use skills (third-party git repo; SKILL_EVERYWHERE_CHROME overrides)
 # and every TUI links DIRECTLY at that path — no hub layers, no chained
 # symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
@@ -80,9 +85,185 @@ if [[ -z ${SKILL_EVERYWHERE_ADE:-} ]]; then
   else SKILL_EVERYWHERE_ADE=$HOME/src/djbclark-ade/skills; fi
 fi
 ade_root=$SKILL_EVERYWHERE_ADE
-priv_root="${SKILL_EVERYWHERE_PRIVATE:-${OPS_ROOT:-$HOME/ops}/site-private/skills}"
-site_root="${SKILL_EVERYWHERE_SITE:-${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills}"
+default_priv_root="${OPS_ROOT:-$HOME/ops}/site-private/skills"
+default_site_root="${OPS_ROOT:-$HOME/ops}/site-public-djbclark/skills"
+managed_tendcf_base="$HOME/tendcf-ops"
+managed_legacy_base="${OPS_ROOT:-$HOME/ops}"
+_se_script_dir="$(cd -P "$(dirname "$(grealpath -- "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")")" && pwd)"
+if [[ -f $_se_script_dir/ade_ops_paths.py ]] && command -v python3 >/dev/null 2>&1; then
+  _se_bases=()
+  while IFS= read -r _se_line; do
+    _se_bases+=("$_se_line")
+  done < <(python3 "$_se_script_dir/ade_ops_paths.py" managed-root-bases 2>/dev/null || true)
+  if ((${#_se_bases[@]} == 2)) && [[ -n ${_se_bases[0]} && -n ${_se_bases[1]} ]]; then
+    managed_tendcf_base="${_se_bases[0]}"
+    managed_legacy_base="${_se_bases[1]}"
+  fi
+  if [[ -z ${OPS_ROOT:-} && ( -z ${SKILL_EVERYWHERE_PRIVATE:-} || -z ${SKILL_EVERYWHERE_SITE:-} ) ]]; then
+    _se_roots=()
+    while IFS= read -r _se_line; do
+      _se_roots+=("$_se_line")
+    done < <(python3 "$_se_script_dir/ade_ops_paths.py" skill-roots 2>/dev/null || true)
+    if ((${#_se_roots[@]} == 2)) && [[ -n ${_se_roots[0]} && -n ${_se_roots[1]} ]]; then
+      default_priv_root="${_se_roots[0]}"
+      default_site_root="${_se_roots[1]}"
+    fi
+  fi
+fi
+priv_root="${SKILL_EVERYWHERE_PRIVATE:-$default_priv_root}"
+site_root="${SKILL_EVERYWHERE_SITE:-$default_site_root}"
 chrome_root="${SKILL_EVERYWHERE_CHROME:-$HOME/src/chrome-use/skill-data}"
+
+_is_valid_tendcf_slug() {
+  local s=$1
+  [[ ${#s} -ge 1 && ${#s} -le 64 && $s =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)*$ && $s != *-wt ]]
+}
+_is_managed_tendcf_repo_name() {
+  local r=$1
+  if [[ $r == tendcf-private-* ]]; then _is_valid_tendcf_slug "${r#tendcf-private-}"
+  elif [[ $r == tendcf-public-* ]]; then _is_valid_tendcf_slug "${r#tendcf-public-}"
+  else return 1; fi
+}
+_is_managed_legacy_repo_name() {
+  local r=$1
+  [[ $r =~ ^site-[A-Za-z0-9][A-Za-z0-9._-]*$ && $r != *-wt ]]
+}
+_is_valid_site_skills_root() {
+  local root=$1 repo_dir base rbase rel
+  [[ -n $root && $root != */../* && $root != */.. && $root == */skills ]] || return 1
+  repo_dir="${root%/skills}"
+  for base in "$managed_tendcf_base" "$HOME/tendcf-ops"; do
+    [[ -n $base ]] || continue
+    for rbase in "$base" "$(grealpath -- "$base" 2>/dev/null || true)"; do
+      [[ -n $rbase ]] || continue
+      if [[ $repo_dir == "$rbase"/* ]]; then
+        rel="${repo_dir#"$rbase"/}"
+        [[ $rel != */* ]] && _is_managed_tendcf_repo_name "$rel" && return 0
+      fi
+    done
+  done
+  for base in "$managed_legacy_base" "$HOME/ops"; do
+    [[ -n $base ]] || continue
+    for rbase in "$base" "$(grealpath -- "$base" 2>/dev/null || true)"; do
+      [[ -n $rbase ]] || continue
+      if [[ $repo_dir == "$rbase"/* ]]; then
+        rel="${repo_dir#"$rbase"/}"
+        [[ $rel != */* ]] && _is_managed_legacy_repo_name "$rel" && return 0
+      fi
+    done
+  done
+  return 1
+}
+
+# Managed per-entry provenance ledger (Round 4 MEDIUM #2, 2026-11-24): tracks exact individual
+# site/private skill links (`link\t<dest>\t<target>`) and Grok Bot copies (`copy\t<dest>\t<source>`)
+# actually installed by `skill-everywhere` itself. Never written in `--check` or `--dry-run`, and
+# never populated by ADE-only or unrelated runs, so manually installed symlinks — even under a
+# previously selected site root or another valid inactive site — are never replaced or deleted.
+_state_base="$HOME/.local/state"
+if [[ -n ${XDG_STATE_HOME:-} && ${XDG_STATE_HOME} == /* ]]; then
+  _state_base="$XDG_STATE_HOME"
+fi
+managed_links_file="${SKILL_EVERYWHERE_STATE_FILE:-$_state_base/skill-everywhere/managed-links.tsv}"
+managed_entries=()
+ledger_deltas=()
+if [[ -f $managed_links_file && ! -L $managed_links_file ]]; then
+  while IFS=$'\t' read -r _mk _md _mt; do
+    [[ -n $_mk && -n $_md && -n $_mt ]] || continue
+    [[ $_mk == link || $_mk == copy ]] || continue
+    managed_entries+=("${_mk}"$'\t'"${_md}"$'\t'"${_mt}")
+  done <"$managed_links_file"
+fi
+
+_is_site_or_priv_src() {
+  local s=$1
+  [[ $s == "$priv_root"/* || $s == "$site_root"/* ]]
+}
+_is_canonical_legacy_link() {
+  local tgt=$1 sname=$2 base rbase
+  [[ -n $tgt && $tgt != */../* && $tgt != */.. && $tgt == */skills/"$sname" ]] || return 1
+  for base in "$HOME/ops" "$(grealpath -- "$HOME/ops" 2>/dev/null || true)"; do
+    [[ -n $base ]] || continue
+    if [[ $tgt == "$base/site-private/skills/$sname" || $tgt == "$base/site-public-djbclark/skills/$sname" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+_is_canonical_legacy_grokbot_copy() {
+  local src_line=$1 sname=$2
+  [[ $src_line == "source=site-private/skills/$sname" \
+     || $src_line == "source=site-djbclark/skills/$sname" \
+     || $src_line == "source=site-public-djbclark/skills/$sname" ]]
+}
+_ledger_has_link() {
+  local want_dest=$1 want_tgt=$2 entry kind d t rt wt
+  wt="$(grealpath -- "$want_tgt" 2>/dev/null || true)"
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == link && $d == "$want_dest" ]] || continue
+    if [[ $t == "$want_tgt" ]]; then return 0; fi
+    if [[ -n $wt ]]; then
+      rt="$(grealpath -- "$t" 2>/dev/null || true)"
+      [[ -n $rt && $rt == "$wt" ]] && return 0
+    fi
+  done
+  return 1
+}
+_ledger_has_copy() {
+  local want_dest=$1 want_src=$2 entry kind d t
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == copy && $d == "$want_dest" && $t == "$want_src" ]] && return 0
+  done
+  return 1
+}
+_ledger_set_entry() {
+  local new_kind=$1 new_dest=$2 new_tgt=$3 entry kind d t next=()
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == "$new_kind" && $d == "$new_dest" ]] && continue
+    next+=("$entry")
+  done
+  next+=("${new_kind}"$'\t'"${new_dest}"$'\t'"${new_tgt}")
+  managed_entries=("${next[@]}")
+  ledger_deltas+=("set"$'\t'"${new_kind}"$'\t'"${new_dest}"$'\t'"${new_tgt}")
+}
+_ledger_del_entry() {
+  local del_kind=$1 del_dest=$2 entry kind d t next=()
+  for entry in "${managed_entries[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS=$'\t' read -r kind d t <<<"$entry"
+    [[ $kind == "$del_kind" && $d == "$del_dest" ]] && continue
+    next+=("$entry")
+  done
+  managed_entries=("${next[@]:-}")
+  ledger_deltas+=("del"$'\t'"${del_kind}"$'\t'"${del_dest}"$'\t')
+}
+_save_ledger() {
+  ((${#ledger_deltas[@]})) || return 0
+  [[ $dry == 0 ]] || return 0
+  if [[ -L $managed_links_file ]]; then
+    printf 'error: refusing symlinked skill ledger %s; preserving existing ledger\n' "$managed_links_file" >&2
+    rc=1
+    return 0
+  fi
+  if [[ ! -f $_se_script_dir/ade_ops_paths.py ]] || ! command -v python3 >/dev/null 2>&1; then
+    printf 'error: cannot update skill ledger %s (ade_ops_paths.py or python3 unavailable); preserving existing ledger\n' "$managed_links_file" >&2
+    rc=1
+    return 0
+  fi
+  local merge_err
+  if ! merge_err="$(printf '%s\n' "${ledger_deltas[@]}" | python3 "$_se_script_dir/ade_ops_paths.py" merge-ledger "$managed_links_file" 2>&1)"; then
+    printf 'error: failed to update skill ledger %s (%s); preserving existing ledger\n' \
+      "$managed_links_file" "${merge_err:-merge-ledger exited non-zero}" >&2
+    rc=1
+    return 0
+  fi
+}
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
 # dir we fill (a second link there would list the skill twice), or "x <why>",
@@ -107,10 +288,11 @@ cursor-agent|via ~/.claude/skills
 grokbot|copy ~/agent-data/workflows
 '
 
-mode=link dry=0 all=0
+mode=link dry=0 all=0 adopt_legacy=0
 while [[ ${1:-} == -* ]]; do
   case $1 in
     --check) mode=check ;; --remove) mode=remove ;; --dry-run|-n) dry=1 ;; --all) all=1 ;;
+    --adopt-legacy-links) adopt_legacy=1 ;;
     *) echo "error: unknown option $1" >&2; exit 2 ;;
   esac
   shift
@@ -200,10 +382,24 @@ render_copy() {  # render_copy <src> <out>; refuses (rc 1, nothing copied) a sou
   # Provenance follows the root the skill came from (a public djbclark-ade copy renders exactly as before).
   local repo from_md
   case $1 in
-    "$site_root"/*) repo=site-djbclark
-      from_md="site-djbclark [\`skills/$name\`](https://github.com/djbclark/site-djbclark/tree/master/skills/$name)" ;;
-    "$priv_root"/*) repo=site-private
-      from_md="site-private \`skills/$name\` (a private repository)" ;;
+    "$site_root"/*)
+      case $site_root in
+        */tendcf-public-*/skills)
+          repo="${site_root%/skills}"; repo="${repo##*/}"
+          from_md="${repo} \`skills/$name\`" ;;
+        *)
+          repo=site-djbclark
+          from_md="site-djbclark [\`skills/$name\`](https://github.com/djbclark/site-djbclark/tree/master/skills/$name)" ;;
+      esac ;;
+    "$priv_root"/*)
+      case $priv_root in
+        */tendcf-private-*/skills)
+          repo="${priv_root%/skills}"; repo="${repo##*/}"
+          from_md="${repo} \`skills/$name\` (a private repository)" ;;
+        *)
+          repo=site-private
+          from_md="site-private \`skills/$name\` (a private repository)" ;;
+      esac ;;
     "$chrome_root"/*) repo=chrome-use
       from_md="chrome-use [\`skill-data/$name\`](https://github.com/leeguooooo/chrome-use/tree/main/skill-data/$name)" ;;
     *) repo=djbclark-ade
@@ -256,9 +452,20 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
       if ((all)) && [[ $state != copied ]]; then rc=1; fi ;;
     remove)
       if [[ $state == missing || $state == real* ]]; then printf '  %-13s %s (left alone)\n' "$bin" "$state"
-      else act "remove $dest" rm -rf "$dest"; ((dry)) || printf '  %-13s removed %s\n' "$bin" "$dest"; fi ;;
+      else
+        act "remove $dest" rm -rf "$dest"
+        ((dry)) || { _ledger_del_entry copy "$dest"; printf '  %-13s removed %s\n' "$bin" "$dest"; }
+      fi ;;
     link)
-      if [[ $state == copied ]]; then printf '  %-13s already copied\n' "$bin"
+      if [[ $state == copied ]]; then
+        if ((!dry)) && ((adopt_legacy)) && _is_site_or_priv_src "$src" && [[ -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
+          local _csrc
+          _csrc="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
+          if _is_canonical_legacy_grokbot_copy "$_csrc" "$name" && ! _ledger_has_copy "$dest" "${_csrc#source=}"; then
+            _ledger_set_entry copy "$dest" "${_csrc#source=}"
+          fi
+        fi
+        printf '  %-13s already copied\n' "$bin"
       elif [[ $state == missing || $state == "stale copy" ]]; then
         # Render beside the target under a dot name, then swap it in. A function (not eval+&&) so set -e
         # sees render_copy's failure and the partial `.ade-*.new` is removed (PR 20 LOW e).
@@ -273,7 +480,16 @@ copy_target() {  # copy_target <dir>; uses $bin $name $src $mode $dry
           mv "$d/.ade-$n.new" "$dest"
         }
         if act "copy to $dest ($state)" _copy_swap "$dir" "$name" "$src" "$dest"; then
-          ((dry)) || printf '  %-13s copied (was %s)\n' "$bin" "$state"
+          if ((!dry)); then
+            if _is_site_or_priv_src "$src" && [[ -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]]; then
+              local _csrc
+              _csrc="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
+              [[ $_csrc == source=* ]] && _ledger_set_entry copy "$dest" "${_csrc#source=}"
+            else
+              _ledger_del_entry copy "$dest"
+            fi
+            printf '  %-13s copied (was %s)\n' "$bin" "$state"
+          fi
         else
           printf '  %-13s copy failed; left alone\n' "$bin"
           rc=1
@@ -335,6 +551,14 @@ for name in "$@"; do
     elif [[ -L $link && -e $src && "$(grealpath "$link" 2>/dev/null)" == "$(grealpath "$src")" ]]; then
       state="chained via $(greadlink "$link")"
     elif [[ -L $link && ! -e $link ]]; then state="dangling -> $(greadlink "$link")"
+    elif [[ -L $link ]] && _ledger_has_link "$link" "$(greadlink "$link")"; then
+      state="migrating from $(greadlink "$link")"
+    elif [[ -L $link ]] && _is_canonical_legacy_link "$(greadlink "$link")" "$name"; then
+      if ((adopt_legacy)); then
+        state="migrating from $(greadlink "$link")"
+      else
+        state="unrecorded legacy link -> $(greadlink "$link") (re-run with --adopt-legacy-links to migrate)"
+      fi
     elif [[ -L $link ]]; then state="other link -> $(greadlink "$link")"
     elif [[ -e $link ]]; then state="real dir/file (not ours)"
     else state=missing; fi
@@ -347,24 +571,41 @@ for name in "$@"; do
           if ((all)) && [[ $state != linked ]]; then rc=1; fi
         fi ;;
       remove)
-        if [[ $state == linked ]]; then act "remove $link" rm "$link"; ((dry)) || printf '  %-13s removed\n' "$bin"
+        if [[ $state == linked || $state == migrating\ * ]]; then
+          act "remove $link" rm "$link"
+          ((dry)) || { _ledger_del_entry link "$link"; printf '  %-13s removed\n' "$bin"; }
         else printf '  %-13s %s (left alone)\n' "$bin" "$state"; fi ;;
       link)
         if [[ $state == missing ]]; then
-          act "link $link" eval 'mkdir -p "$dir" && ln -s "$src" "$link"'; ((dry)) || printf '  %-13s linked\n' "$bin"
-        elif [[ $state == linked ]]; then printf '  %-13s already linked\n' "$bin"
+          act "link $link" eval 'mkdir -p "$dir" && ln -s "$src" "$link"'
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s linked\n' "$bin"
+          fi
+        elif [[ $state == linked ]]; then
+          if ((!dry)) && ((adopt_legacy)) && _is_site_or_priv_src "$src" && _is_canonical_legacy_link "$src" "$name" && ! _ledger_has_link "$link" "$src"; then
+            _ledger_set_entry link "$link" "$src"
+          fi
+          printf '  %-13s already linked\n' "$bin"
         elif [[ $state == chained\ * ]]; then
           # ln -sfn (not ln+mv): macOS mv follows a symlink-to-dir
           # destination and moves the temp link INSIDE the target dir
           # instead of replacing the link.
           act "relink $link direct" ln -sfn "$src" "$link"
-          ((dry)) || printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
-        elif [[ $state == dangling\ * ]]; then
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s relinked direct (was %s)\n' "$bin" "$state"
+          fi
+        elif [[ $state == dangling\ * || $state == migrating\ * ]]; then
           # Nobody owns a link whose target is gone (2026-10-15: 36 links in
           # a TUI's skills dir still pointed at the pre-2026-10-09 site-private
-          # path); replace it rather than preserve a dead pointer.
+          # path), and a link recorded in our per-entry provenance ledger migrates
+          # cleanly on root transitions (2026-11-24, queue #123).
           act "relink $link" ln -sfn "$src" "$link"
-          ((dry)) || printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+          if ((!dry)); then
+            _is_site_or_priv_src "$src" && _ledger_set_entry link "$link" "$src" || _ledger_del_entry link "$link"
+            printf '  %-13s relinked (was %s)\n' "$bin" "$state"
+          fi
         elif ((third_party)) && [[ $state == "real dir/file (not ours)" ]]; then
           printf '  %-13s %s; left alone (third-party skill: a note, not an error)\n' "$bin" "$state"
         else printf '  %-13s %s; left alone\n' "$bin" "$state"; rc=1; fi ;;
@@ -514,6 +755,98 @@ retired_step() {
   done
 }
 retired_step
+
+# Reconcile old-site-only skills left behind after switching active site roots between legacy ~/ops
+# and ~/tendcf-ops/tendcf-{private,public}-<slug> (2026-11-24, queue #123). Runs in --all link and
+# --check --all modes only; foreign symlinks and foreign real directories are never touched.
+stale_site_step() {
+  ((all)) || return 0
+  [[ $mode == link || $mode == check ]] || return 0
+  local bin dir l sname tgt dest src_line seen_dirs="|" printed=0
+  _stale_site_header() {
+    if ((!printed)); then
+      echo "== stale site skills"
+      printed=1
+    fi
+  }
+  while IFS='|' read -r bin dir; do
+    [[ -z $bin ]] && continue
+    wanted "$bin" || continue
+    if [[ $dir == copy\ * ]]; then
+      ((no_copy)) && continue
+      dir="${dir#copy }"; dir="${dir/#\~/$HOME}"
+      [[ -d $dir ]] || continue
+      for dest in "$dir"/ade-*; do
+        [[ -d $dest && ! -L $dest && -f $dest/.skill-everywhere && ! -L $dest/.skill-everywhere ]] || continue
+        sname="${dest##*/ade-}"
+        [[ " ${names[*]:-} " == *" $sname "* ]] && continue
+        src_line="$(ghead -1 -- "$dest/.skill-everywhere" 2>/dev/null || true)"
+        [[ $src_line == source=* ]] || continue
+        if _ledger_has_copy "$dest" "${src_line#source=}"; then
+          if [[ $mode == check ]]; then
+            printf 'warning: stale site skill copy still present: %s (run skill-everywhere --all to remove)\n' "$dest" >&2
+            rc=1
+          else
+            _stale_site_header
+            act "remove stale site $dest" rm -rf -- "$dest"
+            ((dry)) || { _ledger_del_entry copy "$dest"; printf '  %-13s removed stale site %s\n' "$bin" "$dest"; }
+          fi
+        elif _is_canonical_legacy_grokbot_copy "$src_line" "$sname"; then
+          if [[ $mode == link ]] && ((adopt_legacy)); then
+            _stale_site_header
+            act "remove adopted legacy $dest" rm -rf -- "$dest"
+            ((dry)) || { _ledger_del_entry copy "$dest"; printf '  %-13s removed adopted legacy %s\n' "$bin" "$dest"; }
+          elif [[ $mode == check ]]; then
+            printf 'warning: unrecorded legacy site skill copy still present: %s (run skill-everywhere --adopt-legacy-links --all to remove)\n' "$dest" >&2
+            rc=1
+          else
+            printf 'note: unrecorded legacy site skill copy preserved: %s (pass --adopt-legacy-links --all to remove)\n' "$dest" >&2
+          fi
+        fi
+      done
+      continue
+    fi
+    [[ $dir == via* || $dir == x* ]] && continue
+    dir="${dir/#\~/$HOME}"
+    [[ -d $dir ]] || continue
+    [[ $seen_dirs == *"|$dir|"* ]] && continue
+    seen_dirs="${seen_dirs}${dir}|"
+    for l in "$dir"/*; do
+      [[ -L $l ]] || continue
+      sname="${l##*/}"
+      [[ $sname == paseo ]] && continue
+      [[ " ${names[*]:-} " == *" $sname "* ]] && continue
+      tgt="$(greadlink -- "$l" 2>/dev/null)" || continue
+      if [[ $tgt == "$ade_root/$sname" || $tgt == "$priv_root/$sname" \
+         || $tgt == "$site_root/$sname" || $tgt == "$chrome_root/$sname" ]]; then
+        continue
+      fi
+      if _ledger_has_link "$l" "$tgt"; then
+        if [[ $mode == check ]]; then
+          printf 'warning: stale site skill link still present: %s -> %s (run skill-everywhere --all to remove)\n' "$l" "$tgt" >&2
+          rc=1
+        else
+          _stale_site_header
+          act "remove stale site $l" rm -- "$l"
+          ((dry)) || { _ledger_del_entry link "$l"; printf '  %-13s removed stale site %s\n' "$bin" "$l"; }
+        fi
+      elif _is_canonical_legacy_link "$tgt" "$sname"; then
+        if [[ $mode == link ]] && ((adopt_legacy)); then
+          _stale_site_header
+          act "remove adopted legacy $l" rm -- "$l"
+          ((dry)) || { _ledger_del_entry link "$l"; printf '  %-13s removed adopted legacy %s\n' "$bin" "$l"; }
+        elif [[ $mode == check ]]; then
+          printf 'warning: unrecorded legacy site skill link still present: %s -> %s (run skill-everywhere --adopt-legacy-links --all to remove)\n' "$l" "$tgt" >&2
+          rc=1
+        else
+          printf 'note: unrecorded legacy site skill link preserved: %s -> %s (pass --adopt-legacy-links --all to remove)\n' "$l" "$tgt" >&2
+        fi
+      fi
+    done
+  done <<<"$targets"
+}
+stale_site_step
+_save_ledger
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

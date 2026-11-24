@@ -20,18 +20,46 @@ churn can no longer break skill loading):
 
 - public skills: `~/src/djbclark-ade/skills/<name>/` when that checkout exists,
   otherwise `<this-checkout>/skills/<name>/` (see section 1) — link target that path
-- private skills: `~/ops/site-private/skills/<name>/` (real directory; only
-  `1password` today) — link target `~/ops/site-private/skills/<name>`
-- site skills (since 2026-11-06, the skills moved out of this repo by the
-  slim-down): `~/ops/site-public-djbclark/skills/<name>/`, the Mac's checkout of
-  the site-djbclark repo (default `${OPS_ROOT:-~/ops}/site-public-djbclark/skills`,
-  `SKILL_EVERYWHERE_SITE` overrides it) — link target
-  `~/ops/site-public-djbclark/skills/<name>`. A name in more than one root resolves
-  public, then private, then site.
+- private skills root (Stage 0 dual-read, 2026-11-24; **directory-level** fallback): when a
+  valid `tendcf` site is selected (`TENDCF_SITE` > `$XDG_CONFIG_HOME/tendcf/active-site`,
+  fail-closed with no sole-directory glob; `TENDCF_OPS_ROOT` defaults to `~/tendcf-ops`) and
+  `OPS_ROOT` is unset, `skill-everywhere` selects `<TENDCF_OPS_ROOT>/tendcf-private-<slug>/skills`
+  as the entire private root whenever that directory exists (or when legacy
+  `~/ops/site-private/skills` is absent), and otherwise falls back to legacy
+  `${OPS_ROOT:-~/ops}/site-private/skills` as the entire private root (`SKILL_EVERYWHERE_PRIVATE`
+  overrides both). Fallback is per skills directory, not per individual skill name: once the
+  tendcf private `skills/` directory exists, legacy-only private skills are not merged in.
+- site skills root (Stage 0 dual-read, 2026-11-24; **directory-level** fallback): when a valid
+  `tendcf` site pair is selected and `OPS_ROOT` is unset, `skill-everywhere` selects
+  `<TENDCF_OPS_ROOT>/tendcf-public-<slug>/skills` as the entire site root whenever that directory
+  exists (or when legacy `~/ops/site-public-djbclark/skills` is absent), and otherwise falls back
+  to legacy `${OPS_ROOT:-~/ops}/site-public-djbclark/skills` as the entire site root
+  (`SKILL_EVERYWHERE_SITE` overrides both; setting legacy `OPS_ROOT` forces the legacy
+  `${OPS_ROOT}/site-{private,public-djbclark}/skills` roots). Fallback is per skills directory,
+  not per individual skill name. A name present in more than one active root resolves public,
+  then private, then site.
 - chrome-use skills (since 2026-11-17): `~/src/chrome-use/skill-data/<name>/`,
   the third-party `leeguooooo/chrome-use` repo's skills (e.g. `real-chrome`, `core`),
   `SKILL_EVERYWHERE_CHROME` overrides it — resolves after public, private and site, so a
   same-named ADE skill wins over a chrome-use one.
+
+**Site-root transition reconciliation & per-entry provenance ledger (2026-11-24).** Link runs
+record each individual site/private symlink (`link\t<dest>\t<target>`) and Grok Bot copy
+(`copy\t<dest>\t<source>`) that `skill-everywhere` itself installs or updates in
+`${XDG_STATE_HOME:-~/.local/state}/skill-everywhere/managed-links.tsv` (`--check` and `--dry-run`
+never write it, ADE-only runs never claim ownership of site links, ordinary `--all` runs never
+silently adopt pre-existing unrecorded links, and concurrent runs merge deltas under an exclusive
+`flock` lock via `ade_ops_paths.py merge-ledger` — failing closed with an error and preserving the
+existing ledger if the serialized merge is refused or unavailable). Switching active roots
+reconciles entries whose exact `(dest, target)` or `(dest, source)` matches the ledger: same-name
+managed links are classified `migrating from ...` (`--check --all` exits 1) and atomically relinked
+in link mode; old-root-only managed links and Grok Bot copies are flagged by `--check --all` and
+removed by `--all`. Unrecorded pre-ledger links/copies pointing into the canonical legacy defaults
+(`~/ops/site-{private,public-djbclark}/skills`) are reported by `--check --all` and preserved by
+default on plain `--all`; pass `--adopt-legacy-links --all` to explicitly adopt them while on
+legacy or migrate/clean them after switching, while still preserving manually installed symlinks to
+unrelated or inactive site layouts. Shared path/slug helpers live in `bin/ade_ops_paths.py` (CLI
+verbs: `python3 bin/ade_ops_paths.py {skill-roots | managed-root-bases | find-bgrun [--include-bg] | default-bm-store | merge-ledger PATH}`).
 
 Editing the git copy updates every agent. Never copy: a
 copy drifts silently. `~/.agents/skills/self-handoff` is a symlink to the git

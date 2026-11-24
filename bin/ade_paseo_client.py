@@ -1108,6 +1108,26 @@ class WsClient:
                 out.append(ws_item)
         return out
 
+    def set_workspace_pinned(
+        self, workspace_id: str, pinned: bool = True, *, timeout: Optional[float] = None
+    ) -> Optional[str]:
+        payload, _ = self.rpc(
+            {"type": "workspace.pin.set.request", "workspaceId": workspace_id, "pinned": pinned},
+            expected_type="workspace.pin.set.response",
+            timeout=timeout,
+        )
+        if payload.get("accepted") is not True:
+            raise DaemonError("workspace pin change rejected")
+        pinned_at = payload.get("pinnedAt")
+        valid_pin = isinstance(pinned_at, str) and bool(pinned_at.strip()) if pinned else pinned_at is None
+        if (
+            payload.get("workspaceId") != workspace_id
+            or "pinnedAt" not in payload
+            or not valid_pin
+        ):
+            raise DaemonError("invalid workspace pin response")
+        return pinned_at
+
     def list_pending_permissions(self, *, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
         """Derive pending permission items from `fetch_agents` snapshots (works with localCredential auth)."""
         agents = self.fetch_agents(include_background=True, include_archived=True, timeout=timeout)
@@ -1621,11 +1641,21 @@ class PaseoClient:
             lambda ws: ws.respond_to_permission(agent_id, request_id, {"behavior": behavior}, timeout=self.timeout),
         )
 
-    def list_workspaces(self, *, include_background: bool = False) -> List[Dict[str, Any]]:
+    def list_workspaces(
+        self, *, include_background: bool = False, include_pin_state: bool = False
+    ) -> List[Dict[str, Any]]:
+        # The MCP summary omits pinnedAt and archivingAt. Use full WS descriptors for the pin sweep.
+        if include_pin_state:
+            with self._ws() as ws:
+                return ws.fetch_workspaces(include_background=include_background, timeout=self.timeout)
         return self._mcp_or_ws(
             lambda: self.mcp.list_workspaces(include_background=include_background),
             lambda ws: ws.fetch_workspaces(include_background=include_background, timeout=self.timeout),
         )
+
+    def set_workspace_pinned(self, workspace_id: str, pinned: bool = True) -> Optional[str]:
+        with self._ws() as ws:
+            return ws.set_workspace_pinned(workspace_id, pinned, timeout=self.timeout)
 
     def list_providers(self) -> List[Dict[str, Any]]:
         return self.mcp.list_providers()

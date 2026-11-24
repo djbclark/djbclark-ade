@@ -231,7 +231,30 @@ LABEL = "com.djbclark.load-watch"
 HERMES_PING = HOME / ".local/bin/hermes-ping"
 SUDO_ASK_TIMEOUT_S = 900  # sudo-ask itself gives up after 600 s of an unanswered dialog; this is the outer bound
 SUDO_ASK = HOME / ".local/bin/sudo-ask"  # djbclark's Allow dialog + Touch ID (the helper `bg approve-local` uses)
-BGRUN_BIN = HOME / "ops/site-private-djbclark/bin/bgrun"  # `bgrun approve-local check DIR`: is a live any-command Touch-ID ticket covering DIR
+if str(ADE / "bin") not in sys.path:
+    sys.path.insert(0, str(ADE / "bin"))
+import ade_ops_paths as _ops_paths  # noqa: E402
+
+# Real OS account home from passwd database (immune to caller `$HOME` spoofing) for Touch ID ticket authority.
+ACCOUNT_HOME = _ops_paths.real_account_home()
+
+
+def resolve_bgrun_bin(home=None):
+    """Trusted Touch ID ticket-verifier lookup anchored to the real OS account home (`pwd.getpwuid`,
+    immune to caller `$HOME` and env overrides `TENDCF_OPS_ROOT`, `TENDCF_SITE`, `OPS_ROOT`,
+    `XDG_CONFIG_HOME`). Fails closed (returns None) when the OS account home cannot be resolved.
+    Unit tests may inject `home=` or monkeypatch `BGRUN_BIN` / `ACCOUNT_HOME`."""
+    h = ACCOUNT_HOME if home is None else home
+    if h is None:
+        return None
+    found = _ops_paths.find_trusted_bgrun(home=h)
+    if found is not None:
+        return found
+    return h / "ops/site-private-djbclark/bin/bgrun"
+
+
+BGRUN_BIN = resolve_bgrun_bin()  # `bgrun approve-local check DIR`: is a live any-command Touch-ID ticket covering DIR
+_DEFAULT_BGRUN_BIN = BGRUN_BIN
 TICKET_CHECK_TIMEOUT_S = 10
 APPROVAL_GATE_NAME = "load-watch-ci-local"
 APPROVAL_GATE_TIMEOUT_S = 5
@@ -600,14 +623,37 @@ def proc_cwds(pids):
     return out
 
 
+def _bg_real_targets():
+    targets = {BG_REAL}
+    for cand in _ops_paths.candidate_bgrun_paths(include_bg=True, home=HOME):
+        try:
+            if cand.exists():
+                targets.add(os.path.realpath(cand))
+        except OSError:
+            continue
+    return targets
+
+
 def bg_args(cmd):
-    """The words after `bgrun` (or transitional `bg`) when `cmd` is a run of ops/site-*/bin/bgrun (the script or the interpreter running it),
-    else None."""
+    """The words after `bgrun` (or transitional `bg`) when `cmd` is a run of an accepted Stage 0
+    bgrun path (`~/.local/bin/bgrun`, `<TENDCF_OPS_ROOT>/tendcf-{public,private}-<slug>/bin/bgrun`,
+    or legacy `~/ops/site-*/bin/bgrun`; the script or the interpreter running it), else None."""
     words = cmd.split()
+    reals = None
     for i, w in enumerate(words[:4]):
-        if w.endswith(("/bin/bgrun", "/bin/bg")) and (BG_PATH.search(w) or os.path.realpath(w) == BG_REAL) and (
-                i == 0 or os.path.basename(words[i - 1]) in SHELLS or words[i - 1].startswith("-")):
+        if not w.endswith(("/bin/bgrun", "/bin/bg")):
+            continue
+        if not (i == 0 or os.path.basename(words[i - 1]) in SHELLS or words[i - 1].startswith("-")):
+            continue
+        if _ops_paths.is_bgrun_path(w, allow_bg=True, home=HOME):
             return words[i + 1:]
+        if reals is None:
+            reals = _bg_real_targets()
+        try:
+            if os.path.realpath(os.path.expanduser(w)) in reals:
+                return words[i + 1:]
+        except OSError:
+            pass
     return None
 
 
@@ -1964,10 +2010,13 @@ def local_approval_log(event, top, text, mode="local", ticket="", detail=""):
         pass
 
 
-def helper_env():
-    """A clean environment for the bash `sudo-ask`: the caller's own would let `BASH_ENV=<file with exit 0>` (or ENV, SHELLOPTS, BASH_FUNC_*) make it
-    exit 0 before any dialog, which reads as approval (Codex review of PR 744). Only what the helper needs is passed."""
-    env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(HOME)}
+def helper_env(home_override=None):
+    """A clean environment for the bash `sudo-ask` / `bgrun` / `approval-gate` helpers: the caller's own would let
+    `BASH_ENV=<file with exit 0>` (or ENV, SHELLOPTS, BASH_FUNC_*) make it exit 0 before any dialog, which reads as
+    approval (Codex review of PR 744). Only what the helper needs is passed. Pass `home_override=ACCOUNT_HOME` for
+    Touch ID ticket verification so `bgrun` reads the OS account's real ticket store and salt, never caller `$HOME`."""
+    env_home = HOME if home_override is None else home_override
+    env = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(env_home)}
     for k in ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM"):  # not TMPDIR: a caller-chosen dir for bash 3.2's heredoc temp files is attacker-steerable; unset, bash falls back to /tmp (fixed, not private)
         if k in os.environ:
             env[k] = os.environ[k]
@@ -1983,11 +2032,16 @@ def live_bgrun_ticket(top):
     """(id, `<id> until <time>` line) of a live any-command `bgrun approve-local` ticket covering `top`, or None. Only exit 0 with an id counts: exit 1 (no
     ticket, or one narrowed to a command), 2 (missing directory), a timeout, a missing or broken bgrun, or output that does not start with an
     8-hex-digit id all mean None, so the caller asks djbclark."""
+    if ACCOUNT_HOME is None:
+        return None
+    bgrun_bin = BGRUN_BIN if BGRUN_BIN != _DEFAULT_BGRUN_BIN else resolve_bgrun_bin(ACCOUNT_HOME)
+    if bgrun_bin is None:
+        return None
     try:
-        if not (BGRUN_BIN.is_file() and os.access(BGRUN_BIN, os.X_OK)):
+        if not (bgrun_bin.is_file() and os.access(bgrun_bin, os.X_OK)):
             return None
-        r = subprocess.run([str(BGRUN_BIN), "approve-local", "check", top], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           timeout=TICKET_CHECK_TIMEOUT_S, env=helper_env())
+        r = subprocess.run([str(bgrun_bin), "approve-local", "check", top], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=TICKET_CHECK_TIMEOUT_S, env=helper_env(home_override=ACCOUNT_HOME))
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
     if r.returncode != 0:

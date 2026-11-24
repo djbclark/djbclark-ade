@@ -77,7 +77,7 @@ BUDGET_S = 10
 SHELLS = frozenset({"bash", "sh", "zsh", "dash", "ksh", "fish"})
 WRAPPERS = frozenset({
     "env", "command", "exec", "time", "nice", "ionice", "nohup", "setsid", "builtin", "sudo", "doas", "timeout",
-    "gtimeout", "xargs", "stdbuf", "caffeinate", "script", "watch", "rtk", "bg", "ts", "chronic", "parallel",
+    "gtimeout", "xargs", "stdbuf", "caffeinate", "script", "watch", "rtk", "bg", "bgrun", "ts", "chronic", "parallel",
     "!", "{", "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx", "mise", "flock",
     "taskpolicy", "arch",
 })

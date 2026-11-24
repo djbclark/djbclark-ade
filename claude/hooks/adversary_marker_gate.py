@@ -97,7 +97,7 @@ SHELLS = {"bash", "sh", "zsh", "dash", "ksh"}
 RESERVED = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "coproc", "time", "case", "in"}
 SHELL_C = re.compile(r"^-[A-Za-z]*c$")
 WRAPPERS = {"env", "command", "exec", "builtin", "time", "nice", "ionice", "nohup", "setsid", "sudo", "doas", "timeout",
-            "gtimeout", "xargs", "stdbuf", "caffeinate", "rtk", "bg", "ts", "chronic", "flock", "taskpolicy", "arch", "!",
+            "gtimeout", "xargs", "stdbuf", "caffeinate", "rtk", "bg", "bgrun", "ts", "chronic", "flock", "taskpolicy", "arch", "!",
             "{", "secretspec", "sudo-secretspec", "direnv", "op", "uv", "uvx", "npx", "mise", "watch", "script", "parallel", "find"}
 GH_VALUE_FLAGS = {"-R", "--repo", "--hostname", "-H", "--header", "-X", "--method", "--jq", "-q", "-t", "--template",
                   "--cache", "-b", "--body", "-F", "--body-file", "-f", "--field", "--raw-field", "--input", "-T",

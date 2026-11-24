@@ -2,9 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Non-worker pin sweep, every 15 minutes: a zero-token host script that re-applies the
      `ade.interactive=1` agent label (bin/ade-pin-interactive) and the native sidebar pin
-     (bin/ade-pin-workspaces pin, which drives the UI's workspace.pin.set RPC through the bundled
-     CLI client). Both are idempotent, so a new lead or operator-started agent is pinned shortly
-     after it appears. macOS only: the pin step runs in Paseo's bundled Electron node.
+     (bin/ade-pin-workspaces pin, which uses the UI's workspace.pin.set.request RPC via the stdlib
+     daemon client). Both are idempotent, so a new lead or operator-started agent is pinned
+     shortly after it appears.
      Inventoried in config/ade.toml [install.jobs] as `ade-pin-sweep`; install command in docs/scheduling.md.
      Not loaded by merging this file. `bin/ade-sched` fills __ADE__, __HOME__, __STATE__ and __ADMISSION__. -->
 <plist version="1.0">

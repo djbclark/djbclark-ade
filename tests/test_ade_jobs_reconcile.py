@@ -2108,3 +2108,28 @@ def test_non_native_paseo_adoption_keeps_legacy_behavior(fake, tmp_path, host):
     )
     assert rc == 0, rows
     assert any(row["action"] == "adopted" for row in rows)
+
+
+def test_agent_sweep_catalog_cutover_by_platform(fake):
+    catalog = ai.load_catalog(root=REPO, home=Path(fake.env["HOME"]))
+    labels = {"ade-supervisor-scan", "ade-progress", "ade-agent-sweep"}
+
+    def actions(backend, platform, ledger):
+        live = S.LiveScan(backend, tuple(
+            S.LiveJob(entry["label"], backend, "generated", True)
+            for entry in ledger.values()
+        ))
+        steps = S.plan_reconcile(
+            catalog.jobs, catalog.retired_jobs, ledger={"entries": ledger},
+            live=live, backend_name=backend, root=REPO, ade=REPO,
+            env=fake.env, names=labels, platform_name=platform,
+        )
+        return {(step.name, step.action) for step in steps}
+
+    supervisor = {**_owned_entry(), "label": "com.djbclark.ade-supervisor-scan", "backend": "launchd"}
+    progress = {**_owned_entry(), "backend": "launchd"}
+    assert actions("launchd", "darwin", {"ade-supervisor-scan": supervisor, "ade-progress": progress}) == {
+        ("ade-agent-sweep", "install"), ("ade-progress", "skip"),
+        ("ade-progress", "remove"), ("ade-supervisor-scan", "remove"),
+    }
+    assert actions("systemd", "linux", {}) == {("ade-agent-sweep", "skip"), ("ade-progress", "install")}

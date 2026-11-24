@@ -228,22 +228,32 @@ def deadline_bin() -> str | None:
 
 
 def bg_bin() -> str | None:
-    """Optional site-djbclark `bg`. VERIFYCMD_BG overrides; VERIFYCMD_NO_BG=1 disables."""
+    """Optional `bgrun`/`bg` (Stage 0 dual-read). VERIFYCMD_BG overrides; VERIFYCMD_NO_BG=1 disables."""
     if os.environ.get("VERIFYCMD_NO_BG") in ("1", "true", "yes"):
         return None
     override = os.environ.get("VERIFYCMD_BG")
     if override:
         return override if os.access(override, os.X_OK) or Path(override).is_file() else None
-    found = shutil.which("bg")
-    if not found:
-        return None
-    # refuse the shell builtin path illusions: need a real executable file
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
     try:
-        if not Path(found).is_file():
-            return None
-    except OSError:
-        return None
-    return found
+        import ade_ops_paths  # noqa: PLC0415
+        found_path = ade_ops_paths.find_bgrun(include_bg=True)
+        if found_path is not None:
+            return str(found_path)
+    except Exception:
+        pass
+    for name in ("bgrun", "bg"):
+        found = shutil.which(name)
+        if not found:
+            continue
+        # refuse the shell builtin path illusions: need a real executable file
+        try:
+            if Path(found).is_file():
+                return found
+        except OSError:
+            continue
+    return None
 
 
 def log_path_for(agent_id: str, attempt: int) -> Path:

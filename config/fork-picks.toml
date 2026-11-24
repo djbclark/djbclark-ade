@@ -21,7 +21,7 @@ target = "desktop-build-2"
 status = "landed:2"
 upstream = "https://github.com/getpaseo/paseo/pull/10534"
 order = 10
-notes = "one commit on upstream/main ec22b8265; upstream PR 10534 is a draft (Discussion 10120); CI green https://github.com/frdminc/paseo/actions/runs/45045661104; fork PR frdminc/paseo#3; obsolete earlier forms 36f49a46b and ffa8a54ac16437a7dba21f792ad4983ceea70e97 | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac)"
+notes = "one commit on upstream/main ec22b8265; upstream PR 10534 originally opened as a draft (Discussion 10120); CI green https://github.com/frdminc/paseo/actions/runs/45045661104; fork PR frdminc/paseo#3; obsolete earlier forms 36f49a46b and ffa8a54ac16437a7dba21f792ad4983ceea70e97 | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac) | upstream PR https://github.com/getpaseo/paseo/pull/10534 closed by paseo-bot under workflow-discussion policy -> linked at https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425 (2026-11-24)"
 
 [[pick]]
 id = "desktop-app-dist-precompress"
@@ -94,10 +94,10 @@ repo = "frdminc/paseo"
 pr = 4
 intent = "Android fork release"
 target = "android-build-2"
-status = "landed:main"
+status = "landed:2"
 upstream = "https://github.com/frdminc/paseo/pull/4"
 order = 5
-notes = "merged to fork main as 52e55ac8a (branch feat/android-fork-release)"
+notes = "merged to fork main as 52e55ac8a (branch feat/android-fork-release) | published as GitHub Release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.3-r2 (run https://github.com/frdminc/paseo/actions/runs/45388918274, tag fork-android-v0.17.3-r2 @ b6d0fc31c21f21c259831f038633133e115126d5 on frdminc/paseo:main; asset paseo-fork-v0.17.3-r2-arm64-v8a.apk sha256 7ec3c049b1510dbfcac7c5514b44209341f3d6db5dd9d637726a26fadf21fd7d matching SHA256SUMS; signer SHA-256 44:82:0A:CB:5E:A2:6E:5D:63:6F:C8:C2:B7:82:AA:49:F6:10:1D:C0:B2:80:06:61:09:AE:C2:29:1A:D9:70:ED; reported 2026-11-24 by Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8)"
 
 [[pick]]
 id = "paseo-pi-permission-selected-action"
@@ -178,6 +178,153 @@ status = "queued"
 hold = "placeholder: not built yet (queued for build 3, 2026-11-24)"
 order = 55
 notes = "operator-approved 2026-11-24 via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-daemon-status-caps-445d802d, complementing PR #969 after stayturgid lead 8f296f0e-9056-4bb7-a53a-a3900a246afa report): (1) surface `features: info?.features` from `client.getLastServerInfoMessage()` in `packages/cli/src/commands/daemon/status.ts:84-85` (upstreamable on its own); (2) add optional `acpElicitationForms?: boolean` to `ServerInfoStatusPayloadSchema.features` in `packages/protocol/src/messages.ts:3995+` (COMPAT-tagged per `docs/protocol-compatibility.md`); (3) expose a `forkBuild` marker (e.g. `djbclark fork 3`, matching desktop About) in daemon status so agents, hooks, and cutover checks can verify capabilities at runtime on any host instead of assuming hostname=bigmac"
+
+[[pick]]
+id = "paseo-agent-id-search-p2-fixes"
+component = "paseo"
+repo = "frdminc/paseo"
+intent = "fix two chatgpt-codex-connector P2 findings on Cmd+K agent-ID search (archived-agent history query and numeric PR-number precedence)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+hold = "placeholder: not built yet (queued for build 3, 2026-11-24)"
+upstream = "https://github.com/getpaseo/paseo/discussions/10120"
+order = 56
+notes = "operator-approved 2026-11-24 in /steps via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-agent-id-p2-445d802d; follow-up to feat/command-center-agent-id-search @ 7c670ad4c, upstream discussion comment https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425): (a) include agent.id in matchesAgentHistoryQuery (packages/server/src/server/agent-history-search.ts:17-22) so archived-agent ID lookups return candidates from the host; (b) skip agent-ID target selection when changeRequestHit is true (packages/app/src/command-center/workspace-search.ts:218) so numeric PR-number searches keep normal workspace-level behavior"
+
+[[pick]]
+id = "paseo-defer-mermaid-runtime"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10494
+expected_head = "dffd7c027e9682f202a60431abb3059f61c6c1ba"
+intent = "defer loading the web Mermaid runtime until a diagram mounts (-3.58 MB startup JS)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10494"
+order = 60
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-defer-web-terminal"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10497
+expected_head = "11b18c933384cd9de877d2b50ea115cb85bbc845"
+intent = "defer the web terminal renderer until it is needed (-1.0 MB startup JS)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10497"
+order = 61
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-batch-unistyles-web"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10605
+expected_head = "a36ff010f7006e6b6614bb1a7cbeb8818cb59791"
+intent = "batch Unistyles web stylesheet writes (358->32 writes)"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10605"
+order = 62
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-release-inactive-decks"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10234
+expected_head = "41e508201c950e80c58151e674a622b9776cd8db"
+intent = "release inactive workspace decks and bound renderer memory"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10234"
+order = 63
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-cached-chat-timeline-sync"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10653
+expected_head = "7292790d1aed659feb9361db697fa0133ad2ddbe"
+intent = "fix timeline sync when reopening a cached chat"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10653"
+order = 64
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-ws-permessage-deflate"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10622
+expected_head = "35217464544d2cb439d3ffc9ed3ef4f977f35b91"
+intent = "enable permessage-deflate on direct /ws server"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10622"
+trial_required = true
+order = 65
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-ws-chunked-transfers"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10651
+expected_head = "27ad48212974a32bbc7b97740204b24b7ac8fe61"
+intent = "keep slow direct connections alive during large transfers (512 KiB WS chunking)"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10651"
+trial_required = true
+order = 66
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-defer-archived-snapshots"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10664
+expected_head = "d9f2b4b115376b3dea9069b513783f995291ee04"
+intent = "defer stored agent snapshots until an archive page needs them"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10664"
+trial_required = true
+order = 67
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps session.ts, paseo-tools.ts, and queued agent-history-search.ts P2 fix; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-slow-plugin-rpc-names"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10074
+expected_head = "9a7da2c166587a705b66a87bc5f2cdb9b33bafb2"
+intent = "name the plugin and method on slow and timed-out plugin RPCs"
+target = "desktop-build-3"
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10074"
+trial_required = true
+order = 68
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; pinned to head seen 2026-11-24"
+
+[[pick]]
+id = "paseo-android-idle-repaints"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 7556
+expected_head = "cdf9ae43305d40063e18f5d0e6a64b484671c99b"
+intent = "cut idle repaints and streaming parse cost on Android"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/7556"
+trial_required = true
+order = 69
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); Android/app secondary pick; skipped #7629 relay compression and #7624 cached plugin catalog per djbclark; pinned to head seen 2026-11-24"
 
 [[pick]]
 id = "paseo-bump-wrangler-sharp-0-35"
