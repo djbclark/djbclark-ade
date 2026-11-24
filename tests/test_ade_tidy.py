@@ -1286,3 +1286,394 @@ def test_archiving_a_predecessors_empty_box_unregisters_it_from_the_predecessors
     assert json.loads((wr / f"{PRED}.windows.json").read_text())["windows"] == ["wks_kept"]
     if also_current_leads:
         assert W_EMPTY not in json.loads((wr / f"{LEAD}.windows.json").read_text())["windows"]
+
+
+# ----------------------------------------------------------------------------------------------- idle-hours (Queue #91 & #96)
+
+IDLE_PS_STUB = '''#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+d = json.loads(Path(os.environ["FAKE_DATA"]).read_text())
+print("\\n".join(d.get("ps", [])))
+'''
+
+
+class NoPathIdleEnv:
+    """Offline test harness for `--idle-hours` that injects fake `paseo` and `ps` via explicit env vars
+    (`ADE_TIDY_PASEO`, `ADE_TIDY_PS` + `ADE_TIDY_TEST=1`) with NO `PATH` modification (code-review rule 2)."""
+
+    def __init__(self, tmp_path: Path, monkeypatch):
+        self.tmp = tmp_path
+        self.repo = tmp_path / "myrepo"
+        for cmd in (["git", "init", "-q", str(self.repo)],
+                    ["git", "-C", str(self.repo), "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "x"]):
+            subprocess.run(cmd, check=True, capture_output=True)
+        self.data_path = tmp_path / "data.json"
+        self.calls_path = tmp_path / "calls.jsonl"
+        self.home = tmp_path / "paseo-home"
+        self.reports = tmp_path / "reports"
+        self.lw_dir = tmp_path / "load-watch"
+        self.reports.mkdir()
+        self.lw_dir.mkdir()
+        self.data = {"agents": [], "workspaces": [], "logs": {}, "logs_fail": [], "permits": [], "terminals": {}, "ps": []}
+        self.paseo_stub = tmp_path / "fake-paseo"
+        self.paseo_stub.write_text(STUB.replace(
+            'elif a[0] == "logs":\n',
+            'elif a[0] == "logs":\n    if a[1] in d.get("logs_fail", []):\n        sys.exit(1)\n',
+        ))
+        self.paseo_stub.chmod(0o755)
+        self.ps_stub = tmp_path / "fake-ps"
+        self.ps_stub.write_text(IDLE_PS_STUB)
+        self.ps_stub.chmod(0o755)
+        for k, v in {
+            "ADE_TIDY_PASEO": str(self.paseo_stub),
+            "ADE_TIDY_PS": str(self.ps_stub),
+            "ADE_TIDY_TEST": "1",
+            "FAKE_DATA": str(self.data_path),
+            "FAKE_CALLS": str(self.calls_path),
+            "PASEO_HOME": str(self.home),
+            "LW_STATE_DIR": str(self.lw_dir),
+            "ADE_TIDY_STATE": str(tmp_path / "tidy-state.json"),
+            "ADE_WORKER_RUN_STATE": str(tmp_path / "wr"),
+            "ADE_STATE_DIR": str(tmp_path / "ade-state"),
+            "ADE_SELF_SESSION_STATE": str(tmp_path / "self-session"),
+            "PASEO_AGENT_ID": LEAD,
+        }.items():
+            monkeypatch.setenv(k, v)
+        self.window(W_MAIN, "LEAD myrepo (Wave 7)")
+        self.window(W_WORK, "WORKER myrepo (Wave 7)")
+        self.agent(LEAD, W_MAIN, "LEAD myrepo", status="running", hours_ago=0.1)
+
+    @staticmethod
+    def iso_ago(hours: float) -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - hours * 3600.0))
+
+    def window(self, wid: str, name: str, isolation: str = "local") -> None:
+        self.data["workspaces"].append({"workspaceId": wid, "project": "myrepo", "name": name,
+                                        "isolation": isolation, "cwd": str(self.repo)})
+
+    def agent(self, aid: str, wks: str, name: str, status: str = "idle", labels: dict | None = None,
+              hours_ago: float = 5.0, text: str = "finished task", tags: list[str] | None = None,
+              session_id: str | None = None) -> str:
+        self.data["agents"].append({"id": aid, "name": name, "status": status, "cwd": str(self.repo)})
+        p = self.home / "agents/proj" / f"{aid}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        rec: dict = {"id": aid, "workspaceId": wks, "labels": labels or {}, "lastActivityAt": self.iso_ago(hours_ago)}
+        if session_id:
+            rec["persistence"] = {"sessionId": session_id}
+        p.write_text(json.dumps(rec))
+        self.data["logs"][aid] = "\n".join([*(tags or ["[Shell] ls"]), text])
+        return aid
+
+    def run(self, *args: str, apply: bool = False, as_json: bool = True) -> subprocess.CompletedProcess[str]:
+        self.data_path.write_text(json.dumps(self.data))
+        cmd = [sys.executable, str(SCRIPT), "--repo", str(self.repo), *(["--json"] if as_json else []),
+               "--reports-dir", str(self.reports), *args]
+        if apply:
+            cmd += ["--lead", LEAD, "--apply"]
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def calls(self) -> list[list[str]]:
+        return [json.loads(x) for x in self.calls_path.read_text().splitlines()] if self.calls_path.exists() else []
+
+    def archived_agents(self) -> set[str]:
+        return {c[2] for c in self.calls() if c[:2] == ["agent", "archive"]}
+
+
+def test_idle_hours_off_by_default_and_rejects_nonpositive(tmp_path: Path, monkeypatch) -> None:
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    e.agent("10000001-0000-0000-0000-000000000000", W_WORK, "adhoc probe", labels={"ade.lead": LEAD}, hours_ago=8.0)
+    r_off = e.run(as_json=False)
+    assert r_off.returncode == 0 and "I. Idle hibernation" not in r_off.stdout
+    p_off = json.loads(e.run(as_json=True).stdout)
+    assert p_off["idle_hours"] is None and p_off["idle_hibernate"] == []
+
+    for bad in ("0", "-2", "nan", "inf"):
+        r_bad = e.run("--idle-hours", bad)
+        assert r_bad.returncode == 2
+
+
+def test_idle_hours_observe_reports_safe_own_workers_with_rss_and_revive_note(tmp_path: Path, monkeypatch) -> None:
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    adhoc = e.agent("10000001-0000-0000-0000-000000000000", W_WORK, "adhoc worker", labels={"ade.lead": LEAD},
+                    hours_ago=5.5, session_id="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+    sliced = e.agent("10000002-0000-0000-0000-000000000000", W_WORK, "worker sdone",
+                     labels={"ade.lead": LEAD, "slice": "sdone"}, status="closed", hours_ago=6.0)
+    recent = e.agent("10000003-0000-0000-0000-000000000000", W_WORK, "recent worker", labels={"ade.lead": LEAD}, hours_ago=1.0)
+    rep = e.reports / "sdone-report.md"
+    rep.write_text("summary\nDONE\n")
+    Path(f"{rep}.done").write_text("")
+    Path(f"{rep}.done.ack").write_text("")
+    old_t = time.time() - 6 * 3600
+    for q in (rep, Path(f"{rep}.done"), Path(f"{rep}.done.ack")):
+        os.utime(q, (old_t, old_t))
+    e.data["ps"] = [
+        f"5001 40000 Mon Nov 24 01:00:00 2026 204800 /usr/local/bin/claude --resume aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --mcp-config {{\"url\":\"http://127.0.0.1/?callerAgentId={adhoc}\"}}",
+        "5002 5001 Mon Nov 24 01:00:01 2026 51200 node /opt/homebrew/bin/graft mcp",
+    ]
+    r_json = e.run("--idle-hours", "4", as_json=True)
+    assert r_json.returncode == 0, r_json.stderr
+    p = json.loads(r_json.stdout)
+    by_id = {x["agent"]: x for x in p["idle_hibernate"]}
+    assert set(by_id) == {adhoc, sliced}
+    assert recent not in by_id
+    assert by_id[adhoc]["rss_mb"] == 250.0
+    assert by_id[adhoc]["revive_cmd"] == f"bin/ade-revive {adhoc}"
+    assert by_id[sliced]["rss_mb"] is None
+    assert by_id[sliced]["revive_cmd"] == f"bin/ade-revive {sliced}"
+    assert e.archived_agents() == set()  # observe-only: zero mutations
+
+    r_txt = e.run("--idle-hours", "4", as_json=False)
+    assert r_txt.returncode == 0
+    assert "I. Idle hibernation (--idle-hours 4; observe-only unless --apply)" in r_txt.stdout
+    assert "rss 250.0 MB" in r_txt.stdout
+    assert f"reversible via: bin/ade-revive {adhoc}" in r_txt.stdout
+
+
+def test_idle_hours_excludes_all_unsafe_and_non_own_agents_and_apply_archives_only_safe(tmp_path: Path, monkeypatch) -> None:
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    # 1. Running own-worker -> excluded
+    running_id = e.agent("20000001-0000-0000-0000-000000000000", W_WORK, "running worker", status="running",
+                         labels={"ade.lead": LEAD}, hours_ago=6.0)
+    # 2. Pending permission card -> excluded
+    permit_id = e.agent("20000002-0000-0000-0000-000000000000", W_WORK, "permit worker", status="idle",
+                        labels={"ade.lead": LEAD}, hours_ago=6.0)
+    e.data["permits"] = [{"agentId": permit_id, "name": "Bash"}]
+    # 3. Standing watchers (all 3 mechanisms) -> excluded
+    lw_watcher = e.agent("20000003-0000-0000-0000-000000000000", W_WORK, "worker plain", status="idle",
+                         labels={"ade.lead": LEAD}, hours_ago=8.0)
+    (e.lw_dir / "watcher.json").write_text(json.dumps({
+        "channel": "paseo", "target": lw_watcher, "paseo_home": str(e.home),
+    }))
+    role_watcher = e.agent("20000004-0000-0000-0000-000000000000", W_WORK, "worker role", status="idle",
+                           labels={"ade.lead": LEAD, "ade.role": "load-watcher"}, hours_ago=8.0)
+    title_watcher = e.agent("20000005-0000-0000-0000-000000000000", W_WORK, "Standing Load Watcher", status="idle",
+                            labels={"ade.lead": LEAD}, hours_ago=8.0)
+    # 4. Unreported / unacked paid work (~/CLAUDE.md item 9) -> excluded
+    working_stub = e.agent("20000006-0000-0000-0000-000000000000", W_WORK, "worker stub", status="idle",
+                           labels={"ade.lead": LEAD, "slice": "stub1"}, hours_ago=6.0)
+    (e.reports / "stub1-report.md").write_text("STATUS: working\n")
+    missing_rep = e.agent("20000007-0000-0000-0000-000000000000", W_WORK, "worker norep", status="idle",
+                          labels={"ade.lead": LEAD, "slice": "norep"}, hours_ago=6.0)
+    unacked_rep = e.agent("20000008-0000-0000-0000-000000000000", W_WORK, "worker unacked", status="idle",
+                          labels={"ade.lead": LEAD, "slice": "unacked"}, hours_ago=6.0)
+    ur = e.reports / "unacked-report.md"
+    ur.write_text("all good\nDONE\n")
+    Path(f"{ur}.done").write_text("")
+    # 5. Operator-owned & other-lead sessions -> operator-call candidates ONLY, never archived by --apply
+    op_id = e.agent("20000009-0000-0000-0000-000000000000", W_USER, "operator session", status="idle",
+                    labels={}, hours_ago=8.0)
+    other_id = e.agent("20000010-0000-0000-0000-000000000000", W_WORK, "other lead worker", status="idle",
+                       labels={"ade.lead": OTHER_LEAD}, hours_ago=8.0)
+    # 6. Proven-safe own-chain idle workers -> eligible & archived under --apply
+    safe_adhoc = e.agent("20000011-0000-0000-0000-000000000000", W_WORK, "safe adhoc worker", status="idle",
+                         labels={"ade.lead": LEAD}, hours_ago=5.0)
+    safe_slice = e.agent("20000012-0000-0000-0000-000000000000", W_WORK, "safe slice worker", status="closed",
+                         labels={"ade.lead": LEAD, "slice": "safeslice"}, hours_ago=5.0)
+    sr = e.reports / "safeslice-report.md"
+    sr.write_text("shipped\nDONE\n")
+    Path(f"{sr}.done").write_text("")
+    Path(f"{sr}.done.ack").write_text("")
+    old_t = time.time() - 5 * 3600
+    for q in (sr, Path(f"{sr}.done"), Path(f"{sr}.done.ack")):
+        os.utime(q, (old_t, old_t))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert {x["agent"] for x in p["idle_hibernate"]} == {safe_adhoc, safe_slice}
+    assert {x["agent"] for x in p["idle_operator_candidates"]} == {op_id, other_id}
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[running_id] == "running"
+    assert skipped[permit_id] == "permission-pending"
+    assert skipped[lw_watcher] == "standing-watcher"
+    assert skipped[role_watcher] == "standing-watcher"
+    assert skipped[title_watcher] == "standing-watcher"
+    assert skipped[working_stub] == "unreported-work"
+    assert skipped[missing_rep] == "missing-report"
+    assert skipped[unacked_rep] == "unacked-work"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == {safe_adhoc, safe_slice}
+    # Never passes --force to `paseo agent archive`
+    assert all("--force" not in c for c in e.calls() if c[:2] == ["agent", "archive"])
+    assert f"idle-hibernate {safe_adhoc} archived" in r_apply.stdout
+    assert f"bin/ade-revive {safe_adhoc}" in r_apply.stdout
+
+
+def test_idle_hours_active_claim_live_child_and_corrupt_watcher_fail_closed(tmp_path: Path, monkeypatch) -> None:
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    claimed = e.agent("30000001-0000-0000-0000-000000000000", W_WORK, "claimed worker", labels={"ade.lead": LEAD}, hours_ago=6.0)
+    parent = e.agent("30000002-0000-0000-0000-000000000000", W_WORK, "parent worker", labels={"ade.lead": LEAD}, hours_ago=6.0)
+    # Write active claim for `claimed`
+    cdir = Path(os.environ["ADE_STATE_DIR"]) / "claims"
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / "c1.json").write_text(json.dumps({
+        "id": "c1", "state": "active", "owner": {"agent": claimed},
+        "expires_at": "2999-01-01T00:00:00Z", "workspace": str(e.repo),
+    }))
+    # Write unarchived child record pointing to `parent`
+    cp = e.home / "agents/proj" / "30000003-0000-0000-0000-000000000000.json"
+    cp.write_text(json.dumps({"id": "30000003-0000-0000-0000-000000000000", "workspaceId": W_WORK,
+                              "labels": {"paseo.parent-agent-id": parent}}))
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[claimed] == "active-claim"
+    assert skipped[parent] == "has-live-children"
+
+    # Corrupt watcher.json fails closed: observe warns, --apply refuses (exit 1) and archives nothing
+    safe = e.agent("30000004-0000-0000-0000-000000000000", W_WORK, "safe worker", labels={"ade.lead": LEAD}, hours_ago=6.0)
+    (e.lw_dir / "watcher.json").write_text("{corrupt")
+    p_bad = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p_bad["idle_hibernate"] == []
+    assert any("standing watcher registry unreadable" in n for n in p_bad["notes"])
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 1 and "standing watcher registry unreadable" in r_apply.stderr
+    assert safe not in e.archived_agents() and e.archived_agents() == set()
+
+
+def test_idle_hours_apply_rechecks_live_status_before_archiving(tmp_path: Path, monkeypatch) -> None:
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    w = e.agent("40000001-0000-0000-0000-000000000000", W_WORK, "flips running", labels={"ade.lead": LEAD}, hours_ago=6.0)
+    # First 3 `ls -g` calls (inventory, plan live_ids, apply nowrows) see idle; 4th (live re-read right before archive) sees running
+    idle_rows = list(e.data["agents"])
+    running_rows = [{**r, "status": "running"} if r["id"] == w else r for r in idle_rows]
+    e.data["ls_seq"] = [idle_rows, idle_rows, idle_rows, running_rows]
+    r = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r.returncode == 0, r.stderr
+    assert e.archived_agents() == set()
+    assert f"SKIP idle-hibernate {w}" in r.stdout
+
+
+def test_idle_hours_activity_long_after_ack_blocks_archive(tmp_path: Path, monkeypatch) -> None:
+    """F1 (Codex 4680095552): a sliced worker active well past its old .done/.done.ack (scrolled past log tail)
+    must be blocked as retasked-unreported unless receipt proves the ack explains that activity."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    # Re-tasked worker: report/.done/.done.ack are 10h old, lastActivityAt is 5h old (> ACTIVITY_MARGIN)
+    retasked = e.agent("50000001-0000-0000-0000-000000000000", W_WORK, "worker retasked", status="idle",
+                       labels={"ade.lead": LEAD, "slice": "sretask"}, hours_ago=5.0)
+    r1 = e.reports / "sretask-report.md"
+    r1.write_text("round 1\nDONE\n")
+    Path(f"{r1}.done").write_text("")
+    Path(f"{r1}.done.ack").write_text("")
+    t10 = time.time() - 10 * 3600
+    for q in (r1, Path(f"{r1}.done"), Path(f"{r1}.done.ack")):
+        os.utime(q, (t10, t10))
+
+    # Ack-timestamp without receipt in log: .done is 6h old, .done.ack is 5h old, activity is 5h old, no receipt -> blocked
+    no_receipt = e.agent("50000002-0000-0000-0000-000000000000", W_WORK, "worker noreceipt", status="idle",
+                         labels={"ade.lead": LEAD, "slice": "snorec"}, hours_ago=5.0)
+    r2 = e.reports / "snorec-report.md"
+    r2.write_text("round 1\nDONE\n")
+    Path(f"{r2}.done").write_text("")
+    Path(f"{r2}.done.ack").write_text("")
+    t6, t5 = time.time() - 6 * 3600, time.time() - 5 * 3600
+    os.utime(r2, (t6, t6))
+    os.utime(Path(f"{r2}.done"), (t6, t6))
+    os.utime(Path(f"{r2}.done.ack"), (t5, t5))
+
+    # Ack-timestamp WITH receipt in log: .done is 6h old, .done.ack is 5h old, activity is 5h old, receipt present -> allowed
+    with_receipt = e.agent(
+        "50000003-0000-0000-0000-000000000000", W_WORK, "worker receipt", status="idle",
+        labels={"ade.lead": LEAD, "slice": "srec"}, hours_ago=5.0,
+        tags=[
+            "[Shell] bin/completion-notice --send --requester " + LEAD + " --title x --status done",
+            "[Message received]",
+        ],
+        text="ack 50000003-0000-0000-0000-000000000000 msg-1",
+    )
+    r3 = e.reports / "srec-report.md"
+    r3.write_text("round 1\nDONE\n")
+    Path(f"{r3}.done").write_text("")
+    Path(f"{r3}.done.ack").write_text("")
+    os.utime(r3, (t6, t6))
+    os.utime(Path(f"{r3}.done"), (t6, t6))
+    os.utime(Path(f"{r3}.done.ack"), (t5, t5))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[retasked] == "retasked-unreported"
+    assert skipped[no_receipt] == "retasked-unreported"
+    assert {x["agent"] for x in p["idle_hibernate"]} == {with_receipt}
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == {with_receipt}
+
+
+def test_idle_hours_closed_adhoc_worker_blocked_unless_handled(tmp_path: Path, monkeypatch) -> None:
+    """F2: a closed ad-hoc own-worker (e.g., interrupted by daemon restart) must not be archived unless --handled."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    closed_adhoc = e.agent("60000001-0000-0000-0000-000000000000", W_WORK, "interrupted adhoc", status="closed",
+                           labels={"ade.lead": LEAD}, hours_ago=6.0)
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    assert {x["agent"]: x["reason"] for x in p["idle_skipped"]}[closed_adhoc] == "closed-unverified"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
+
+    # Explicitly marked --handled allows archiving it
+    r_handled = e.run("--idle-hours", "4", "--handled", closed_adhoc, apply=True, as_json=False)
+    assert r_handled.returncode == 0, r_handled.stderr
+    assert e.archived_agents() == {closed_adhoc}
+
+
+def test_idle_hours_no_report_and_status_working_in_log_tail_blocked(tmp_path: Path, monkeypatch) -> None:
+    """F3 (Codex 4680095577): NO-REPORT: and STATUS: working in the log tail block both ad-hoc and sliced workers."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    adhoc_nr = e.agent("70000001-0000-0000-0000-000000000000", W_WORK, "adhoc no-report", status="idle",
+                       labels={"ade.lead": LEAD}, hours_ago=6.0, text="NO-REPORT: missing credentials")
+    sliced_sw = e.agent("70000002-0000-0000-0000-000000000000", W_WORK, "sliced status working", status="idle",
+                        labels={"ade.lead": LEAD, "slice": "ssw"}, hours_ago=6.0, text="STATUS: working on follow-up")
+    sliced_nr = e.agent("70000003-0000-0000-0000-000000000000", W_WORK, "sliced no-report", status="idle",
+                        labels={"ade.lead": LEAD, "slice": "snr"}, hours_ago=6.0, text="NO-REPORT: could not complete")
+    t6 = time.time() - 6 * 3600
+    for sname in ("ssw", "snr"):
+        rp = e.reports / f"{sname}-report.md"
+        rp.write_text("prior round\nDONE\n")
+        Path(f"{rp}.done").write_text("")
+        Path(f"{rp}.done.ack").write_text("")
+        for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+            os.utime(q, (t6, t6))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[adhoc_nr] == "unreported-work"
+    assert skipped[sliced_sw] == "unreported-work"
+    assert skipped[sliced_nr] == "unreported-work"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
+
+
+def test_idle_hours_unreadable_or_failed_logs_blocks_sliced_worker(tmp_path: Path, monkeypatch) -> None:
+    """F4: a sliced worker fails closed as log-unreadable when `paseo logs` fails or returns an empty/unreadable log."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    log_fail = e.agent("80000001-0000-0000-0000-000000000000", W_WORK, "sliced log fail", status="idle",
+                       labels={"ade.lead": LEAD, "slice": "slf"}, hours_ago=6.0)
+    log_empty = e.agent("80000002-0000-0000-0000-000000000000", W_WORK, "sliced log empty", status="closed",
+                        labels={"ade.lead": LEAD, "slice": "sle"}, hours_ago=6.0)
+    e.data["logs_fail"] = [log_fail]
+    e.data["logs"][log_empty] = "No activity to display."
+    t6 = time.time() - 6 * 3600
+    for sname in ("slf", "sle"):
+        rp = e.reports / f"{sname}-report.md"
+        rp.write_text("done\nDONE\n")
+        Path(f"{rp}.done").write_text("")
+        Path(f"{rp}.done.ack").write_text("")
+        for q in (rp, Path(f"{rp}.done"), Path(f"{rp}.done.ack")):
+            os.utime(q, (t6, t6))
+
+    p = json.loads(e.run("--idle-hours", "4", as_json=True).stdout)
+    assert p["idle_hibernate"] == []
+    skipped = {x["agent"]: x["reason"] for x in p["idle_skipped"]}
+    assert skipped[log_fail] == "log-unreadable"
+    assert skipped[log_empty] == "log-unreadable"
+
+    r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
+    assert r_apply.returncode == 0, r_apply.stderr
+    assert e.archived_agents() == set()
