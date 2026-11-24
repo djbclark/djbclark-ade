@@ -104,6 +104,7 @@ _resolve_bin = _MB._resolve_bin
 VALID_OA_MODES = frozenset(("off", "allowlist", "pinned"))
 VALID_VERSION_POLICIES = frozenset(("all", "peer-reviewed"))
 VALID_ON_OFF = frozenset(("on", "off"))
+VALID_PROVIDER_MODES = frozenset(("off", "auto", "on"))
 
 ALLOWED_OA_VERSIONS = frozenset(("publishedVersion", "acceptedVersion", "submittedVersion"))
 PEER_REVIEWED_VERSIONS = frozenset(("publishedVersion", "acceptedVersion"))
@@ -112,6 +113,7 @@ SAFE_LICENSE_RE = re.compile(r"^[a-z0-9._-]{1,64}$", re.ASCII)
 SAFE_REASON_RE = re.compile(r"^[a-z0-9_.:-]{1,64}$", re.ASCII)
 SAFE_OPENALEX_ID_RE = re.compile(r"^https://openalex\.org/W\d{1,16}$", re.ASCII)
 SAFE_WORK_KEY_RE = re.compile(r"^W\d{1,16}$", re.ASCII)
+SAFE_CORE_ID_RE = re.compile(r"^\d{1,16}$", re.ASCII)
 CONTENT_API_PATH_RE = re.compile(r"^/works/W\d{1,16}\.pdf$", re.ASCII)
 SAFE_CONTACT_RE = re.compile(r"^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$", re.ASCII)
 SAFE_KEY_RE = re.compile(r"^[\x21-\x7e]{8,512}$", re.ASCII)
@@ -119,6 +121,17 @@ SAFE_KEY_RE = re.compile(r"^[\x21-\x7e]{8,512}$", re.ASCII)
 OPENALEX_API_HOST = "api.openalex.org"
 OPENALEX_CONTENT_HOST = "content.openalex.org"
 CROSSREF_API_HOST = "api.crossref.org"
+CORE_API_HOST = "api.core.ac.uk"
+SPRINGER_API_HOST = "api.springernature.com"
+SPRINGER_DOI_PREFIXES = (
+    "10.1038/",
+    "10.1007/",
+    "10.1186/",
+    "10.1057/",
+    "10.1140/",
+    "10.1365/",
+    "10.4333/",
+)
 OPENALEX_SELECT_FIELDS = (
     "id,doi,title,publication_year,open_access,best_oa_location,"
     "primary_location,locations,has_content,content_urls"
@@ -126,6 +139,10 @@ OPENALEX_SELECT_FIELDS = (
 
 SECRET_NAME = "OPENALEX_API_KEY"
 SECRET_REASON = "firecrawl-router: OpenAlex OA fallback API key (memory only)"
+CORE_SECRET_NAME = "CORE_API_KEY"
+CORE_SECRET_REASON = "firecrawl-router: CORE API v3 OA fallback key (memory only)"
+SPRINGER_SECRET_NAME = "SPRINGER_NATURE_API_KEY"
+SPRINGER_SECRET_REASON = "firecrawl-router: Springer Nature Free OA API key (memory only)"
 DEFAULT_SECRETSPEC_BIN = "/usr/local/bin/sudo-secretspec"
 DEFAULT_STATE_DIR = os.path.expanduser("~/.local/state/firecrawl-oa-fallback")
 
@@ -137,6 +154,17 @@ OPENALEX_TIMEOUT_S = 6.0
 OPENALEX_MAX_BYTES = 2 * 1024 * 1024
 OPENALEX_CIRCUIT_S = 30.0
 OPENALEX_MAX_RPS_RETRY_S = 2.0
+
+CORE_TIMEOUT_S = 8.0
+CORE_MAX_BYTES = 4 * 1024 * 1024
+CORE_MIN_FULLTEXT_CHARS = 400
+CORE_COOLDOWN_S = 60.0
+CORE_CIRCUIT_S = 30.0
+
+SPRINGER_TIMEOUT_S = 8.0
+SPRINGER_MAX_BYTES = 16 * 1024 * 1024
+SPRINGER_COOLDOWN_S = 60.0
+SPRINGER_CIRCUIT_S = 30.0
 
 CROSSREF_TIMEOUT_S = 5.0
 CROSSREF_MAX_BYTES = 256 * 1024
@@ -579,6 +607,8 @@ def _source_slug(host: str) -> str:
         "ceur-ws.org": "ceur-ws",
         "dspace.mit.edu": "dspace-mit",
         OPENALEX_CONTENT_HOST: "openalex-content",
+        CORE_API_HOST: "core",
+        SPRINGER_API_HOST: "springer-oa",
     }
     if host in mapping:
         return mapping[host]
@@ -755,16 +785,24 @@ def _pinned_https_request(
             pass
 
 
-# ---- Memory-only OPENALEX_API_KEY loader (sudo-secretspec) -----------------
+# ---- Memory-only secret key loader (sudo-secretspec) -----------------------
 
 
-def load_openalex_key(secretspec_bin: str, log=sys.stderr) -> str | None:
-    """Load OPENALEX_API_KEY in memory via sudo-secretspec; never logs the key."""
+def load_secret_key(
+    secretspec_bin: str,
+    secret_name: str,
+    reason: str,
+    *,
+    validator: re.Pattern[str] = SAFE_KEY_RE,
+    label: str = "oa",
+    log=sys.stderr,
+) -> str | None:
+    """Load an API key in memory via sudo-secretspec; never logs the key value."""
     if not secretspec_bin:
         return None
     try:
         res = subprocess.run(
-            [secretspec_bin, "get", SECRET_NAME, "--reason", SECRET_REASON],
+            [secretspec_bin, "get", secret_name, "--reason", reason],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -772,17 +810,29 @@ def load_openalex_key(secretspec_bin: str, log=sys.stderr) -> str | None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"firecrawl-router: oa key load failed: {type(exc).__name__}", file=log, flush=True)
+        print(f"firecrawl-router: {label} key load failed: {type(exc).__name__}", file=log, flush=True)
         return None
     val = res.stdout.decode("utf-8", "replace").rstrip("\r\n")
-    if res.returncode != 0 or not SAFE_KEY_RE.fullmatch(val):
+    if res.returncode != 0 or not validator.fullmatch(val):
         print(
-            f"firecrawl-router: oa key unavailable: rc={res.returncode} usable={bool(SAFE_KEY_RE.fullmatch(val))}",
+            f"firecrawl-router: {label} key unavailable: rc={res.returncode} usable={bool(validator.fullmatch(val))}",
             file=log,
             flush=True,
         )
         return None
     return val
+
+
+def load_openalex_key(secretspec_bin: str, log=sys.stderr) -> str | None:
+    """Load OPENALEX_API_KEY in memory via sudo-secretspec; never logs the key."""
+    return load_secret_key(
+        secretspec_bin,
+        SECRET_NAME,
+        SECRET_REASON,
+        validator=SAFE_KEY_RE,
+        label="oa",
+        log=log,
+    )
 
 
 class KeyState:
@@ -1083,6 +1133,235 @@ class OpenAlexClient:
             self._crossref_sem.release()
 
 
+# ---- Springer Nature Free OA JATS & CORE API v3 Clients --------------------
+
+
+_JATS_DOI_RE = re.compile(
+    r'<article-id\s+pub-id-type=["\']doi["\'][^>]{0,80}>([^<]{1,220})</article-id>',
+    re.IGNORECASE,
+)
+_JATS_TITLE_RE = re.compile(
+    r"<article-title\b[^>]{0,80}>(.*?)</article-title>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XML_TAG_RE = re.compile(r"<[^>]{1,200}>")
+_CORE_PUBLIC_STUB = "not available for public api users"
+
+
+def is_springer_doi(doi: str) -> bool:
+    d = (doi or "").strip().lower()
+    return any(d.startswith(p) for p in SPRINGER_DOI_PREFIXES)
+
+
+def extract_jats_article(xml_bytes: bytes, expected_doi: str) -> tuple[bytes | None, str, str]:
+    """Safely extract <article>...</article> from Springer OA JATS response (O(n), XXE-safe).
+
+    Returns (article_xml, title, error_tag).
+    """
+    if not xml_bytes:
+        return None, "", "springer-empty"
+    if b"<!entity" in xml_bytes.lower():
+        return None, "", "springer-unsafe-xml"
+    # Linear O(n) scan for <article ...> ... </article> (avoids regex backtracking).
+    start = -1
+    pos = 0
+    lower = xml_bytes.lower()
+    while True:
+        idx = lower.find(b"<article", pos)
+        if idx < 0:
+            break
+        nxt = idx + len(b"<article")
+        if nxt < len(lower) and lower[nxt:nxt + 1] in (b">", b" ", b"\t", b"\r", b"\n"):
+            start = idx
+            break
+        pos = idx + 8
+    if start < 0:
+        return None, "", "springer-no-article"
+    end_tag = b"</article>"
+    end = lower.find(end_tag, start)
+    if end < 0:
+        return None, "", "springer-truncated-xml"
+    article = xml_bytes[start : end + len(end_tag)]
+
+    head_text = article[:32768].decode("utf-8", "replace")
+    doi_m = _JATS_DOI_RE.search(head_text)
+    if not doi_m:
+        return None, "", "springer-doi-missing"
+    got_doi = normalize_doi(doi_m.group(1).strip())
+    if not got_doi or got_doi.lower() != expected_doi.lower():
+        return None, "", "springer-doi-mismatch"
+
+    title = ""
+    title_m = _JATS_TITLE_RE.search(head_text)
+    if title_m:
+        raw_t = _XML_TAG_RE.sub(" ", title_m.group(1))
+        title = _sanitize_text(raw_t)
+    return article, title, ""
+
+
+class SpringerOaClient:
+    """Bounded, fail-closed Springer Nature Free Open Access JATS XML client."""
+
+    def __init__(
+        self,
+        key_state: KeyState | None,
+        *,
+        log=sys.stderr,
+        conn_factory=_PinnedHTTPSConnection,
+        resolver=resolve_global,
+    ):
+        self.key_state = key_state
+        self.log = log
+        self._conn_factory = conn_factory
+        self._resolver = resolver
+        self._lock = threading.Lock()
+        self._circuit_until: float = 0.0
+
+    def _circuit_open(self) -> bool:
+        with self._lock:
+            return time.monotonic() < self._circuit_until
+
+    def _trip_circuit(self, seconds: float) -> None:
+        with self._lock:
+            self._circuit_until = max(self._circuit_until, time.monotonic() + max(0.0, seconds))
+
+    def fetch_jats(self, doi: str, deadline: float) -> tuple[bytes | None, str, str]:
+        """Fetch OA JATS XML for a Springer Nature DOI. Never logs or returns api_key."""
+        if not is_springer_doi(doi):
+            return None, "", "springer-prefix-skip"
+        if self._circuit_open():
+            return None, "", "springer-cooldown"
+        key = self.key_state.get() if self.key_state is not None else None
+        if not key:
+            return None, "", "springer-no-key"
+
+        qs = urllib.parse.urlencode({"q": f"doi:{doi}", "p": "1", "api_key": key})
+        req_url = f"https://{SPRINGER_API_HOST}/openaccess/jats?{qs}"
+        headers = {
+            "User-Agent": "firecrawl-router-oa/1.0",
+            "Accept": "application/xml, text/xml",
+            "Accept-Encoding": "identity",
+        }
+        req_deadline = min(deadline, time.monotonic() + SPRINGER_TIMEOUT_S)
+        # _pinned_https_request never follows redirects so ?api_key= cannot leave api.springernature.com
+        status, _hdrs, body, err = _pinned_https_request(
+            req_url,
+            headers=headers,
+            max_bytes=SPRINGER_MAX_BYTES,
+            deadline=req_deadline,
+            conn_factory=self._conn_factory,
+            resolver=self._resolver,
+        )
+        if err:
+            if err in ("network-error", "timeout"):
+                self._trip_circuit(SPRINGER_CIRCUIT_S)
+            return None, "", f"springer-{err}"
+        if status in (401, 403):
+            if self.key_state is not None:
+                self.key_state.disable_for(KEY_403_COOLDOWN_S)
+            return None, "", f"springer-http-{status}"
+        if status == 429:
+            self._trip_circuit(SPRINGER_COOLDOWN_S)
+            return None, "", "springer-rate-limited"
+        if status != 200 or not body:
+            if status >= 500:
+                self._trip_circuit(SPRINGER_CIRCUIT_S)
+            return None, "", f"springer-http-{status}"
+        return extract_jats_article(body, doi)
+
+
+class CoreOaClient:
+    """Bounded, fail-closed CORE API v3 DOI lookup client."""
+
+    def __init__(
+        self,
+        key_state: KeyState | None,
+        *,
+        log=sys.stderr,
+        conn_factory=_PinnedHTTPSConnection,
+        resolver=resolve_global,
+    ):
+        self.key_state = key_state
+        self.log = log
+        self._conn_factory = conn_factory
+        self._resolver = resolver
+        self._lock = threading.Lock()
+        self._circuit_until: float = 0.0
+
+    def _circuit_open(self) -> bool:
+        with self._lock:
+            return time.monotonic() < self._circuit_until
+
+    def _trip_circuit(self, seconds: float) -> None:
+        with self._lock:
+            self._circuit_until = max(self._circuit_until, time.monotonic() + max(0.0, seconds))
+
+    def lookup_doi(
+        self,
+        doi: str,
+        deadline: float,
+        *,
+        require_key: bool = True,
+    ) -> tuple[dict | None, str]:
+        if self._circuit_open():
+            return None, "core-cooldown"
+        key = self.key_state.get() if self.key_state is not None else None
+        if require_key and not key:
+            return None, "core-no-key"
+
+        qs = urllib.parse.urlencode({"q": f'doi:"{doi}"', "limit": "3"})
+        # Trailing slash on /v3/search/works/ avoids 301 redirect
+        req_url = f"https://{CORE_API_HOST}/v3/search/works/?{qs}"
+        headers = {
+            "User-Agent": "firecrawl-router-oa/1.0",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        }
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        req_deadline = min(deadline, time.monotonic() + CORE_TIMEOUT_S)
+        status, resp_hdrs, body, err = _pinned_https_request(
+            req_url,
+            headers=headers,
+            max_bytes=CORE_MAX_BYTES,
+            deadline=req_deadline,
+            conn_factory=self._conn_factory,
+            resolver=self._resolver,
+        )
+        if err:
+            if err in ("network-error", "timeout"):
+                self._trip_circuit(CORE_CIRCUIT_S)
+            return None, f"core-{err}"
+        if status in (401, 403):
+            if key and self.key_state is not None:
+                self.key_state.disable_for(KEY_403_COOLDOWN_S)
+            return None, f"core-http-{status}"
+        if status == 429:
+            self._trip_circuit(CORE_COOLDOWN_S)
+            return None, "core-rate-limited"
+        if status != 200 or not body:
+            if status >= 500:
+                self._trip_circuit(CORE_CIRCUIT_S)
+            return None, f"core-http-{status}"
+        rem = (resp_hdrs.get("x-ratelimit-remaining") or "").strip()
+        if rem == "0":
+            self._trip_circuit(10.0)
+        try:
+            doc = json.loads(body.decode("utf-8", "replace"))
+        except ValueError:
+            return None, "core-bad-json"
+        results = doc.get("results") if isinstance(doc, dict) else None
+        if not isinstance(results, list) or not results:
+            return None, "core-not-found"
+        for item in results[:3]:
+            if not isinstance(item, dict):
+                continue
+            item_doi = normalize_doi(str(item.get("doi") or ""))
+            if item_doi and item_doi.lower() == doi.lower():
+                return item, ""
+        return None, "core-doi-mismatch"
+
+
 # ---- Candidate filtering & deterministic ranking ---------------------------
 
 
@@ -1334,6 +1613,8 @@ class OaFallbackConfig:
     mode: str = "off"               # "off" | "allowlist" | "pinned"
     version_policy: str = "all"     # "all" | "peer-reviewed"
     content_api: bool = False       # FIRECRAWL_ROUTER_OA_CONTENT_API=on
+    core_mode: str = "auto"         # "off" | "auto" (if CORE_API_KEY) | "on" (incl. keyless)
+    springer_mode: str = "auto"     # "off" | "auto" (if SPRINGER_NATURE_API_KEY) | "on"
     allow_enrolled: bool = True     # FIRECRAWL_ROUTER_OA_ENROLLED=on|off
     secretspec_bin: str = DEFAULT_SECRETSPEC_BIN
     state_dir: str = DEFAULT_STATE_DIR
@@ -1382,6 +1663,24 @@ def build_oa_fallback(env: dict[str, str], log=sys.stderr) -> OaFallback | None:
         )
         raw_content = "off"
 
+    raw_core = (env.get("FIRECRAWL_ROUTER_OA_CORE") or "auto").strip().lower()
+    if raw_core not in VALID_PROVIDER_MODES:
+        print(
+            f"firecrawl-router: unknown FIRECRAWL_ROUTER_OA_CORE={raw_core!r}; failing closed (off)",
+            file=log,
+            flush=True,
+        )
+        raw_core = "off"
+
+    raw_springer = (env.get("FIRECRAWL_ROUTER_OA_SPRINGER") or "auto").strip().lower()
+    if raw_springer not in VALID_PROVIDER_MODES:
+        print(
+            f"firecrawl-router: unknown FIRECRAWL_ROUTER_OA_SPRINGER={raw_springer!r}; failing closed (off)",
+            file=log,
+            flush=True,
+        )
+        raw_springer = "off"
+
     raw_enrolled = (env.get("FIRECRAWL_ROUTER_OA_ENROLLED") or "on").strip().lower()
     if raw_enrolled not in VALID_ON_OFF:
         print(
@@ -1413,6 +1712,8 @@ def build_oa_fallback(env: dict[str, str], log=sys.stderr) -> OaFallback | None:
         mode=raw_mode,
         version_policy=raw_ver,
         content_api=(raw_content == "on"),
+        core_mode=raw_core,
+        springer_mode=raw_springer,
         allow_enrolled=(raw_enrolled == "on"),
         secretspec_bin=secretspec_bin,
         state_dir=(env.get("FIRECRAWL_ROUTER_OA_STATE_DIR") or DEFAULT_STATE_DIR).strip(),
@@ -1481,6 +1782,32 @@ class OaFallback:
             if config.secretspec_bin
             else None
         )
+        self.core_key_state = (
+            KeyState(
+                lambda: load_secret_key(
+                    self.config.secretspec_bin,
+                    CORE_SECRET_NAME,
+                    CORE_SECRET_REASON,
+                    label="core-oa",
+                    log=self.log,
+                )
+            )
+            if config.secretspec_bin
+            else None
+        )
+        self.springer_key_state = (
+            KeyState(
+                lambda: load_secret_key(
+                    self.config.secretspec_bin,
+                    SPRINGER_SECRET_NAME,
+                    SPRINGER_SECRET_REASON,
+                    label="springer-oa",
+                    log=self.log,
+                )
+            )
+            if config.secretspec_bin
+            else None
+        )
         self.client = OpenAlexClient(
             self.key_state,
             contact=config.contact,
@@ -1488,6 +1815,18 @@ class OaFallback:
             conn_factory=conn_factory,
             resolver=resolver,
             sleep_fn=sleep_fn,
+        )
+        self.core_client = CoreOaClient(
+            self.core_key_state,
+            log=log,
+            conn_factory=conn_factory,
+            resolver=resolver,
+        )
+        self.springer_client = SpringerOaClient(
+            self.springer_key_state,
+            log=log,
+            conn_factory=conn_factory,
+            resolver=resolver,
         )
         if self.enabled:
             self._ensure_private_state_dir()
@@ -1635,60 +1974,316 @@ class OaFallback:
             kind, val = "doi", doi
 
         work, oa_err = self.client.lookup_work(kind, val, deadline)
-        if work is None:
-            return None, None, _safe_reason_tag(oa_err or "openalex-error")
+        last_err = oa_err or "openalex-error"
+        springer_tried = False
 
-        key_active = self.key_state is not None and bool(self.key_state.get())
-        content_api_allowed = (
-            self.config.content_api
-            and key_active
-            and self.client.can_spend_billable(0.01)
-        )
-        candidates, rank_err = rank_oa_candidates(
-            work,
-            requested_host,
-            host_policy=self.config.mode,
-            version_policy=self.config.version_policy,
-            content_api_allowed=content_api_allowed,
-            cooldown_hosts=self._active_cooldown_hosts(),
-        )
-        if not candidates:
-            return None, None, _safe_reason_tag(rank_err or "no-eligible-candidate")
-
-        if not self._ensure_private_state_dir():
-            return None, None, "state-dir-invalid"
-
-        last_err = "fetch-failed"
-        for cand in candidates[:MAX_CANDIDATES]:
-            if time.monotonic() >= deadline:
-                last_err = "budget-timeout"
-                break
-            fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
-            fetched, final_url, content_kind, f_err = self._fetch_candidate(
-                cand, requested_host, fetch_deadline
+        if work is not None:
+            key_active = self.key_state is not None and bool(self.key_state.get())
+            content_api_allowed = (
+                self.config.content_api
+                and key_active
+                and self.client.can_spend_billable(0.01)
             )
-            if fetched is None:
-                last_err = f_err or "fetch-failed"
-                continue
-
-            reply, c_err = self._convert_and_build_reply(
-                fetched=fetched,
-                content_kind=content_kind,
-                requested_url=url,
-                final_url=final_url,
-                cand=cand,
-                work=work,
-                resolved_doi=val if kind == "doi" else None,
-                req_doc=req_doc,
-                deadline=deadline,
-                reply_cls=reply_cls,
+            candidates, rank_err = rank_oa_candidates(
+                work,
+                requested_host,
+                host_policy=self.config.mode,
+                version_policy=self.config.version_policy,
+                content_api_allowed=content_api_allowed,
+                cooldown_hosts=self._active_cooldown_hosts(),
             )
-            if reply is not None:
-                slug = _source_slug(cand.host)
-                return reply, "oa-fallback", f"oa:{slug} {cand.oa_version}"
-            last_err = c_err or "converter-failed"
+            if candidates:
+                if not self._ensure_private_state_dir():
+                    return None, None, "state-dir-invalid"
+                free_cands = [c for c in candidates[:MAX_CANDIDATES] if not c.is_content_api]
+                paid_cands = [c for c in candidates[:MAX_CANDIDATES] if c.is_content_api]
+                last_err = "fetch-failed"
+                for cand in free_cands:
+                    if time.monotonic() >= deadline:
+                        last_err = "budget-timeout"
+                        break
+                    fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
+                    fetched, final_url, content_kind, f_err = self._fetch_candidate(
+                        cand, requested_host, fetch_deadline
+                    )
+                    if fetched is None:
+                        last_err = f_err or "fetch-failed"
+                        continue
+                    reply, c_err = self._convert_and_build_reply(
+                        fetched=fetched,
+                        content_kind=content_kind,
+                        requested_url=url,
+                        final_url=final_url,
+                        cand=cand,
+                        work=work,
+                        resolved_doi=val if kind == "doi" else None,
+                        req_doc=req_doc,
+                        deadline=deadline,
+                        reply_cls=reply_cls,
+                    )
+                    if reply is not None:
+                        slug = _source_slug(cand.host)
+                        return reply, "oa-fallback", f"oa:{slug} {cand.oa_version}"
+                    last_err = c_err or "converter-failed"
+
+                # Try free Springer Nature OA JATS VoR before spending $0.01 on content.openalex.org
+                if kind == "doi" and self._springer_eligible(val) and time.monotonic() < deadline:
+                    springer_tried = True
+                    sp_reply, sp_note = self._try_springer_oa(url, val, work, req_doc, deadline, reply_cls)
+                    if sp_reply is not None:
+                        return sp_reply, "oa-fallback", sp_note
+
+                for cand in paid_cands:
+                    if time.monotonic() >= deadline:
+                        last_err = "budget-timeout"
+                        break
+                    fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
+                    fetched, final_url, content_kind, f_err = self._fetch_candidate(
+                        cand, requested_host, fetch_deadline
+                    )
+                    if fetched is None:
+                        last_err = f_err or "fetch-failed"
+                        continue
+                    reply, c_err = self._convert_and_build_reply(
+                        fetched=fetched,
+                        content_kind=content_kind,
+                        requested_url=url,
+                        final_url=final_url,
+                        cand=cand,
+                        work=work,
+                        resolved_doi=val if kind == "doi" else None,
+                        req_doc=req_doc,
+                        deadline=deadline,
+                        reply_cls=reply_cls,
+                    )
+                    if reply is not None:
+                        slug = _source_slug(cand.host)
+                        return reply, "oa-fallback", f"oa:{slug} {cand.oa_version}"
+                    last_err = c_err or "converter-failed"
+            else:
+                last_err = rank_err or "no-eligible-candidate"
+
+        # Secondary zero-risk OA tiers when OpenAlex failed or had no eligible/working copy
+        if kind == "doi" and not springer_tried and self._springer_eligible(val) and time.monotonic() < deadline:
+            sp_reply, sp_note = self._try_springer_oa(url, val, work or {}, req_doc, deadline, reply_cls)
+            if sp_reply is not None:
+                return sp_reply, "oa-fallback", sp_note
+
+        if kind == "doi" and self.config.core_mode != "off" and time.monotonic() < deadline:
+            core_reply, core_note = self._try_core_oa(
+                url, requested_host, val, work or {}, req_doc, deadline, reply_cls
+            )
+            if core_reply is not None:
+                return core_reply, "oa-fallback", core_note
 
         return None, None, _safe_reason_tag(last_err)
+
+    def _springer_eligible(self, doi: str) -> bool:
+        return self.config.springer_mode != "off" and is_springer_doi(doi) and self.springer_key_state is not None
+
+    def _try_springer_oa(
+        self,
+        requested_url: str,
+        doi: str,
+        work: dict,
+        req_doc: dict,
+        deadline: float,
+        reply_cls,
+    ) -> tuple[object | None, str]:
+        article_xml, jats_title, s_err = self.springer_client.fetch_jats(doi, deadline)
+        if article_xml is None:
+            return None, s_err
+        if not self.config.pandoc_bin or not os.path.isfile(self.config.pandoc_bin) or not os.access(self.config.pandoc_bin, os.X_OK):
+            return None, "pandoc-missing"
+        if not self._ensure_private_state_dir():
+            return None, "state-dir-invalid"
+        run_dir = None
+        try:
+            run_dir = tempfile.mkdtemp(prefix="run-", dir=self.config.state_dir)
+            os.chmod(run_dir, 0o700)
+            env = scrubbed_env(include_ssh_auth_sock=False, tmpdir=run_dir, home=run_dir)
+            left = deadline - time.monotonic()
+            if left <= 0.2:
+                return None, "budget-timeout"
+            res = run_bounded(
+                [self.config.pandoc_bin, "--sandbox", "-f", "jats", "-t", "gfm-raw_html", "--wrap=none"],
+                env=env,
+                timeout=min(self.config.pandoc_timeout, left),
+                max_stdout=MAX_MARKDOWN_BYTES + 1,
+                stdin_bytes=article_xml,
+                kill_on_stdout_cap=True,
+            )
+            if res.timed_out or (res.returncode != 0 and not res.stdout_truncated):
+                return None, "pandoc-failed"
+            md, dec_trunc = _decode_capped_utf8(res.stdout, MAX_MARKDOWN_BYTES)
+            truncated = dec_trunc or res.stdout_truncated
+            if not md.strip():
+                return None, "pandoc-empty"
+            title = _sanitize_text(work.get("title"), fallback=jats_title)
+            if title and not md.lstrip().startswith("#"):
+                md = f"# {title}\n\n{md}"
+            safe_oa_url = f"https://{SPRINGER_API_HOST}/openaccess/jats?q=doi:{urllib.parse.quote(doi, safe='/:.-_()')}"
+            warn_parts = [
+                f"Served Open Access JATS XML copy (publishedVersion, license: open-access) "
+                f"from Springer Nature Open Access API at {safe_oa_url} instead of the requested publisher URL "
+                f"because the publisher scrape failed."
+            ]
+            if truncated:
+                warn_parts.append("Extracted content truncated to 2 MiB.")
+            metadata: dict[str, object] = {
+                "sourceURL": redact_url(requested_url),
+                "url": safe_oa_url,
+                "statusCode": 200,
+                "contentType": "application/xml",
+                "proxyUsed": "oa-fallback",
+                "doi": doi,
+                "oaStatus": "gold",
+                "oaVersion": "publishedVersion",
+                "oaLicense": "open-access",
+                "oaSource": "Springer Nature Open Access API",
+            }
+            if title:
+                metadata["title"] = title
+            payload = json.dumps(
+                {"success": True, "data": {"markdown": md, "warning": " ".join(warn_parts), "metadata": metadata}}
+            ).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "X-Firecrawl-Backend": "oa-fallback",
+                "X-Firecrawl-OA-Source": "springer-oa",
+            }
+            return reply_cls(200, headers, payload), "oa:springer-oa publishedVersion"
+        finally:
+            if run_dir:
+                shutil.rmtree(run_dir, ignore_errors=True)
+
+    def _try_core_oa(
+        self,
+        requested_url: str,
+        requested_host: str,
+        doi: str,
+        work: dict,
+        req_doc: dict,
+        deadline: float,
+        reply_cls,
+    ) -> tuple[object | None, str]:
+        # CORE search results do not reliably distinguish submitted vs peer-reviewed versions.
+        if self.config.version_policy == "peer-reviewed":
+            return None, "core-version-unknown"
+        require_key = self.config.core_mode == "auto"
+        item, c_err = self.core_client.lookup_doi(doi, deadline, require_key=require_key)
+        if item is None:
+            return None, c_err
+
+        # Path A: Try any vetted repository URL in sourceFulltextUrls (excluding core.ac.uk & failed publisher)
+        src_urls = item.get("sourceFulltextUrls")
+        if isinstance(src_urls, list) and self._ensure_private_state_dir():
+            cooldown_hosts = self._active_cooldown_hosts()
+            tried = 0
+            for raw_u in src_urls:
+                if tried >= 2 or time.monotonic() >= deadline:
+                    break
+                if not isinstance(raw_u, str):
+                    continue
+                parsed = parse_url(raw_u)
+                if parsed is None:
+                    continue
+                scheme, host, port = parsed
+                if scheme != "https" or port != 443:
+                    continue
+                if host in ("core.ac.uk", "www.core.ac.uk", CORE_API_HOST):
+                    continue
+                if host in BLOCKED_REDIRECTOR_HOSTS or _is_excluded_publisher_host(host, requested_host):
+                    continue
+                if host in cooldown_hosts:
+                    continue
+                if self.config.mode == "allowlist" and not _trusted_host_path_ok(host, raw_u):
+                    continue
+                tried += 1
+                cand = OaCandidate(
+                    url=raw_u,
+                    host=host,
+                    is_direct_pdf=raw_u.lower().endswith(".pdf"),
+                    oa_version="unknown",
+                    oa_license=_sanitize_license(item.get("license")),
+                    oa_source="CORE Open Access Repository",
+                    is_content_api=False,
+                    score=(0, 0, 0, 0, 0, 0),
+                )
+                fetch_deadline = min(deadline, time.monotonic() + self.config.fetch_deadline_s)
+                fetched, final_url, content_kind, _f_err = self._fetch_candidate(
+                    cand, requested_host, fetch_deadline
+                )
+                if fetched is None:
+                    continue
+                reply, _conv_err = self._convert_and_build_reply(
+                    fetched=fetched,
+                    content_kind=content_kind,
+                    requested_url=requested_url,
+                    final_url=final_url,
+                    cand=cand,
+                    work=work or {"title": item.get("title"), "doi": doi},
+                    resolved_doi=doi,
+                    req_doc=req_doc,
+                    deadline=deadline,
+                    reply_cls=reply_cls,
+                )
+                if reply is not None:
+                    return reply, f"oa:core-{_source_slug(cand.host)} unknown"
+
+        # Path B: Inline CORE fullText (requires registered key; skipped under peer-reviewed-only policy)
+        if self.config.version_policy == "peer-reviewed":
+            return None, "core-version-unknown"
+        raw_ft = item.get("fullText")
+        if not isinstance(raw_ft, str):
+            return None, "core-no-fulltext"
+        if _CORE_PUBLIC_STUB in raw_ft.lower():
+            return None, "core-key-required"
+        ft_clean = CONTROL_CHARS_RE.sub("", raw_ft).strip()
+        if len(ft_clean) < CORE_MIN_FULLTEXT_CHARS:
+            return None, "core-short-fulltext"
+        if len(ft_clean) < BRIDGE_CHALLENGE_MAX_CHARS and OA_CHALLENGE_RE.search(ft_clean):
+            return None, "core-challenge-text"
+        md, truncated = _decode_capped_utf8(ft_clean.encode("utf-8", "replace"), MAX_MARKDOWN_BYTES)
+
+        core_id = str(item.get("id") or "").strip()
+        safe_oa_url = (
+            f"https://core.ac.uk/works/{core_id}"
+            if SAFE_CORE_ID_RE.fullmatch(core_id)
+            else f"https://{CORE_API_HOST}/v3/search/works/"
+        )
+        title = _sanitize_text(work.get("title") or item.get("title"))
+        oa_lic = _sanitize_license(item.get("license"))
+        warn_parts = [
+            f"Served Open Access repository fullText (unknown version, license: {oa_lic}) "
+            f"from CORE Open Access Repository at {safe_oa_url} instead of the requested publisher URL "
+            f"because the publisher scrape failed; content may differ from the Version of Record."
+        ]
+        if truncated:
+            warn_parts.append("Extracted content truncated to 2 MiB.")
+        metadata: dict[str, object] = {
+            "sourceURL": redact_url(requested_url),
+            "url": safe_oa_url,
+            "statusCode": 200,
+            "contentType": "text/plain; charset=utf-8",
+            "proxyUsed": "oa-fallback",
+            "doi": doi,
+            "oaStatus": "green",
+            "oaVersion": "unknown",
+            "oaLicense": oa_lic,
+            "oaSource": "CORE Open Access Repository",
+        }
+        if title:
+            metadata["title"] = title
+        payload = json.dumps(
+            {"success": True, "data": {"markdown": md, "warning": " ".join(warn_parts), "metadata": metadata}}
+        ).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "X-Firecrawl-Backend": "oa-fallback",
+            "X-Firecrawl-OA-Source": "core",
+        }
+        return reply_cls(200, headers, payload), "oa:core unknown"
 
     # -- Hop-by-hop SSRF-pinned downloader
 

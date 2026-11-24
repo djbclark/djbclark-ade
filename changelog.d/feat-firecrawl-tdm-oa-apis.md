@@ -1,0 +1,4 @@
+### Added
+
+- `bin/firecrawl_oa_fallback.py`: added CORE API v3 (`CORE_API_KEY`, Bearer auth, inline `fullText` + vetted repository URL rescue) and Springer Nature Free Open Access JATS XML (`SPRINGER_NATURE_API_KEY`, query-redacted `_NoRedirect`, XXE-safe `<article>` extraction + `pandoc --sandbox -f jats`) as secondary zero-risk OA tiers (`FIRECRAWL_ROUTER_OA_CORE` and `FIRECRAWL_ROUTER_OA_SPRINGER`, defaulting to `auto` when OA fallback is enabled) (#PR)
+- `bin/firecrawl_wiley_tdm.py` & `bin/firecrawl-router`: added opt-in MIT-IP Wiley TDM PDF API lane (`FIRECRAWL_ROUTER_WILEY_TDM`, `off` | `on` | `auto`) using pure-stdlib RFC 1928 loopback SOCKS5 (`ATYP=0x03` remote DNS) + end-to-end TLS, `sudo-secretspec` UUID token loading, client-side 10 s / 60-per-10m rate limiting, redirect token stripping, and default cloud-LLM extraction blocking (`FIRECRAWL_ROUTER_WILEY_ALLOW_CLOUD_LLM=off`) (#PR)
