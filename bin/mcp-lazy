@@ -1,0 +1,2151 @@
+#!/usr/bin/env python3
+"""mcp-lazy — lazy stdio MCP wrapper with cached discovery and idle reaping.
+
+Usage:
+    mcp-lazy --id ID [--idle SECONDS] [--cache-dir DIR] [--start-timeout SECONDS] -- /abs/path/to/cmd [args...]
+
+Answers MCP `initialize`, `notifications/initialized`, `tools/list`, `prompts/list`,
+`resources/list`, and `resources/templates/list` from a per-server cache file
+(`~/.cache/ade/mcp-lazy/<id>.json`, mode 0600 inside a 0700 directory) without spawning
+the wrapped server. On the first non-cached request (`tools/call`, `prompts/get`,
+`resources/read`, etc.), spawns the child, replays `initialize` + `notifications/initialized`,
+validates protocol compatibility, refreshes discovery (emitting `notifications/*/list_changed`
+if lists changed, became paginated, or capabilities disappeared), and forwards.
+Reaps the child after `--idle` seconds (default 600; 0 disables) when no client request,
+server-to-client request, or resource subscription is active, and respawns cleanly on the
+next call or after an unexpected child crash.
+
+Hardening (docs/mcp-on-demand.md §11.3, Adversary L3):
+  - Execs child from an argv list (`shell=False`), never a shell.
+  - Rejects non-absolute child command paths or paths containing `..` segments.
+  - Fixes child working directory to `$HOME` (never the session checkout cwd).
+  - Rebuilds child `PATH` keeping only absolute entries without `..` segments.
+  - Restricts `--id` strictly to `^[a-z0-9-]+$`.
+  - Pins every ancestor and the `0700` cache directory step-by-step via
+    `O_DIRECTORY | O_NOFOLLOW` descriptors for all cache reads, directory/temp creation,
+    and `os.replace`; opens cache files with `O_NONBLOCK | O_NOFOLLOW`, verifying regular
+    file (`S_ISREG`), ownership (`st_uid == getuid()`), and strict permissions
+    (`(st_mode & 0o077) == 0`).
+  - Never stores or reads command/argv in the cache file (discovery responses only).
+  - Enforces strict JSON-RPC 2.0 envelopes (rejecting non-finite JSON constants) and
+    bounded frame sizes on stdout; all diagnostics go to stderr.
+
+Exit codes: 0 normal EOF/signal shutdown; 2 invalid CLI arguments or hardening violation.
+Stdlib only (Python 3.9+).
+"""
+from __future__ import annotations
+
+import argparse
+import errno
+import hashlib
+import io
+import json
+import math
+import os
+import pwd
+import queue
+import re
+import secrets
+import select
+import signal
+import stat
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+CACHE_VERSION = 1
+DEFAULT_IDLE = 600.0
+DEFAULT_START_TIMEOUT = 120.0
+DEFAULT_WRITE_TIMEOUT = 5.0
+DEFAULT_CACHE_DIR = "~/.cache/ade/mcp-lazy"
+DEFAULT_PROTOCOL_VERSION = "2025-11-25"
+MAX_CACHE_BYTES = 16 * 1024 * 1024
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+MAX_HEADER_LINE_BYTES = 8192
+MAX_HEADER_COUNT = 32
+MAX_JSON_DEPTH = 512
+
+ID_RE = re.compile(r"[a-z0-9-]+")
+_STOP_SENTINEL = object()
+
+# Verified macOS OS root symlinks (/var -> private/var, /tmp -> private/tmp, /etc -> private/etc).
+_DARWIN_SYSTEM_SYMLINKS: dict[str, tuple[str, ...]] = {
+    "var": ("private", "var"),
+    "tmp": ("private", "tmp"),
+    "etc": ("private", "etc"),
+}
+
+# method -> (cache_field, server_capability_key, list_changed_notification)
+CACHEABLE_METHODS: dict[str, tuple[str, str, str]] = {
+    "tools/list": ("tools", "tools", "notifications/tools/list_changed"),
+    "prompts/list": ("prompts", "prompts", "notifications/prompts/list_changed"),
+    "resources/list": ("resources", "resources", "notifications/resources/list_changed"),
+    "resources/templates/list": ("resourceTemplates", "resources", "notifications/resources/list_changed"),
+}
+ALLOWED_CACHE_KEYS = frozenset(
+    {
+        "version",
+        "clientProtocolVersion",
+        "initialize",
+        "tools",
+        "prompts",
+        "resources",
+        "resourceTemplates",
+    }
+)
+
+
+class FramingError(Exception):
+    """Raised when an inbound stdio frame violates size or header framing rules."""
+
+
+class ProtocolMismatchError(Exception):
+    """Raised when a live child negotiates a protocol version incompatible with cached init."""
+
+
+class ClientNotInitializedError(Exception):
+    """Raised when a non-ping request arrives before the client sent notifications/initialized."""
+
+
+def log_err(msg: str) -> None:
+    try:
+        sys.stderr.write(f"mcp-lazy: {msg}\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"non-standard JSON constant rejected: {token}")
+
+
+def _check_json_depth(raw: bytes, max_depth: int = MAX_JSON_DEPTH) -> None:
+    """Reject excessively nested JSON before C/Python decoder recursion limits can be hit."""
+    if raw.count(b"[") + raw.count(b"{") <= max_depth:
+        return
+    depth = 0
+    in_str = False
+    escaped = False
+    for b in raw:
+        if in_str:
+            if escaped:
+                escaped = False
+            elif b == 0x5C:  # '\\'
+                escaped = True
+            elif b == 0x22:  # '"'
+                in_str = False
+            continue
+        if b == 0x22:  # '"'
+            in_str = True
+        elif b in (0x5B, 0x7B):  # '[' or '{'
+            depth += 1
+            if depth > max_depth:
+                raise RecursionError(f"JSON nesting depth exceeds {max_depth}")
+        elif b in (0x5D, 0x7D):  # ']' or '}'
+            if depth > 0:
+                depth -= 1
+
+
+def json_loads_strict(raw: bytes) -> Any:
+    """Decode strict RFC 8259 JSON, rejecting excessive nesting and NaN/Infinity at decode time."""
+    _check_json_depth(raw)
+    return json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
+
+
+def json_dumps_bytes(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def canonical_digest(obj: Any) -> bytes:
+    raw = json.dumps(
+        obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(raw).digest()
+
+
+def id_key(mid: Any) -> str:
+    return json.dumps(mid, sort_keys=True, separators=(",", ":"))
+
+
+def _is_valid_rpc_id(val: Any, *, allow_null: bool = False) -> bool:
+    if val is None:
+        return allow_null
+    if isinstance(val, bool):
+        return False
+    return isinstance(val, (str, int))
+
+
+def is_valid_jsonrpc_message(obj: Any) -> bool:
+    """Validate strict JSON-RPC 2.0 single-message envelope (request, notification, or response)."""
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("jsonrpc") != "2.0":
+        return False
+    has_method = "method" in obj
+    has_id = "id" in obj
+    has_result = "result" in obj
+    has_error = "error" in obj
+
+    if has_method:
+        if has_result or has_error:
+            return False
+        method = obj.get("method")
+        if not isinstance(method, str) or not method:
+            return False
+        if "params" in obj and not isinstance(obj["params"], (dict, list)):
+            return False
+        if has_id:
+            return _is_valid_rpc_id(obj["id"], allow_null=False)
+        return True
+
+    # Response (must carry id and exactly one of result or error)
+    if not has_id or not _is_valid_rpc_id(obj["id"], allow_null=True):
+        return False
+    if has_result == has_error:
+        return False
+    if has_error:
+        err = obj["error"]
+        if not isinstance(err, dict):
+            return False
+        code = err.get("code")
+        if isinstance(code, bool) or not isinstance(code, int):
+            return False
+        if not isinstance(err.get("message"), str):
+            return False
+    return True
+
+
+def _summarize_rpc_failure(resp: Optional[dict[str, Any]]) -> str:
+    """Return a bounded diagnostic summary without leaking arbitrary server error payloads."""
+    if resp is None:
+        return "no reply or timeout"
+    if not isinstance(resp, dict):
+        return "malformed reply"
+    err = resp.get("error")
+    if isinstance(err, dict):
+        code = err.get("code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            return f"jsonrpc error code={code}"
+        return "jsonrpc error"
+    if "result" not in resp:
+        return "missing result"
+    return "invalid initialize result schema"
+
+
+def _is_valid_init_result(res: Any) -> bool:
+    if not isinstance(res, dict):
+        return False
+    return (
+        isinstance(res.get("protocolVersion"), str)
+        and bool(res["protocolVersion"])
+        and isinstance(res.get("capabilities"), dict)
+        and isinstance(res.get("serverInfo"), dict)
+    )
+
+
+def validate_server_id(server_id: str) -> None:
+    if not server_id or not ID_RE.fullmatch(server_id):
+        raise ValueError(f"--id must match ^[a-z0-9-]+$, got {server_id!r}")
+
+
+def validate_child_command(cmd: str) -> None:
+    if not cmd or "\x00" in cmd:
+        raise ValueError("child command must be a non-empty path without NUL bytes")
+    if not os.path.isabs(cmd):
+        raise ValueError(f"child command must be an absolute path, got {cmd!r}")
+    if cmd.endswith("/"):
+        raise ValueError(f"child command must name an executable, not a directory: {cmd!r}")
+    if ".." in cmd.split("/") or ".." in Path(cmd).parts:
+        raise ValueError(f"child command must not contain '..' segments: {cmd!r}")
+
+
+def sanitize_path(raw_path: str) -> str:
+    kept: list[str] = []
+    for entry in raw_path.split(os.pathsep):
+        if not entry or "\x00" in entry:
+            continue
+        if not os.path.isabs(entry):
+            continue
+        if ".." in entry.split("/") or ".." in Path(entry).parts:
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
+def resolve_child_cwd() -> str:
+    home = os.environ.get("HOME", "")
+    if home and os.path.isabs(home) and ".." not in home.split("/") and os.path.isdir(home):
+        return home
+    pw_dir = pwd.getpwuid(os.getuid()).pw_dir
+    if pw_dir and os.path.isabs(pw_dir) and os.path.isdir(pw_dir):
+        return pw_dir
+    raise OSError("cannot resolve a valid $HOME directory for child cwd")
+
+
+def build_child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PATH"] = sanitize_path(env.get("PATH", ""))
+    return env
+
+
+def read_framed_message(
+    stream: Any,
+    *,
+    max_frame_bytes: int = MAX_FRAME_BYTES,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Read one bounded JSON-RPC message from a binary stream.
+
+    Supports both newline-delimited JSON-RPC (MCP stdio standard) and
+    `Content-Length: N` framed JSON-RPC. Raises FramingError on oversized lines,
+    header floods, or invalid Content-Length headers. Returns `(None, None)` on EOF.
+    """
+    while True:
+        line = stream.readline(max_frame_bytes + 1)
+        if not line:
+            return None, None
+        if len(line) > max_frame_bytes and not line.endswith(b"\n"):
+            raise FramingError(f"NDJSON line exceeds {max_frame_bytes} byte limit")
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if len(stripped) > max_frame_bytes:
+            raise FramingError(f"NDJSON line exceeds {max_frame_bytes} byte limit")
+        low = stripped.lower()
+        if low.startswith(b"content-length:"):
+            if len(line) > MAX_HEADER_LINE_BYTES:
+                raise FramingError("Content-Length header line exceeds limit")
+            val = stripped.split(b":", 1)[1].strip()
+            try:
+                length = int(val)
+            except ValueError as e:
+                raise FramingError("malformed Content-Length header") from e
+            if length < 0 or length > max_frame_bytes:
+                raise FramingError(f"Content-Length {length} out of range (max {max_frame_bytes})")
+            header_count = 1
+            while True:
+                hdr = stream.readline(MAX_HEADER_LINE_BYTES + 1)
+                if not hdr:
+                    return None, None
+                if len(hdr) > MAX_HEADER_LINE_BYTES and not hdr.endswith(b"\n"):
+                    raise FramingError("header line exceeds limit")
+                if hdr in (b"\r\n", b"\n"):
+                    break
+                header_count += 1
+                if header_count > MAX_HEADER_COUNT:
+                    raise FramingError("too many header lines")
+            chunks: list[bytes] = []
+            remaining = length
+            while remaining > 0:
+                chunk = stream.read(remaining)
+                if not chunk:
+                    return None, None
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks), "content-length"
+        return stripped, "ndjson"
+
+
+def format_framed_message(payload: bytes, framing: str) -> bytes:
+    if framing == "content-length":
+        return f"Content-Length: {len(payload)}\r\n\r\n".encode("ascii") + payload
+    return payload + b"\n"
+
+
+class CacheStore:
+    """Hardened per-server discovery cache with step-by-step pinned directory descriptors.
+
+    - Walks from `/` component-by-component with `O_DIRECTORY | O_NOFOLLOW` (`dir_fd`),
+      creating missing components via `os.mkdir(..., dir_fd=cur_fd)` so no ancestor swap
+      can race validation vs open.
+    - Restricts symlink hops exclusively to verified macOS OS root symlinks
+      (`/var -> private/var`, `/tmp -> private/tmp`, `/etc -> private/etc`), re-verified
+      component-by-component as root-owned directories.
+    - Opens cache files with `O_NONBLOCK | O_NOFOLLOW` relative to the pinned leaf `dir_fd`
+      before validating `S_ISREG`, so FIFOs never hang initialize.
+    - NEVER stores or reads command/argv — only allowlisted MCP discovery responses.
+    """
+
+    def __init__(self, cache_dir: Path, server_id: str) -> None:
+        self.cache_dir = cache_dir
+        self.server_id = server_id
+        self.filename = f"{server_id}.json"
+        self.path = cache_dir / self.filename
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def sanitize_payload(data: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(data, dict):
+            return None
+        if data.get("version") != CACHE_VERSION:
+            return None
+        init = data.get("initialize")
+        if not _is_valid_init_result(init):
+            return None
+        clean: dict[str, Any] = {
+            "version": CACHE_VERSION,
+            "initialize": init,
+        }
+        client_proto = data.get("clientProtocolVersion")
+        if isinstance(client_proto, str) and client_proto:
+            clean["clientProtocolVersion"] = client_proto
+        for key in ("tools", "prompts", "resources", "resourceTemplates"):
+            if key in data:
+                val = data[key]
+                if not isinstance(val, dict):
+                    return None
+                clean[key] = val
+        return clean
+
+    @staticmethod
+    def _open_step_no_follow(parent_fd: int, part: str, *, create: bool, mode: int) -> int:
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            return os.open(part, dir_flags, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            try:
+                os.mkdir(part, mode, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+            return os.open(part, dir_flags, dir_fd=parent_fd)
+
+    @classmethod
+    def _open_verified_darwin_system_link(cls, root_fd: int, part: str) -> Optional[int]:
+        """Allow ONLY verified root-owned macOS OS symlinks at `/` (`/var`, `/tmp`, `/etc`)."""
+        if sys.platform != "darwin" or part not in _DARWIN_SYSTEM_SYMLINKS:
+            return None
+        expected_parts = _DARWIN_SYSTEM_SYMLINKS[part]
+        expected_target = "/".join(expected_parts)
+        try:
+            lst = os.lstat(part, dir_fd=root_fd)
+            if not stat.S_ISLNK(lst.st_mode) or lst.st_uid != 0:
+                return None
+            target = os.readlink(part, dir_fd=root_fd)
+            if target.lstrip("/") != expected_target:
+                return None
+        except OSError:
+            return None
+
+        cur_fd = os.dup(root_fd)
+        try:
+            for comp in expected_parts:
+                nxt = cls._open_step_no_follow(cur_fd, comp, create=False, mode=0o755)
+                os.close(cur_fd)
+                cur_fd = nxt
+                st = os.fstat(cur_fd)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+                    os.close(cur_fd)
+                    return None
+                if (st.st_mode & 0o022) != 0 and not (st.st_mode & stat.S_ISVTX):
+                    os.close(cur_fd)
+                    return None
+            return cur_fd
+        except OSError:
+            try:
+                os.close(cur_fd)
+            except OSError:
+                pass
+            return None
+
+    def _open_dir_fd(self, *, create: bool) -> Optional[int]:
+        """Traverse from `/` pinning every ancestor with `O_DIRECTORY | O_NOFOLLOW` `dir_fd`."""
+        uid = os.getuid()
+        abs_dir = self.cache_dir if self.cache_dir.is_absolute() else (Path.cwd() / self.cache_dir)
+        raw_parts = abs_dir.parts[1:]
+        if not raw_parts or any(p == ".." or "\x00" in p for p in raw_parts):
+            log_err(f"refusing invalid cache dir path: {self.cache_dir}")
+            return None
+        parts = [p for p in raw_parts if p and p != "."]
+        if not parts:
+            log_err(f"refusing root as cache dir: {self.cache_dir}")
+            return None
+
+        dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            cur_fd = os.open("/", dir_flags)
+        except OSError as e:
+            log_err(f"cannot open root dir: {e}")
+            return None
+
+        try:
+            for idx, part in enumerate(parts):
+                is_leaf = idx == len(parts) - 1
+                try:
+                    next_fd = self._open_step_no_follow(
+                        cur_fd, part, create=create, mode=0o700
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError as e:
+                    # Only at depth 0 under `/` on macOS: allow verified OS system symlinks (/var, /tmp, /etc).
+                    # Fall through to the standard fstat / leaf ownership & mode checks (never skip them!).
+                    if idx == 0 and e.errno in (errno.ELOOP, errno.ENOTDIR):
+                        sys_fd = self._open_verified_darwin_system_link(cur_fd, part)
+                        if sys_fd is not None:
+                            next_fd = sys_fd
+                        else:
+                            log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
+                            return None
+                    else:
+                        log_err(f"ignoring untrusted/symlink cache component {part!r} in {self.cache_dir}: {e}")
+                        return None
+
+                os.close(cur_fd)
+                cur_fd = next_fd
+
+                st = os.fstat(cur_fd)
+                if not stat.S_ISDIR(st.st_mode):
+                    log_err(f"cache path component {part!r} is not a directory")
+                    return None
+
+                if is_leaf:
+                    if st.st_uid != uid:
+                        log_err(f"ignoring untrusted cache dir (uid={st.st_uid}): {self.cache_dir}")
+                        return None
+                    if create:
+                        if (st.st_mode & 0o077) != 0:
+                            os.fchmod(cur_fd, 0o700)
+                    else:
+                        if (st.st_mode & 0o022) != 0:
+                            log_err(
+                                f"ignoring group/world-writable cache dir "
+                                f"(mode={oct(stat.S_IMODE(st.st_mode))}): {self.cache_dir}"
+                            )
+                            return None
+                else:
+                    if st.st_uid not in (0, uid):
+                        log_err(f"untrusted cache ancestor owner uid={st.st_uid} at {part!r}")
+                        return None
+                    if (st.st_mode & 0o022) != 0 and not (st.st_mode & stat.S_ISVTX):
+                        log_err(f"untrusted group/world-writable cache ancestor at {part!r}")
+                        return None
+
+            result_fd = cur_fd
+            cur_fd = -1
+            return result_fd
+        except OSError as e:
+            log_err(f"cache dir traversal failed ({self.cache_dir}): {e}")
+            return None
+        finally:
+            if cur_fd >= 0:
+                try:
+                    os.close(cur_fd)
+                except OSError:
+                    pass
+
+    def load(self) -> Optional[dict[str, Any]]:
+        uid = os.getuid()
+        with self._lock:
+            dir_fd = self._open_dir_fd(create=False)
+            if dir_fd is None:
+                return None
+            fd = -1
+            try:
+                open_flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_NONBLOCK", 0)
+                )
+                try:
+                    fd = os.open(self.filename, open_flags, dir_fd=dir_fd)
+                except FileNotFoundError:
+                    return None
+                except OSError as e:
+                    log_err(f"ignoring unreadable/symlink/special cache file ({self.path}): {e}")
+                    return None
+
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    log_err(f"ignoring non-regular cache file (mode={oct(stat.S_IFMT(st.st_mode))}): {self.path}")
+                    return None
+                if st.st_uid != uid or (st.st_mode & 0o077) != 0:
+                    log_err(
+                        f"ignoring untrusted cache file (uid={st.st_uid}, mode={oct(stat.S_IMODE(st.st_mode))}): "
+                        f"{self.path}"
+                    )
+                    return None
+                if st.st_size > MAX_CACHE_BYTES:
+                    log_err(f"ignoring oversized cache file ({st.st_size} bytes): {self.path}")
+                    return None
+                with os.fdopen(fd, "rb") as f:
+                    fd = -1
+                    raw = f.read(MAX_CACHE_BYTES + 1)
+            except OSError as e:
+                log_err(f"cache read failed ({self.path}): {e}")
+                return None
+            finally:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
+
+            if len(raw) > MAX_CACHE_BYTES:
+                log_err(f"ignoring oversized cache file: {self.path}")
+                return None
+            try:
+                parsed = json_loads_strict(raw)
+            except (UnicodeDecodeError, ValueError, RecursionError) as e:
+                log_err(f"ignoring corrupt cache JSON ({self.path}): {type(e).__name__}")
+                return None
+            clean = self.sanitize_payload(parsed)
+            if clean is None:
+                log_err(f"ignoring invalid cache schema: {self.path}")
+                return None
+            return clean
+
+    def save(self, payload: dict[str, Any]) -> bool:
+        clean = self.sanitize_payload(payload)
+        if clean is None:
+            log_err("refusing to save invalid cache payload")
+            return False
+        assert set(clean.keys()).issubset(ALLOWED_CACHE_KEYS)
+        try:
+            data = (
+                json.dumps(
+                    clean, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
+                ).encode("utf-8")
+                + b"\n"
+            )
+        except (TypeError, ValueError) as e:
+            log_err(f"refusing to save unserializable cache payload: {e}")
+            return False
+        with self._lock:
+            dir_fd = self._open_dir_fd(create=True)
+            if dir_fd is None:
+                return False
+            tmp_name: Optional[str] = None
+            fd = -1
+            try:
+                create_flags = (
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                for _ in range(32):
+                    cand = f".{self.server_id}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+                    try:
+                        fd = os.open(cand, create_flags, 0o600, dir_fd=dir_fd)
+                        tmp_name = cand
+                        break
+                    except FileExistsError:
+                        continue
+                if tmp_name is None or fd < 0:
+                    raise OSError("could not allocate temp cache file")
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    fd = -1
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_name, self.filename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                tmp_name = None
+                return True
+            except OSError as e:
+                log_err(f"atomic cache write failed ({self.path}): {e}")
+                return False
+            finally:
+                if fd >= 0:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                if tmp_name is not None:
+                    try:
+                        os.unlink(tmp_name, dir_fd=dir_fd)
+                    except OSError:
+                        pass
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
+
+    def invalidate(self) -> None:
+        with self._lock:
+            dir_fd = self._open_dir_fd(create=False)
+            if dir_fd is None:
+                return
+            try:
+                os.unlink(self.filename, dir_fd=dir_fd)
+            except OSError:
+                pass
+            finally:
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
+
+
+class ChildProcess:
+    """One running instance of the wrapped MCP stdio server with independent exit watch and bounded I/O."""
+
+    def __init__(
+        self,
+        argv: list[str],
+        cwd: str,
+        env: dict[str, str],
+        on_message: Callable[["ChildProcess", bytes], None],
+        on_exit: Callable[["ChildProcess", int], None],
+        on_io_error: Callable[["ChildProcess", str], None],
+        *,
+        on_popen: Optional[Callable[["ChildProcess"], None]] = None,
+        on_init_failed: Optional[Callable[["ChildProcess"], None]] = None,
+        max_frame_bytes: int = MAX_FRAME_BYTES,
+        write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+    ) -> None:
+        self.proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,  # inherit stderr; never touch stdout
+            cwd=cwd,
+            env=env,
+            bufsize=0,  # unbuffered stdin/stdout so close() never blocks flushing
+            shell=False,
+            start_new_session=True,
+        )
+        self.pid = self.proc.pid
+        self.ready = False
+        self.allow_upstream = False
+        self.reaped = False
+        self.exited = False
+        self.framing = "ndjson"
+        self.max_frame_bytes = max_frame_bytes
+        self.write_timeout = write_timeout
+        self.internal: dict[str, tuple[threading.Event, list[Optional[dict[str, Any]]]]] = {}
+
+        self._wlock = threading.Lock()
+        self._exit_lock = threading.Lock()
+        self._exit_notified = False
+        self._stdin_closed = False
+        self._stdout_eof = threading.Event()
+        self._on_message = on_message
+        self._on_exit = on_exit
+        self._on_io_error = on_io_error
+
+        # Register the process handle immediately after Popen returns (before any later work can stall).
+        if on_popen is not None:
+            on_popen(self)
+
+        try:
+            assert self.proc.stdin is not None and self.proc.stdout is not None
+            os.set_blocking(self.proc.stdin.fileno(), False)
+            self._stdout_reader = io.BufferedReader(self.proc.stdout)
+
+            self._reader = threading.Thread(target=self._read_loop, name=f"child-read-{self.pid}", daemon=True)
+            self._waiter = threading.Thread(target=self._wait_loop, name=f"child-wait-{self.pid}", daemon=True)
+            self._reader.start()
+            self._waiter.start()
+        except BaseException:
+            self.reaped = True
+            try:
+                self.terminate(polite=False)
+            finally:
+                if on_init_failed is not None:
+                    on_init_failed(self)
+            raise
+
+    def write_unlocked(self, payload: bytes, timeout: Optional[float] = None) -> bool:
+        """Write one framed message to child stdin; caller MUST already hold self._wlock."""
+        limit = self.write_timeout if timeout is None else timeout
+        data = format_framed_message(payload, self.framing)
+        view = memoryview(data)
+        sent = 0
+        deadline = time.monotonic() + limit
+        if self._stdin_closed or self.proc.stdin is None:
+            return False
+        try:
+            fd = self.proc.stdin.fileno()
+        except (OSError, ValueError):
+            return False
+        while sent < len(view):
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                log_err(f"child (pid={self.pid}) stdin write timed out after {limit:g}s")
+                return False
+            try:
+                _, writable, _ = select.select([], [fd], [], min(rem, 0.25))
+            except (OSError, ValueError):
+                return False
+            if not writable:
+                if self.exited or self.reaped:
+                    return False
+                continue
+            try:
+                n = os.write(fd, view[sent:])
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    continue
+                return False
+            if n <= 0:
+                return False
+            sent += n
+        return True
+
+    def write(self, payload: bytes, timeout: Optional[float] = None) -> bool:
+        """Write one framed message to child stdin with a strict wall-clock timeout."""
+        with self._wlock:
+            return self.write_unlocked(payload, timeout=timeout)
+
+    def _wake_internal(self) -> None:
+        for ev, _box in list(self.internal.values()):
+            ev.set()
+
+    def _notify_exit_once(self, code: int) -> None:
+        with self._exit_lock:
+            if self._exit_notified:
+                return
+            self._exit_notified = True
+            self.exited = True
+        self._wake_internal()
+        self._on_exit(self, code)
+
+    def _read_loop(self) -> None:
+        try:
+            while True:
+                raw, framing = read_framed_message(
+                    self._stdout_reader, max_frame_bytes=self.max_frame_bytes
+                )
+                if raw is None:
+                    break
+                if framing == "content-length":
+                    self.framing = "content-length"
+                self._on_message(self, raw)
+        except FramingError as e:
+            self._stdout_eof.set()
+            if not self.reaped:
+                log_err(f"child (pid={self.pid}) framing error: {e}")
+                self._on_io_error(self, f"framing error: {e}")
+            return
+        except (OSError, ValueError, RecursionError) as e:
+            self._stdout_eof.set()
+            if not self.reaped:
+                log_err(f"child (pid={self.pid}) stdout read error: {type(e).__name__}")
+                self._on_io_error(self, f"stdout read error: {type(e).__name__}")
+            return
+        except Exception as e:  # noqa: BLE001 — never let reader die silently leaving pending calls stranded
+            self._stdout_eof.set()
+            if not self.reaped:
+                log_err(f"child (pid={self.pid}) unexpected stdout error: {type(e).__name__}")
+                self._on_io_error(self, f"unexpected stdout error: {type(e).__name__}")
+            return
+        finally:
+            self._stdout_eof.set()
+        # If child closed stdout without exiting, give _wait_loop a brief window, then retire.
+        if not self.reaped and self.proc.poll() is None:
+            time.sleep(0.2)
+            if not self.reaped and self.proc.poll() is None:
+                self._on_io_error(self, "child closed stdout prematurely")
+
+    def _wait_loop(self) -> None:
+        code = self.proc.wait()
+        # Allow _read_loop a brief drain window if the child wrote a final response right before exiting.
+        # If a descendant still holds stdout open, this times out quickly and kills the process group.
+        if not self._stdout_eof.wait(timeout=0.2):
+            self.force_kill_pg()
+        self._notify_exit_once(code)
+
+    def _close_stdin_safe(self) -> None:
+        with self._wlock:
+            if self._stdin_closed:
+                return
+            self._stdin_closed = True
+            if self.proc.stdin is not None:
+                try:
+                    self.proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
+
+    def force_kill_pg(self) -> None:
+        try:
+            os.killpg(self.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        if self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+    def terminate(self, grace: float = 1.0, *, polite: bool = True) -> None:
+        if polite:
+            self._close_stdin_safe()
+            try:
+                self.proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    self.proc.terminate()
+                except OSError:
+                    pass
+            if not polite:
+                self._close_stdin_safe()
+            try:
+                self.proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            self._close_stdin_safe()
+        # Always clean up any remaining descendants in the child's process group.
+        self.force_kill_pg()
+        if self.proc.poll() is None:
+            try:
+                self.proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+        if self.proc.stdout is not None:
+            try:
+                self.proc.stdout.close()
+            except (OSError, ValueError):
+                pass
+        self._wake_internal()
+
+
+class LazyProxy:
+    """Lazy stdio MCP proxy with hardened discovery cache, non-blocking client reader, and idle reaping."""
+
+    def __init__(
+        self,
+        server_id: str,
+        child_argv: list[str],
+        idle_seconds: float,
+        cache_dir: Path,
+        start_timeout: float = DEFAULT_START_TIMEOUT,
+        *,
+        max_frame_bytes: int = MAX_FRAME_BYTES,
+        write_timeout: float = DEFAULT_WRITE_TIMEOUT,
+        init_ready_timeout: Optional[float] = None,
+        shutdown_timeout: float = 5.0,
+    ) -> None:
+        self.server_id = server_id
+        self.child_argv = list(child_argv)
+        self.idle_seconds = idle_seconds
+        self.start_timeout = start_timeout
+        self.max_frame_bytes = max_frame_bytes
+        self.write_timeout = write_timeout
+        self.init_ready_timeout = (
+            min(start_timeout, 30.0) if init_ready_timeout is None else init_ready_timeout
+        )
+        self.shutdown_timeout = shutdown_timeout
+        self.cache = CacheStore(cache_dir, server_id)
+
+        self.lock = threading.RLock()
+        self.cond = threading.Condition(self.lock)
+        self.out_lock = threading.Lock()
+        self.spawn_lock = threading.Lock()
+
+        self.child: Optional[ChildProcess] = None
+        self.spawning_count = 0
+        self.spawning_children: set[ChildProcess] = set()
+        self.tearing_down: set[ChildProcess] = set()
+        self.client_framing = "ndjson"
+        self.client_init_params: Optional[dict[str, Any]] = None
+        self.served_init: Optional[dict[str, Any]] = None
+        self.client_initialized = False
+        self.client_post_init_seen = False
+        self.log_level_params: Optional[dict[str, Any]] = None
+        self.cache_data: Optional[dict[str, Any]] = None
+        self.served_digests: dict[str, bytes] = {}
+
+        # Request ownership & cancellation tracking (protected by self.lock):
+        # queued_requests: request id_keys enqueued on _request_queue but not yet written to child stdin.
+        # cancelled_requests: subset of queued_requests cancelled before dispatch (must never reach child).
+        self.queued_requests: set[str] = set()
+        self.cancelled_requests: set[str] = set()
+        # pending_client: id_key -> (method, raw_id, record_cache, sub_op, sub_uri)
+        self.pending_client: dict[str, tuple[str, Any, bool, Optional[str], Optional[str]]] = {}
+        # pending_server: id_key -> owning ChildProcess (routes client replies even before child.ready)
+        self.pending_server: dict[str, ChildProcess] = {}
+        self.subscriptions: set[str] = set()
+        self.writing_count = 0
+
+        self.last_activity = time.monotonic()
+        self.stopping = False
+        self._request_queue: queue.Queue[Any] = queue.Queue()
+        self._internal_prefix = f"__mcp_lazy_{os.getpid()}_{secrets.token_hex(6)}_"
+        self._internal_seq = 0
+
+    def _after_child_popen(self, child: ChildProcess) -> None:
+        """Hook point between ChildProcess creation and publication under self.cond (used by tests)."""
+
+    def _before_pending_write(self, child: ChildProcess, req_key: str) -> None:
+        """Hook point inside child._wlock right before pending_client insert and wire write (used by tests)."""
+
+    # --- Client I/O (stdout carries ONLY valid strict JSON-RPC 2.0 envelopes) ---
+
+    def _send_client_payload(self, payload: bytes) -> bool:
+        with self.out_lock:
+            try:
+                sys.stdout.buffer.write(format_framed_message(payload, self.client_framing))
+                sys.stdout.buffer.flush()
+                return True
+            except (OSError, ValueError):
+                return False
+
+    def send_client(self, msg: dict[str, Any]) -> bool:
+        if not is_valid_jsonrpc_message(msg):
+            log_err("refusing to emit invalid JSON-RPC envelope to client stdout")
+            return False
+        try:
+            payload = json_dumps_bytes(msg)
+        except (TypeError, ValueError) as e:
+            log_err(f"JSON serialization failed for client message: {e}")
+            return False
+        return self._send_client_payload(payload)
+
+    def send_result(self, mid: Any, result: Any) -> bool:
+        return self.send_client({"jsonrpc": "2.0", "id": mid, "result": result})
+
+    def send_error(self, mid: Any, code: int, message: str) -> bool:
+        return self.send_client({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
+
+    # --- Main client reader loop (NEVER blocks on child startup or discovery) ---
+
+    def run(self) -> int:
+        reaper = threading.Thread(target=self._reaper_loop, name="mcp-lazy-reaper", daemon=True)
+        worker = threading.Thread(target=self._worker_loop, name="mcp-lazy-worker", daemon=True)
+        reaper.start()
+        worker.start()
+
+        def _handle_signal(signum: int, _frame: Any) -> None:
+            self.stopping = True
+            raise SystemExit(0)
+
+        prev_term = signal.signal(signal.SIGTERM, _handle_signal)
+        prev_int = signal.signal(signal.SIGINT, _handle_signal)
+        try:
+            while not self.stopping:
+                try:
+                    raw, framing = read_framed_message(
+                        sys.stdin.buffer, max_frame_bytes=self.max_frame_bytes
+                    )
+                except FramingError as e:
+                    log_err(f"client framing error: {e}")
+                    self.send_error(None, -32700, "Parse error: invalid or oversized frame")
+                    break
+                if raw is None:
+                    break
+                if framing is not None:
+                    self.client_framing = framing
+                try:
+                    msg = json_loads_strict(raw)
+                except (UnicodeDecodeError, ValueError, RecursionError) as e:
+                    log_err(f"malformed JSON from client: {type(e).__name__}")
+                    self.send_error(None, -32700, "Parse error")
+                    continue
+                if not isinstance(msg, dict):
+                    self.send_error(None, -32600, "Invalid Request")
+                    continue
+                self._dispatch_inbound(msg)
+        except SystemExit:
+            pass
+        finally:
+            signal.signal(signal.SIGTERM, prev_term)
+            signal.signal(signal.SIGINT, prev_int)
+            self.shutdown()
+            worker.join(timeout=2.0)
+        return 0
+
+    def _dispatch_inbound(self, msg: dict[str, Any]) -> None:
+        """Handle control/reply/cancellation traffic immediately on the reader thread; enqueue requests."""
+        method = msg.get("method")
+        has_id = "id" in msg
+        mid = msg.get("id")
+        params = msg.get("params")
+        params_dict = params if isinstance(params, dict) else {}
+
+        # 1. Client response to a server-initiated request: route directly to owning child
+        #    (works even during cold warm-up or on-demand discovery before child.ready is True).
+        if method is None:
+            if has_id:
+                with self.lock:
+                    owner = self.pending_server.pop(id_key(mid), None)
+                    if owner is None:
+                        owner = self.child if (self.child is not None and self.child.ready) else None
+                    self.last_activity = time.monotonic()
+                    self.cond.notify_all()
+                if owner is not None:
+                    self._write_child_or_retire(owner, msg)
+            return
+
+        # 2. Client notification (no "id")
+        if not has_id:
+            if method == "notifications/initialized":
+                with self.cond:
+                    self.client_initialized = True
+                    self.cond.notify_all()
+                return
+            if method == "notifications/cancelled":
+                req_id = params_dict.get("requestId")
+                forward_target: Optional[ChildProcess] = None
+                if req_id is not None:
+                    ck = id_key(req_id)
+                    with self.cond:
+                        if ck in self.queued_requests:
+                            # Cancelled before dispatch: mark so worker drops it before writing to child.
+                            self.cancelled_requests.add(ck)
+                            self.cond.notify_all()
+                            return
+                        was_pending = self.pending_client.pop(ck, None) is not None
+                        if was_pending and self.child is not None and self.child.ready:
+                            forward_target = self.child
+                        self.last_activity = time.monotonic()
+                        self.cond.notify_all()
+                else:
+                    with self.lock:
+                        if self.child is not None and self.child.ready:
+                            forward_target = self.child
+                # Forward cancellation for already in-flight requests directly on the control path.
+                if forward_target is not None:
+                    self._write_child_or_retire(forward_target, msg)
+                return
+            with self.cond:
+                self.client_post_init_seen = True
+                self.cond.notify_all()
+            self._request_queue.put(msg)
+            return
+
+        # 3. Fast local requests answered immediately without blocking on startup/discovery
+        if method == "ping":
+            self.send_result(mid, {})
+            return
+        if method == "server/discover":
+            self.send_error(mid, -32601, "Method not found")
+            return
+
+        # 4. Track request ownership from enqueue so cancellations arriving before dispatch are caught
+        req_key = id_key(mid)
+        with self.cond:
+            if method == "initialize":
+                self.client_initialized = False
+                self.client_post_init_seen = False
+            else:
+                self.client_post_init_seen = True
+            self.queued_requests.add(req_key)
+            self.cancelled_requests.discard(req_key)
+            self.cond.notify_all()
+        self._request_queue.put(msg)
+
+    def _worker_loop(self) -> None:
+        while True:
+            item = self._request_queue.get()
+            if item is _STOP_SENTINEL or self.stopping:
+                return
+            try:
+                self._process_client_message(item)
+            except Exception as e:  # noqa: BLE001 — keep worker alive and guarantee terminal error
+                log_err(f"worker error: {type(e).__name__}: {e}")
+                if isinstance(item, dict) and "id" in item and item.get("method") is not None:
+                    req_key = id_key(item["id"])
+                    with self.lock:
+                        self.queued_requests.discard(req_key)
+                        self.cancelled_requests.discard(req_key)
+                    self.send_error(item["id"], -32603, "mcp-lazy: internal proxy error")
+
+    def _process_client_message(self, msg: dict[str, Any]) -> None:
+        method = msg.get("method")
+        has_id = "id" in msg
+        mid = msg.get("id")
+        params = msg.get("params")
+        params_dict = params if isinstance(params, dict) else {}
+
+        if not has_id:
+            with self.lock:
+                ready = self.client_initialized
+            if not ready:
+                return
+            self._forward_if_running(msg)
+            return
+
+        req_key = id_key(mid)
+        with self.lock:
+            if req_key in self.cancelled_requests:
+                self.cancelled_requests.discard(req_key)
+                self.queued_requests.discard(req_key)
+                return
+
+        if method == "initialize":
+            try:
+                self._handle_initialize(mid, params_dict)
+            finally:
+                with self.lock:
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
+            return
+
+        # Shared readiness gate: all non-ping, non-initialize requests require the client's real
+        # `notifications/initialized` first (both cold and warm cache paths). Never synthesize it.
+        with self.lock:
+            client_ready = self.client_initialized
+            if not client_ready:
+                self.queued_requests.discard(req_key)
+                self.cancelled_requests.discard(req_key)
+        if not client_ready:
+            self.send_error(
+                mid,
+                -32600,
+                f"Invalid Request: client not initialized (notifications/initialized required before {method})",
+            )
+            return
+
+        if method == "logging/setLevel":
+            self.log_level_params = params_dict
+            with self.lock:
+                running = self.child is not None and self.child.ready
+                if not running:
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
+            if not running:
+                self.send_result(mid, {})
+                return
+
+        # Cached discovery lists (only when child is asleep and no pagination cursor)
+        if method in CACHEABLE_METHODS and not params_dict.get("cursor"):
+            cache_field = CACHEABLE_METHODS[method][0]
+            with self.lock:
+                running = self.child is not None and self.child.ready
+                cached = self.cache_data.get(cache_field) if self.cache_data else None
+                if not running and isinstance(cached, dict):
+                    self.served_digests[method] = canonical_digest(cached)
+                    self.queued_requests.discard(req_key)
+                    self.cancelled_requests.discard(req_key)
+                    result_copy = cached
+                else:
+                    result_copy = None
+            if result_copy is not None:
+                self.send_result(mid, result_copy)
+                return
+
+        # Non-cached request: spawn child on demand and forward
+        self._forward_request(msg, str(method), mid, params_dict)
+
+    # --- Initialize & Cold Warm-up ---
+
+    @staticmethod
+    def _cache_compatible(loaded: Optional[dict[str, Any]], offered_proto: str) -> bool:
+        if loaded is None:
+            return False
+        init = loaded.get("initialize")
+        if not _is_valid_init_result(init):
+            return False
+        assert isinstance(init, dict)
+        cached_proto = init.get("protocolVersion")
+        recorded_offer = loaded.get("clientProtocolVersion")
+        return offered_proto == cached_proto or (
+            isinstance(recorded_offer, str) and offered_proto == recorded_offer
+        )
+
+    def _handle_initialize(self, mid: Any, params: dict[str, Any]) -> None:
+        self.client_init_params = params
+        offered_proto = params.get("protocolVersion")
+        if not isinstance(offered_proto, str) or not offered_proto:
+            offered_proto = DEFAULT_PROTOCOL_VERSION
+
+        loaded = self.cache.load()
+        if self._cache_compatible(loaded, offered_proto):
+            assert loaded is not None
+            with self.lock:
+                self.cache_data = loaded
+                self.served_init = loaded["initialize"]
+            self.send_result(mid, loaded["initialize"])
+            return
+
+        if loaded is not None:
+            log_err(
+                f"cache protocol mismatch for {self.server_id} "
+                f"(offered={offered_proto!r}, cached={loaded['initialize'].get('protocolVersion')!r}); warming fresh"
+            )
+        else:
+            log_err(f"cold cache for {self.server_id}; warming from child")
+
+        self._warm_cache(mid, params, offered_proto)
+
+    def _warm_cache(self, mid: Any, init_params: dict[str, Any], offered_proto: str) -> None:
+        with self.spawn_lock:
+            child = self._spawn_child_raw()
+            if child is None:
+                self.send_error(mid, -32603, f"mcp-lazy: failed to spawn child for {self.server_id}")
+                return
+            try:
+                # Phase 1: initialize handshake (child.allow_upstream is False; pre-init traffic gated).
+                init_resp = self._internal_request(child, "initialize", init_params, self.start_timeout)
+                if not init_resp or not _is_valid_init_result(init_resp.get("result")):
+                    log_err(f"warm-up initialize failed ({_summarize_rpc_failure(init_resp)})")
+                    self.send_error(mid, -32603, f"mcp-lazy: failed to initialize child for {self.server_id}")
+                    return
+
+                init_result = init_resp["result"]
+                try:
+                    # Verify init_result is strictly serializable BEFORE committing to client.
+                    json_dumps_bytes({"jsonrpc": "2.0", "id": mid, "result": init_result})
+                except (TypeError, ValueError):
+                    log_err("warm-up initialize result is not strictly JSON-serializable")
+                    self.send_error(mid, -32603, f"mcp-lazy: invalid initialize response for {self.server_id}")
+                    return
+
+                with self.lock:
+                    self.served_init = init_result
+
+                # Reply to client's initialize first.
+                self.send_result(mid, init_result)
+
+                # Wait strictly for the client's real `notifications/initialized` before opening the
+                # upstream gate or sending `notifications/initialized` to the child. Never synthesize
+                # `notifications/initialized` on timeout or without real client readiness.
+                with self.cond:
+                    wait_deadline = time.monotonic() + self.init_ready_timeout
+                    while not (self.client_initialized or self.client_post_init_seen or self.stopping or child.exited):
+                        rem = wait_deadline - time.monotonic()
+                        if rem <= 0:
+                            break
+                        self.cond.wait(timeout=rem)
+                    if self.stopping or child.exited:
+                        return
+                    if not self.client_initialized:
+                        reason = (
+                            "client sent post-init message without notifications/initialized"
+                            if self.client_post_init_seen
+                            else f"timed out after {self.init_ready_timeout:g}s waiting for client notifications/initialized"
+                        )
+                        log_err(
+                            f"cold warm-up for {self.server_id}: {reason}; "
+                            "keeping upstream gate closed and retiring warm-up child"
+                        )
+                        return
+
+                # Transition upstream gate BEFORE writing `notifications/initialized` so an immediate
+                # server-to-client request triggered by that notification is never rejected as pre-init.
+                child.allow_upstream = True
+                if not child.write(json_dumps_bytes({"jsonrpc": "2.0", "method": "notifications/initialized"})):
+                    log_err(f"warm-up notifications/initialized write failed for {self.server_id}")
+                    return
+
+                # Phase 2: discovery queries while main reader thread stays free to route client replies.
+                caps = init_result.get("capabilities")
+                caps_dict = caps if isinstance(caps, dict) else {}
+                payload: dict[str, Any] = {
+                    "version": CACHE_VERSION,
+                    "clientProtocolVersion": offered_proto,
+                    "initialize": init_result,
+                }
+                for method, (field, cap_key, _notif) in CACHEABLE_METHODS.items():
+                    if cap_key not in caps_dict and not (method == "tools/list" and not caps_dict):
+                        continue
+                    resp = self._internal_request(child, method, {}, min(self.start_timeout, 30.0))
+                    if resp and isinstance(resp.get("result"), dict) and not resp["result"].get("nextCursor"):
+                        try:
+                            canonical_digest(resp["result"])
+                        except (TypeError, ValueError):
+                            log_err(f"warm-up {method} result not strictly serializable; skipping cache")
+                            continue
+                        payload[field] = resp["result"]
+
+                sanitized = self.cache.sanitize_payload(payload)
+                if sanitized is not None:
+                    with self.lock:
+                        self.cache_data = sanitized
+                    self.cache.save(sanitized)
+            finally:
+                self._retire_child(child, polite=True)
+
+    # --- Child lifecycle & discovery refresh ---
+
+    def _register_spawning_child(self, child: ChildProcess) -> None:
+        with self.cond:
+            self.spawning_children.add(child)
+            self.cond.notify_all()
+
+    def _unregister_spawning_child(self, child: ChildProcess) -> None:
+        with self.cond:
+            self.spawning_children.discard(child)
+            self.cond.notify_all()
+
+    def _spawn_child_raw(self) -> Optional[ChildProcess]:
+        with self.cond:
+            if self.stopping:
+                return None
+            self.spawning_count += 1
+
+        registered: list[ChildProcess] = []
+
+        def _on_popen(c: ChildProcess) -> None:
+            registered.append(c)
+            self._register_spawning_child(c)
+
+        child: Optional[ChildProcess] = None
+        try:
+            child_cwd = resolve_child_cwd()
+            child_env = build_child_env()
+            child = ChildProcess(
+                self.child_argv,
+                cwd=child_cwd,
+                env=child_env,
+                on_message=self._on_child_message,
+                on_exit=self._on_child_exit,
+                on_io_error=self._on_child_io_error,
+                on_popen=_on_popen,
+                on_init_failed=self._unregister_spawning_child,
+                max_frame_bytes=self.max_frame_bytes,
+                write_timeout=self.write_timeout,
+            )
+            self._after_child_popen(child)
+        except (OSError, RuntimeError) as e:
+            log_err(f"failed to spawn child {self.child_argv[0]!r}: {type(e).__name__}: {e}")
+            leaked = child or (registered[0] if registered else None)
+            if leaked is not None:
+                leaked.reaped = True
+                leaked.terminate(polite=False)
+            with self.cond:
+                if leaked is not None:
+                    self.spawning_children.discard(leaked)
+                self.spawning_count -= 1
+                self.cond.notify_all()
+            return None
+        except BaseException:
+            leaked = child or (registered[0] if registered else None)
+            if leaked is not None:
+                leaked.reaped = True
+                leaked.terminate(polite=False)
+            with self.cond:
+                if leaked is not None:
+                    self.spawning_children.discard(leaked)
+                self.spawning_count -= 1
+                self.cond.notify_all()
+            raise
+
+        # Atomically recheck self.stopping at publication under the lifecycle lock.
+        stop_won = False
+        with self.cond:
+            self.spawning_count -= 1
+            self.spawning_children.discard(child)
+            if self.stopping:
+                stop_won = True
+                child.reaped = True
+                self.tearing_down.add(child)
+            else:
+                self.child = child
+            self.cond.notify_all()
+
+        if stop_won:
+            try:
+                child.terminate(polite=False)
+            finally:
+                with self.cond:
+                    self.tearing_down.discard(child)
+                    self.cond.notify_all()
+            return None
+        return child
+
+    def _retire_child(self, child: ChildProcess, *, polite: bool = False) -> None:
+        """Detach and terminate a child while retaining ownership in self.tearing_down until teardown completes."""
+        with self.cond:
+            child.reaped = True
+            if self.child is child:
+                self.child = None
+            for k in [k for k, owner in self.pending_server.items() if owner is child]:
+                self.pending_server.pop(k, None)
+            self.tearing_down.add(child)
+            self.cond.notify_all()
+        try:
+            child.terminate(polite=polite)
+        finally:
+            with self.cond:
+                self.tearing_down.discard(child)
+                self.cond.notify_all()
+
+    def _internal_request(
+        self,
+        child: ChildProcess,
+        method: str,
+        params: dict[str, Any],
+        timeout: float,
+    ) -> Optional[dict[str, Any]]:
+        with self.lock:
+            self._internal_seq += 1
+            mid = f"{self._internal_prefix}{self._internal_seq}"
+        ev = threading.Event()
+        box: list[Optional[dict[str, Any]]] = [None]
+        child.internal[mid] = (ev, box)
+        req = {"jsonrpc": "2.0", "id": mid, "method": method, "params": params}
+        try:
+            if not child.write(json_dumps_bytes(req)):
+                return None
+            if not ev.wait(timeout):
+                log_err(f"internal request {method} timed out after {timeout:g}s")
+                return None
+            return box[0]
+        finally:
+            child.internal.pop(mid, None)
+
+    def _ensure_child(self) -> Optional[ChildProcess]:
+        with self.lock:
+            if not self.client_initialized:
+                raise ClientNotInitializedError(
+                    "Invalid Request: client not initialized (notifications/initialized required)"
+                )
+            if self.child is not None and self.child.ready:
+                return self.child
+
+        with self.spawn_lock:
+            with self.lock:
+                if not self.client_initialized:
+                    raise ClientNotInitializedError(
+                        "Invalid Request: client not initialized (notifications/initialized required)"
+                    )
+                if self.child is not None and self.child.ready:
+                    return self.child
+
+            child = self._spawn_child_raw()
+            if child is None:
+                return None
+
+            init_params = self.client_init_params or {
+                "protocolVersion": DEFAULT_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-lazy", "version": "1"},
+            }
+            init_resp = self._internal_request(child, "initialize", init_params, self.start_timeout)
+            if not init_resp or not _is_valid_init_result(init_resp.get("result")):
+                log_err(f"on-demand initialize failed ({_summarize_rpc_failure(init_resp)})")
+                self._retire_child(child, polite=False)
+                return None
+
+            init_result = init_resp["result"]
+
+            # Fail closed if the live child negotiated an incompatible protocolVersion vs cached init.
+            with self.lock:
+                prior_init = self.served_init
+            if prior_init is not None:
+                prior_proto = prior_init.get("protocolVersion")
+                live_proto = init_result.get("protocolVersion")
+                if prior_proto != live_proto:
+                    log_err(
+                        f"incompatible live protocolVersion for {self.server_id} "
+                        f"(cached={prior_proto!r}, live={live_proto!r}); failing closed"
+                    )
+                    self.cache.invalidate()
+                    with self.lock:
+                        self.cache_data = None
+                    self._retire_child(child, polite=False)
+                    raise ProtocolMismatchError(
+                        f"mcp-lazy: server protocol version changed ({prior_proto} -> {live_proto}); reconnect required"
+                    )
+
+            # Open upstream gate BEFORE writing `notifications/initialized` so an immediate
+            # server-to-client request triggered by that notification is accepted.
+            child.allow_upstream = True
+            if not child.write(json_dumps_bytes({"jsonrpc": "2.0", "method": "notifications/initialized"})):
+                self._retire_child(child, polite=False)
+                return None
+
+            if self.log_level_params is not None:
+                self._internal_request(child, "logging/setLevel", self.log_level_params, 15.0)
+
+            # Refresh discovery before forwarding the triggering request.
+            if not self._refresh_discovery(child, init_result):
+                log_err(f"discovery refresh failed for {self.server_id}; retiring child")
+                self._retire_child(child, polite=False)
+                return None
+
+            if child.exited or child.proc.poll() is not None:
+                self._retire_child(child, polite=False)
+                return None
+
+            with self.lock:
+                if self.child is not child or self.stopping:
+                    self._retire_child(child, polite=False)
+                    return None
+                child.ready = True
+                self.last_activity = time.monotonic()
+                self.cond.notify_all()
+            return child
+
+    def _refresh_discovery(self, child: ChildProcess, init_result: dict[str, Any]) -> bool:
+        caps = init_result.get("capabilities")
+        caps_dict = caps if isinstance(caps, dict) else {}
+        offered_proto = (self.client_init_params or {}).get("protocolVersion")
+        with self.lock:
+            old_cache = dict(self.cache_data) if self.cache_data else {}
+            old_served = dict(self.served_digests)
+            updated: dict[str, Any] = dict(old_cache) if old_cache else {"version": CACHE_VERSION}
+
+        updated["version"] = CACHE_VERSION
+        updated["initialize"] = init_result
+        if isinstance(offered_proto, str) and offered_proto:
+            updated["clientProtocolVersion"] = offered_proto
+        changed_notifications: list[str] = []
+        cache_dirty = old_cache.get("initialize") != init_result
+
+        for method, (field, cap_key, notif_method) in CACHEABLE_METHODS.items():
+            had_prior = (method in old_served) or isinstance(old_cache.get(field), dict)
+            supported = (cap_key in caps_dict) or (method == "tools/list" and not caps_dict)
+
+            if not supported:
+                if field in updated:
+                    del updated[field]
+                    cache_dirty = True
+                with self.lock:
+                    self.served_digests.pop(method, None)
+                if had_prior and notif_method not in changed_notifications:
+                    changed_notifications.append(notif_method)
+                continue
+
+            resp = self._internal_request(child, method, {}, min(self.start_timeout, 30.0))
+            if resp is None:
+                return False
+
+            if "error" in resp and resp["error"].get("code") == -32603 and "non-finite" in str(resp["error"].get("message", "")):
+                # Malformed/non-finite JSON in discovery response: fail startup cleanly so child retires.
+                return False
+
+            result = resp.get("result")
+            if not isinstance(result, dict) or result.get("nextCursor"):
+                if field in updated:
+                    del updated[field]
+                    cache_dirty = True
+                with self.lock:
+                    self.served_digests.pop(method, None)
+                if had_prior and notif_method not in changed_notifications:
+                    changed_notifications.append(notif_method)
+                continue
+
+            try:
+                fresh_digest = canonical_digest(result)
+            except (TypeError, ValueError):
+                log_err(f"discovery {method} returned non-serializable data")
+                return False
+
+            old_digest = old_served.get(method)
+            if old_digest is None and isinstance(old_cache.get(field), dict):
+                try:
+                    old_digest = canonical_digest(old_cache[field])
+                except (TypeError, ValueError):
+                    old_digest = None
+            if old_digest is not None and old_digest != fresh_digest:
+                if notif_method not in changed_notifications:
+                    changed_notifications.append(notif_method)
+            if updated.get(field) != result:
+                updated[field] = result
+                cache_dirty = True
+            with self.lock:
+                self.served_digests[method] = fresh_digest
+
+        sanitized = self.cache.sanitize_payload(updated)
+        if sanitized is not None:
+            with self.lock:
+                self.cache_data = sanitized
+            if cache_dirty:
+                self.cache.save(sanitized)
+
+        for notif_method in changed_notifications:
+            log_err(f"discovery invalidated/changed for {self.server_id}; emitting {notif_method}")
+            self.send_client({"jsonrpc": "2.0", "method": notif_method})
+        return True
+
+    # --- Forwarding & bounded write helpers ---
+
+    def _write_child_or_retire(self, child: ChildProcess, msg: dict[str, Any]) -> bool:
+        try:
+            payload = json_dumps_bytes(msg)
+        except (TypeError, ValueError) as e:
+            log_err(f"failed serializing message to child: {e}")
+            return False
+        with self.lock:
+            self.writing_count += 1
+            self.last_activity = time.monotonic()
+        try:
+            ok = child.write(payload)
+        finally:
+            with self.lock:
+                self.writing_count -= 1
+                self.cond.notify_all()
+        if not ok and not child.reaped:
+            self._fail_and_retire_child(child, "stdin write failed or timed out")
+        return ok
+
+    def _forward_if_running(self, msg: dict[str, Any]) -> None:
+        with self.lock:
+            child = self.child
+            if child is None or not child.ready:
+                return
+        self._write_child_or_retire(child, msg)
+
+    def _forward_request(self, msg: dict[str, Any], method: str, mid: Any, params: dict[str, Any]) -> None:
+        key = id_key(mid)
+        record_cache = method in CACHEABLE_METHODS and not params.get("cursor")
+        sub_op: Optional[str] = None
+        sub_uri: Optional[str] = None
+        if method == "resources/subscribe":
+            uri = params.get("uri")
+            sub_op = "sub"
+            sub_uri = str(uri) if uri is not None else "__unknown_subscription__"
+        elif method == "resources/unsubscribe":
+            uri = params.get("uri")
+            if uri is not None:
+                sub_op = "unsub"
+                sub_uri = str(uri)
+
+        try:
+            payload = json_dumps_bytes(msg)
+        except (TypeError, ValueError) as e:
+            log_err(f"failed serializing client request: {e}")
+            with self.lock:
+                self.queued_requests.discard(key)
+                self.cancelled_requests.discard(key)
+            self.send_error(mid, -32603, "mcp-lazy: request serialization failed")
+            return
+
+        for attempt in range(2):
+            with self.lock:
+                if key in self.cancelled_requests:
+                    self.cancelled_requests.discard(key)
+                    self.queued_requests.discard(key)
+                    return
+
+            try:
+                child = self._ensure_child()
+            except ClientNotInitializedError as e:
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32600, str(e))
+                return
+            except ProtocolMismatchError as e:
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32603, str(e))
+                return
+            if child is None:
+                with self.lock:
+                    was_cancelled = key in self.cancelled_requests
+                    self.queued_requests.discard(key)
+                    self.cancelled_requests.discard(key)
+                if not was_cancelled:
+                    self.send_error(mid, -32603, f"mcp-lazy: failed to start child for {self.server_id}")
+                return
+
+            # Hold child._wlock across cancelled check + pending_client insert + wire write
+            # (strict lock order: child._wlock -> self.lock) so a control-thread cancellation
+            # either suppresses the unwritten request OR blocks on child._wlock and follows it on the wire.
+            retry = False
+            unavailable = False
+            with child._wlock:
+                self._before_pending_write(child, key)
+                with self.lock:
+                    if key in self.cancelled_requests:
+                        self.cancelled_requests.discard(key)
+                        self.queued_requests.discard(key)
+                        self.cond.notify_all()
+                        return
+                    if self.child is not child or not child.ready:
+                        if attempt == 0:
+                            retry = True
+                        else:
+                            self.queued_requests.discard(key)
+                            unavailable = True
+                    else:
+                        self.queued_requests.discard(key)
+                        self.pending_client[key] = (method, mid, record_cache, sub_op, sub_uri)
+                        if sub_op == "sub" and sub_uri is not None:
+                            self.subscriptions.add(sub_uri)
+                        self.writing_count += 1
+                        self.last_activity = time.monotonic()
+                if unavailable:
+                    self.send_error(mid, -32603, f"mcp-lazy: child unavailable for {self.server_id}")
+                    return
+                if retry:
+                    continue
+                try:
+                    ok = child.write_unlocked(payload)
+                finally:
+                    with self.lock:
+                        self.writing_count -= 1
+                        self.cond.notify_all()
+
+            if ok:
+                return
+
+            # Bounded write failed/timed out: retire child and resolve every pending call once.
+            self._fail_and_retire_child(child, "child stdin write failed or timed out")
+            return
+
+    def _fail_and_retire_child(self, child: ChildProcess, reason: str) -> None:
+        with self.cond:
+            is_active = self.child is child
+            if is_active:
+                self.child = None
+            failed = list(self.pending_client.values()) if is_active else []
+            if is_active:
+                self.pending_client.clear()
+                self.subscriptions.clear()
+            for k in [k for k, owner in self.pending_server.items() if owner is child]:
+                self.pending_server.pop(k, None)
+            child.reaped = True
+            self.tearing_down.add(child)
+            self.cond.notify_all()
+
+        log_err(f"retiring child {self.server_id} (pid={child.pid}): {reason}")
+        for _req_method, raw_id, _rec, _sub_op, _sub_uri in failed:
+            self.send_error(
+                raw_id,
+                -32603,
+                f"mcp-lazy: {reason}; next request will respawn",
+            )
+        try:
+            child.terminate(polite=False)
+        finally:
+            with self.cond:
+                self.tearing_down.discard(child)
+                self.cond.notify_all()
+
+    # --- Child callbacks ---
+
+    def _handle_nonfinite_child_line(self, child: ChildProcess, raw: bytes) -> bool:
+        """Detect if a strict-JSON decode failure was actually a JSON-RPC response containing NaN/Infinity.
+
+        Returns True if handled as a protocol error (internal waiter notified or child retired),
+        False if the line was plain non-JSON noise that should simply be dropped.
+        """
+        try:
+            lenient = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return False
+        if not isinstance(lenient, dict) or lenient.get("jsonrpc") != "2.0" or "id" not in lenient:
+            return False
+        mid = lenient.get("id")
+        if lenient.get("method") is None and isinstance(mid, str) and mid in child.internal:
+            ev, box = child.internal[mid]
+            box[0] = {
+                "jsonrpc": "2.0",
+                "id": mid,
+                "error": {"code": -32603, "message": "non-finite JSON constant in server response"},
+            }
+            ev.set()
+            return True
+        self._fail_and_retire_child(child, "child returned invalid non-finite JSON response")
+        return True
+
+    def _on_child_message(self, child: ChildProcess, raw: bytes) -> None:
+        try:
+            msg = json_loads_strict(raw)
+        except RecursionError:
+            self._fail_and_retire_child(child, "child returned excessively nested JSON")
+            return
+        except (UnicodeDecodeError, ValueError):
+            if self._handle_nonfinite_child_line(child, raw):
+                return
+            log_err(f"dropping non-JSON stdout line from child {self.server_id}")
+            return
+        if not is_valid_jsonrpc_message(msg):
+            log_err(f"dropping non-JSON-RPC message from child {self.server_id}")
+            return
+
+        method = msg.get("method")
+        has_id = "id" in msg
+        mid = msg.get("id")
+
+        # Internal proxy request response (initialize, discovery refresh, logging/setLevel)
+        if method is None and isinstance(mid, str) and mid in child.internal:
+            ev, box = child.internal[mid]
+            box[0] = msg
+            ev.set()
+            return
+
+        # Gate any child traffic before the client has received its initialize response & sent initialized.
+        if not child.allow_upstream:
+            if method is not None and has_id:
+                child.write(
+                    json_dumps_bytes(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": mid,
+                            "error": {"code": -32600, "message": "mcp-lazy: client not initialized"},
+                        }
+                    )
+                )
+            log_err(f"dropping pre-initialization child message for {self.server_id}")
+            return
+
+        # Pre-serialize strictly BEFORE popping pending_client so an unserializable response
+        # can NEVER strand an accepted request without a terminal response or error.
+        try:
+            outbound_payload = json_dumps_bytes(msg)
+        except (TypeError, ValueError):
+            self._fail_and_retire_child(child, "child returned unserializable JSON-RPC message")
+            return
+
+        cache_update: Optional[tuple[str, Optional[dict[str, Any]], Optional[bytes]]] = None
+        with self.lock:
+            if method is None and has_id:
+                self.last_activity = time.monotonic()
+                entry = self.pending_client.pop(id_key(mid), None)
+                if entry is not None:
+                    req_method, _raw_id, record_cache, sub_op, sub_uri = entry
+                    if sub_op == "sub" and sub_uri is not None and "error" in msg:
+                        self.subscriptions.discard(sub_uri)
+                    elif sub_op == "unsub" and sub_uri is not None and "error" not in msg:
+                        self.subscriptions.discard(sub_uri)
+                    if record_cache:
+                        res = msg.get("result")
+                        if isinstance(res, dict) and not res.get("nextCursor"):
+                            try:
+                                dig = canonical_digest(res)
+                                cache_update = (req_method, res, dig)
+                            except (TypeError, ValueError):
+                                cache_update = (req_method, None, None)
+                        else:
+                            cache_update = (req_method, None, None)
+                self.cond.notify_all()
+            elif method is not None and has_id:
+                self.last_activity = time.monotonic()
+                self.pending_server[id_key(mid)] = child
+                self.cond.notify_all()
+            # Server-initiated notifications do NOT reset last_activity.
+
+        if cache_update is not None:
+            req_method, res_dict, dig = cache_update
+            field = CACHEABLE_METHODS[req_method][0]
+            with self.lock:
+                if res_dict is not None and dig is not None:
+                    self.served_digests[req_method] = dig
+                else:
+                    self.served_digests.pop(req_method, None)
+                if self.cache_data is not None:
+                    updated = dict(self.cache_data)
+                    if res_dict is not None:
+                        updated[field] = res_dict
+                    else:
+                        updated.pop(field, None)
+                    sanitized = self.cache.sanitize_payload(updated)
+                    if sanitized is not None:
+                        self.cache_data = sanitized
+                        self.cache.save(sanitized)
+
+        self._send_client_payload(outbound_payload)
+
+    def _on_child_io_error(self, child: ChildProcess, reason: str) -> None:
+        self._fail_and_retire_child(child, reason)
+
+    def _on_child_exit(self, child: ChildProcess, returncode: int) -> None:
+        with self.cond:
+            is_active = self.child is child
+            if is_active:
+                self.child = None
+            failed = [] if (child.reaped or not is_active) else list(self.pending_client.values())
+            if is_active:
+                self.pending_client.clear()
+                self.subscriptions.clear()
+            for k in [k for k, owner in self.pending_server.items() if owner is child]:
+                self.pending_server.pop(k, None)
+            self.cond.notify_all()
+
+        child.force_kill_pg()
+
+        if not child.reaped:
+            log_err(f"child {self.server_id} (pid={child.pid}) exited unexpectedly with code {returncode}")
+            for _req_method, raw_id, _rec, _sub_op, _sub_uri in failed:
+                self.send_error(
+                    raw_id,
+                    -32603,
+                    f"mcp-lazy: child process exited unexpectedly (code {returncode}); next request will respawn",
+                )
+
+    # --- Idle reaper & shutdown ---
+
+    def _reaper_loop(self) -> None:
+        while True:
+            victim: Optional[ChildProcess] = None
+            with self.cond:
+                if self.stopping:
+                    return
+                if self.idle_seconds <= 0:
+                    self.cond.wait(timeout=60.0)
+                    continue
+                child = self.child
+                if child is None or not child.ready:
+                    self.cond.wait()
+                    continue
+                busy = bool(
+                    self.pending_client
+                    or self.pending_server
+                    or self.subscriptions
+                    or self.writing_count > 0
+                )
+                if busy:
+                    self.cond.wait()
+                    continue
+                elapsed = time.monotonic() - self.last_activity
+                remaining = self.idle_seconds - elapsed
+                if remaining > 0:
+                    self.cond.wait(timeout=remaining)
+                    continue
+                child.reaped = True
+                self.child = None
+                self.tearing_down.add(child)
+                victim = child
+
+            if victim is not None:
+                log_err(f"reaping idle child {self.server_id} (pid={victim.pid}) after {self.idle_seconds:g}s")
+                try:
+                    victim.terminate(polite=True)
+                finally:
+                    with self.cond:
+                        self.tearing_down.discard(victim)
+                        self.cond.notify_all()
+
+    def shutdown(self) -> None:
+        with self.cond:
+            self.stopping = True
+            active = self.child
+            self.child = None
+            if active is not None:
+                active.reaped = True
+                self.tearing_down.add(active)
+            self.cond.notify_all()
+        self._request_queue.put(_STOP_SENTINEL)
+
+        if active is not None:
+            try:
+                active.terminate(polite=True)
+            finally:
+                with self.cond:
+                    self.tearing_down.discard(active)
+                    self.cond.notify_all()
+
+        # Wait for ALL in-flight spawns (spawning_count) AND all in-progress teardowns (tearing_down)
+        # so EOF/SIGTERM racing either process creation or idle reap can never leave an orphan child.
+        deadline = time.monotonic() + self.shutdown_timeout
+        with self.cond:
+            while self.spawning_count > 0 or self.tearing_down:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    break
+                self.cond.wait(timeout=rem)
+            stragglers = list(self.tearing_down | self.spawning_children)
+        for s in stragglers:
+            s.reaped = True
+            s.force_kill_pg()
+            try:
+                s.proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def parse_args(argv: list[str]) -> tuple[str, float, Path, float, list[str]]:
+    if not argv:
+        raise ValueError("missing arguments; run `mcp-lazy --help` for usage")
+    if argv[0] in ("-h", "--help"):
+        sys.stdout.write(__doc__ or "")
+        sys.exit(0)
+    if "--" not in argv:
+        if any(a in ("-h", "--help") for a in argv):
+            sys.stdout.write(__doc__ or "")
+            sys.exit(0)
+        raise ValueError("missing `-- /abs/path/to/cmd [args...]` separator")
+    sep = argv.index("--")
+    head, child_argv = argv[:sep], argv[sep + 1 :]
+    if not child_argv:
+        raise ValueError("missing child command after `--`")
+
+    ap = argparse.ArgumentParser(prog="mcp-lazy", add_help=False)
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("--id", dest="server_id", required=True)
+    ap.add_argument("--idle", type=float, default=DEFAULT_IDLE)
+    ap.add_argument("--cache-dir", default=DEFAULT_CACHE_DIR)
+    ap.add_argument("--start-timeout", type=float, default=DEFAULT_START_TIMEOUT)
+    try:
+        ns = ap.parse_args(head)
+    except SystemExit as e:
+        if e.code == 0:
+            raise
+        raise ValueError("invalid arguments; run `mcp-lazy --help` for usage") from e
+
+    if ns.help:
+        sys.stdout.write(__doc__ or "")
+        sys.exit(0)
+
+    validate_server_id(ns.server_id)
+    if not math.isfinite(ns.idle) or ns.idle < 0:
+        raise ValueError(f"--idle must be a finite number >= 0, got {ns.idle!r}")
+    if not math.isfinite(ns.start_timeout) or ns.start_timeout <= 0:
+        raise ValueError(f"--start-timeout must be a finite number > 0, got {ns.start_timeout!r}")
+    validate_child_command(child_argv[0])
+
+    cache_dir = Path(os.path.expanduser(ns.cache_dir))
+    return ns.server_id, ns.idle, cache_dir, ns.start_timeout, child_argv
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    try:
+        server_id, idle, cache_dir, start_timeout, child_argv = parse_args(
+            list(sys.argv[1:] if argv is None else argv)
+        )
+    except ValueError as e:
+        log_err(str(e))
+        return 2
+
+    max_frame_env = os.environ.get("MCP_LAZY_MAX_FRAME_BYTES")
+    max_frame_bytes = MAX_FRAME_BYTES
+    if max_frame_env:
+        try:
+            v = int(max_frame_env)
+            if v >= 256:
+                max_frame_bytes = v
+        except ValueError:
+            pass
+
+    write_timeout_env = os.environ.get("MCP_LAZY_WRITE_TIMEOUT")
+    write_timeout = DEFAULT_WRITE_TIMEOUT
+    if write_timeout_env:
+        try:
+            v_f = float(write_timeout_env)
+            if math.isfinite(v_f) and v_f > 0:
+                write_timeout = v_f
+        except ValueError:
+            pass
+
+    init_ready_env = os.environ.get("MCP_LAZY_INIT_READY_TIMEOUT")
+    init_ready_timeout: Optional[float] = None
+    if init_ready_env:
+        try:
+            v_r = float(init_ready_env)
+            if math.isfinite(v_r) and v_r > 0:
+                init_ready_timeout = v_r
+        except ValueError:
+            pass
+
+    proxy = LazyProxy(
+        server_id=server_id,
+        child_argv=child_argv,
+        idle_seconds=idle,
+        cache_dir=cache_dir,
+        start_timeout=start_timeout,
+        max_frame_bytes=max_frame_bytes,
+        write_timeout=write_timeout,
+        init_ready_timeout=init_ready_timeout,
+    )
+    return proxy.run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

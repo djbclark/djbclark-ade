@@ -2070,3 +2070,133 @@ def test_path_warnings_never_change_the_exit_code(env):
     # a shadow AFTER the bin dir is not a shadow
     r = env.run(extra_env={"PATH": f"{bin_dir(env)}{os.pathsep}{shadow}{os.pathsep}{plain}"})
     assert "shadows" not in r.stdout
+
+
+# --- ~/.local/libexec/ade standalone copies (step 3e, 2026-11-24) -------------------------------------------
+
+VALID_MCP_LAZY = "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n"
+
+
+@pytest.mark.parametrize("old", [None, "#!/usr/bin/env python3\nprint('old')\n"])
+def test_libexec_copy_check_reports_drift_without_writes(env, old):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+    before = sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*"))
+    r = env.run("--check", "--json")
+    row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert row["state"] == ("missing" if old is None else "differs")
+    assert sorted(str(p.relative_to(env.home)) for p in env.home.rglob("*")) == before
+    assert (live.read_text() if live.exists() else None) == old
+
+
+@pytest.mark.parametrize("old", [None, "#!/usr/bin/env python3\nprint('old')\n"])
+def test_libexec_copy_apply_installs_standalone_copy_with_backup_and_is_silent(env, old):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    if old is not None:
+        live.parent.mkdir(parents=True)
+        live.write_text(old)
+        live.chmod(0o700)
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+    assert row["state"] == "installed"
+    assert live.is_file() and not live.is_symlink()
+    assert live.read_text() == VALID_MCP_LAZY
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    backups = list(live.parent.glob("mcp-lazy.bak-*"))
+    assert len(backups) == int(old is not None)
+    if old is not None:
+        assert backups[0].read_text() == old
+        assert stat.S_IMODE(backups[0].stat().st_mode) == 0o600
+    # Second run is silent and idempotent.
+    for flags in (("--check",), ()):
+        r2 = env.run(*flags)
+        assert r2.returncode == 0, r2.stdout + r2.stderr
+        assert "libexec copy" not in r2.stdout
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_libexec_copy_replaces_symlink_without_dereferencing_target(env, dangling):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    live.parent.mkdir(parents=True)
+    target = env.tmp / "symlink-target-secret"
+    if not dangling:
+        target.write_text("target secret bytes\n")
+        target.chmod(0o600)
+    live.symlink_to(target)
+    r_check = env.run("--check", "--json")
+    assert r_check.returncode == 10
+    assert json.loads(r_check.stdout)["libexec_copies"]["mcp-lazy"]["symlink_target"] == str(target)
+    assert live.is_symlink()
+    r = env.run("--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+    assert row["state"] == "installed"
+    assert row["replaced_symlink"] == str(target)
+    assert not live.is_symlink() and live.read_text() == VALID_MCP_LAZY
+    assert stat.S_IMODE(live.stat().st_mode) == 0o755
+    # Never duplicate symlink target bytes into a backup file.
+    assert list(live.parent.glob("mcp-lazy.bak-*")) == []
+    if not dangling:
+        assert target.read_text() == "target secret bytes\n"
+
+
+def test_libexec_copy_fifo_destination_rejected_without_hanging(env):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    live.parent.mkdir(parents=True)
+    os.mkfifo(live, 0o600)
+    for flags in (("--check", "--json"), ("--json",)):
+        r = env.run(*flags)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "special file" in json.loads(r.stdout)["error"]
+    assert stat.S_ISFIFO(os.lstat(live).st_mode)
+
+
+def test_libexec_copy_noncanonical_repo_is_report_only(env):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    other = env.tmp / "other-libexec"
+    sh("git", "clone", "-q", str(env.origin), str(other))
+    live = env.home / ".local" / "libexec" / "ade" / "mcp-lazy"
+    for flags in (("--check",), ()):
+        r = env.run(*flags, "--json", repo=other)
+        assert r.returncode == 0, r.stdout + r.stderr
+        row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+        assert row["state"] == "missing" and row["mode"] == "report-only"
+    assert not live.exists()
+
+
+def test_libexec_copy_local_edit_and_syntax_error_refused(env):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    sh("git", "pull", "-q", "--ff-only", cwd=env.machine)
+    (env.machine / "bin" / "mcp-lazy").write_text("#!/usr/bin/env python3\n# dirty\n")
+    r = env.run("--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    assert json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]["state"] == "refused"
+    assert not (env.home / ".local" / "libexec" / "ade" / "mcp-lazy").exists()
+
+    # Syntax-error committed version is also refused.
+    (env.machine / "bin" / "mcp-lazy").write_text(VALID_MCP_LAZY)
+    env.publish({"bin/mcp-lazy": "#!/usr/bin/env python3\ndef broken(\n"})
+    r2 = env.run("--json")
+    assert r2.returncode == 10, r2.stdout + r2.stderr
+    assert json.loads(r2.stdout)["libexec_copies"]["mcp-lazy"]["state"] == "refused"
+    assert not (env.home / ".local" / "libexec" / "ade" / "mcp-lazy").exists()
+
+
+def test_libexec_copy_check_behind_new_upstream_reports_missing(env):
+    env.publish({"bin/mcp-lazy": VALID_MCP_LAZY})
+    r = env.run("--check", "--json")
+    assert r.returncode == 10, r.stdout + r.stderr
+    row = json.loads(r.stdout)["libexec_copies"]["mcp-lazy"]
+    assert row["state"] == "missing"
+    assert not (env.home / ".local" / "libexec" / "ade" / "mcp-lazy").exists()
