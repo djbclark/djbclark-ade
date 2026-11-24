@@ -807,9 +807,12 @@ def build_mit_bridge(env: dict[str, str], log=sys.stderr) -> MitBridge | None:
     except ValueError:
         cooldown_s = DEFAULT_COOLDOWN_S
 
-    raw_allowlist = (env.get("FIRECRAWL_ROUTER_MIT_ALLOWLIST") or "").strip()
     allowlist: frozenset[str] | None = None
-    if raw_allowlist:
+    if "FIRECRAWL_ROUTER_MIT_ALLOWLIST" in env:
+        raw_allowlist = (env.get("FIRECRAWL_ROUTER_MIT_ALLOWLIST") or "").strip()
+        if not raw_allowlist:
+            print("firecrawl-router: empty FIRECRAWL_ROUTER_MIT_ALLOWLIST; failing closed", file=log, flush=True)
+            return None
         parsed_allow: set[str] = set()
         for raw_tok in raw_allowlist.split(","):
             tok = raw_tok.strip()
@@ -821,9 +824,6 @@ def build_mit_bridge(env: dict[str, str], log=sys.stderr) -> MitBridge | None:
                 )
                 return None
             parsed_allow.add(tok)
-        if not parsed_allow:
-            print("firecrawl-router: empty FIRECRAWL_ROUTER_MIT_ALLOWLIST; failing closed", file=log, flush=True)
-            return None
         allowlist = frozenset(parsed_allow)
 
     cfg = MitBridgeConfig(
@@ -1022,8 +1022,10 @@ class MitBridge:
         domains, snap_err = self.snapshot.load()
         if domains is None:
             return None, None, snap_err, False
-        if host not in self._effective_domains(domains):
+        if host not in domains:
             return None, None, "", False
+        if self.config.allowlist is not None and host not in self.config.allowlist:
+            return None, None, "not-allowlisted", True
 
         pdf_target = is_pdf_target(url, req_doc)
         try:
