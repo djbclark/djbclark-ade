@@ -24,6 +24,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_lead_succession as succ  # noqa: E402
+import ade_paseo_client as paseo_client  # noqa: E402
 
 CLI_TIMEOUT = 15
 RESERVE_MARGIN = 1
@@ -195,7 +196,7 @@ def transient(provider, logs):
 class Scanner:
     def __init__(self, lead=None, state=None, apply=False, duration=120, max_error_age_minutes=30, quota=False,
                  only_agents=(), quota_per_pool=1, quota_grace_seconds=60, guard_state=None,
-                 transition_below=None, lead_file=None):
+                 transition_below=None, lead_file=None, daemon_url=None, paseo_client_obj=None):
         if (lead is None) == (lead_file is None):
             raise ScanError("provide exactly one of --lead or --lead-file")
         self.lead_file = Path(lead_file).expanduser() if lead_file is not None else None
@@ -218,6 +219,35 @@ class Scanner:
         self.transition_below = transition_below
         self._aiuse = None
         self._aiuse_snapshot = None
+        self._daemon_url = daemon_url
+        self._daemon_client = paseo_client_obj
+        self._use_daemon = (
+            paseo_client_obj is not None
+            or daemon_url is not None
+            or paseo_client.transport_mode() == "daemon"
+        )
+
+    def _daemon(self):
+        if self._daemon_client is not None:
+            return self._daemon_client
+        try:
+            return paseo_client.PaseoClient(url=self._daemon_url, timeout=min(CLI_TIMEOUT, self.remaining()))
+        except paseo_client.DaemonError as exc:
+            raise ScanError(f"Paseo daemon unavailable: {exc}") from exc
+
+    def _list_agents(self, *, include_archived=False):
+        if self._use_daemon:
+            try:
+                return self._daemon().list_agents(
+                    include_background=True,
+                    include_archived=include_archived,
+                    cli_rows=True,
+                )
+            except paseo_client.DaemonError as exc:
+                raise ScanError(f"Paseo daemon listing failed: {exc}") from exc
+        if include_archived:
+            return json.loads(self.cli("ls", "-a", "-g", "--json"))
+        return json.loads(self.cli("ls", "-g", "--background", "--json"))
 
     def remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -236,7 +266,14 @@ class Scanner:
         return result.stdout
 
     def inspect(self, aid):
-        data = json.loads(self.cli("agent", "inspect", agent_id(aid), "--json"))
+        clean_aid = agent_id(aid)
+        if self._use_daemon:
+            try:
+                data = self._daemon().inspect_agent(clean_aid, cli_shape=True)
+            except paseo_client.DaemonError as exc:
+                raise ScanError(f"Paseo daemon inspect failed: {exc}") from exc
+        else:
+            data = json.loads(self.cli("agent", "inspect", clean_aid, "--json"))
         if not isinstance(data, dict) or data.get("Id") != aid:
             raise ScanError("invalid inspect response")
         return data
@@ -257,7 +294,7 @@ class Scanner:
         try:
             record = self.inspect(self.lead)
         except (ScanError, ValueError):
-            listing = json.loads(self.cli("ls", "-a", "-g", "--json"))  # raises ScanError while Paseo is down
+            listing = self._list_agents(include_archived=True)  # raises ScanError while Paseo is down
             # positive evidence only: a listing whose rows lack a string `id` (a CLI schema change) proves nothing
             if (not isinstance(listing, list) or any(not (isinstance(r, dict) and isinstance(r.get("id"), str)) for r in listing)
                     or any(r["id"] == self.lead for r in listing)):
@@ -1010,7 +1047,7 @@ class Scanner:
                               f"completed self-handoff replaced it; nothing to resume ({hint})",
                               file=sys.stderr)
                     return 0
-                agents = json.loads(self.cli("ls", "-g", "--background", "--json"))
+                agents = self._list_agents(include_archived=False)
                 if not isinstance(agents, list):
                     raise ScanError("invalid agent listing")
                 for row in agents:

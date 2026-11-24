@@ -83,7 +83,9 @@ def run(argv: list[str], env=None) -> int:
         if idx is not None:
             import ade_send_guard as sg  # noqa: PLC0415
             target = args[idx]
-            d = sg.guard(target, paseo=real, env=env)
+            pc_mod = getattr(sg, "paseo_client", None)
+            use_daemon = pc_mod is not None and pc_mod.transport_mode(env=env) == "daemon"
+            d = sg.guard(target, paseo="paseo" if use_daemon else real, env=env)
             if d.action == sg.REFUSE:
                 print(f"ade-paseo-guard: refused, nothing was sent: {d.reason}.", file=sys.stderr)
                 print(f"ade-paseo-guard: your own archived worker (launched by you or a lead you replaced) is resumed by a send without "

@@ -58,8 +58,8 @@ def world(tmp_path):
         agents.write_text(json.dumps(flags))
     w.live = live
     w.env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_AGENTS": str(agents),
-             "ADE_SELF_SESSION_STATE": str(state), "PASEO_HOME": str(home)}
-    for k in (guard.ALLOW_ENV, guard.SENDER_ENV, "FAKE_LABELS", "FAKE_LS_FAIL"):  # a developer's own agent id is no sender here
+             "ADE_SELF_SESSION_STATE": str(state), "PASEO_HOME": str(home), "ADE_PASEO_TRANSPORT": "cli"}
+    for k in (guard.ALLOW_ENV, guard.SENDER_ENV, "FAKE_LABELS", "FAKE_LS_FAIL", "ADE_PASEO_URL"):  # a developer's own agent id is no sender here
         w.env.pop(k, None)
     labels = tmp_path / "labels.json"
 

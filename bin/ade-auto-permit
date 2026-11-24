@@ -23,6 +23,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ade_lead_succession as succ  # noqa: E402
+import ade_paseo_client as paseo_client  # noqa: E402
 
 
 class ProbeError(Exception):
@@ -221,7 +222,155 @@ def descendant(agent, lead, cache, sensitive=frozenset()):
 SENSITIVE_LABEL = "ade.kind=external-review"  # same marker as claude/hooks/peer_trust_gate.py SENSITIVE_LABEL
 
 
-def sweep(lead, labels, log, all_local=False):
+def _use_daemon(daemon_url=None):
+    if daemon_url:
+        return True
+    return paseo_client.transport_mode() == "daemon"
+
+
+def _daemon_inspect(client, agent, cache):
+    if agent not in cache:
+        try:
+            info = client.inspect_agent(agent, cli_shape=True)
+        except paseo_client.AgentNotFoundError:
+            cache[agent] = None
+            return None
+        except paseo_client.DaemonError as exc:
+            raise ProbeError("daemon inspect failed") from exc
+        if not isinstance(info, dict) or info.get("Id") != agent:
+            raise ProbeError("agent identity mismatch")
+        cache[agent] = info
+    return cache[agent]
+
+
+def _daemon_is_sensitive(info):
+    labels = info.get("Labels") if isinstance(info, dict) else None
+    if not isinstance(labels, dict):
+        return False
+    k, v = SENSITIVE_LABEL.split("=", 1)
+    return labels.get(k) == v
+
+
+def _daemon_descendant(client, agent, leads, cache):
+    if agent in leads:
+        return False
+    seen = set()
+    cur = agent
+    while cur not in seen:
+        seen.add(cur)
+        info = _daemon_inspect(client, cur, cache)
+        if info is None:
+            return False
+        parent = info.get("ParentAgentId")
+        if parent is None:
+            return False
+        if not identifier(parent):
+            raise ProbeError("invalid parent id")
+        if parent in leads:
+            return True
+        pinfo = _daemon_inspect(client, parent, cache)
+        if pinfo is None:
+            return False
+        if _daemon_is_sensitive(pinfo):
+            return "sensitive"
+        cur = parent
+    return False
+
+
+def _sweep_daemon(lead, labels, log, all_local=False, client=None, daemon_url=None):
+    current, leads, queried = lead_lineage(lead, log)
+    try:
+        daemon = client if client is not None else paseo_client.PaseoClient(url=daemon_url, timeout=30)
+        raw_requests = daemon.list_pending_permissions(cli_rows=True)
+    except paseo_client.DaemonError as exc:
+        raise ProbeError("daemon list_pending_permissions unavailable") from exc
+    requests = rows(raw_requests)
+    if not requests:
+        return 0
+    lead_selectors = [(f"ade.lead={x}", "ade.lead", x) for x in queried]
+    label_selectors = [(v, *v.split("=", 1)) for v in labels]
+    inspect_cache, seen, failed = {}, set(), False
+    for row in requests:
+        if not isinstance(row, dict):
+            log_event(log, "skip", "malformed-request")
+            failed = True
+            continue
+        agent, request = row.get("agentId"), row.get("id")
+        if not identifier(agent) or not isinstance(request, str) or not request or request.startswith("-"):
+            log_event(log, "skip", "malformed-request")
+            failed = True
+            continue
+        if (agent, request) in seen:
+            continue
+        seen.add((agent, request))
+        info = _daemon_inspect(daemon, agent, inspect_cache)
+        provider = ""
+        if isinstance(info, dict) and isinstance(info.get("Provider"), str):
+            provider = info["Provider"].split("/")[0].lower()
+        tool, rule = tool_name(row, provider), classify(row)
+        event = dict(tool=tool, rule=rule)
+        if any(r is not row and isinstance(r, dict) and r.get("agentId") == agent
+               and isinstance(r.get("id"), str) and r["id"] != request and r["id"].startswith(request)
+               for r in requests):
+            log_event(log, "skip", "ambiguous-request-id", agent, request, **event)
+            failed = True
+            continue
+        if rule is not None:
+            log_event(log, "skip", "operator-question", agent, request, **event)
+            continue
+        if info is None:
+            log_event(log, "skip", "outside-scope", agent, request, **event)
+            continue
+        if _daemon_is_sensitive(info):
+            log_event(log, "skip", "sensitive-sender", agent, request, **event)
+            continue
+        if provider not in CLASSIFIED_PROVIDERS:
+            log_event(log, "skip", "unclassified-provider", agent, request, **event)
+            continue
+        agent_labels = info.get("Labels") if isinstance(info.get("Labels"), dict) else {}
+        matched_reason, matched_via = None, None
+        for full_sel, lk, lv in lead_selectors:
+            if agent_labels.get(lk) == lv:
+                matched_reason, matched_via = "lead-label", full_sel
+                break
+        if matched_reason is None:
+            for full_sel, lk, lv in label_selectors:
+                if agent_labels.get(lk) == lv:
+                    matched_reason, matched_via = "ade-label", full_sel
+                    break
+        try:
+            if agent in leads:
+                reason = None
+            elif matched_reason is not None:
+                reason = matched_reason
+            else:
+                found = _daemon_descendant(daemon, agent, leads, inspect_cache)
+                if found == "sensitive":
+                    log_event(log, "skip", "sensitive-sender", agent, request, **event)
+                    continue
+                reason = "descendant" if found else None
+            if reason is None and all_local:
+                reason = "all-local"
+            if reason is None:
+                log_event(log, "skip", "outside-scope", agent, request, **event)
+                continue
+            if reason == "lead-label":
+                event["via"] = matched_via
+            log_event(log, "allow-attempt", reason, agent, request, **event)
+            try:
+                daemon.respond_to_permission(agent, request, "allow")
+            except paseo_client.DaemonError as exc:
+                raise ProbeError("unconfirmed allow") from exc
+            log_event(log, "allowed", reason, agent, request, **event)
+        except ProbeError:
+            log_event(log, "error", "probe-or-allow-unconfirmed", agent, request, **event)
+            failed = True
+    return 1 if failed else 0
+
+
+def sweep(lead, labels, log, all_local=False, *, client=None, daemon_url=None):
+    if client is not None or _use_daemon(daemon_url):
+        return _sweep_daemon(lead, labels, log, all_local=all_local, client=client, daemon_url=daemon_url)
     current, leads, queried = lead_lineage(lead, log)
     requests = rows(call(["permit", "ls"]))
     eligible, via = {}, {}
@@ -341,6 +490,7 @@ def main():
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--interval", type=float, default=2)
     parser.add_argument("--duration", type=float, default=3600, help="watch lifetime in seconds")
+    parser.add_argument("--daemon-url", default=None, help="override Paseo loopback daemon URL (default: ADE_PASEO_URL or ~/.paseo/config.json)")
     args = parser.parse_args()
     if not identifier(args.lead):
         parser.error("--lead must be a full canonical UUID")
@@ -361,7 +511,10 @@ def main():
             status = 0
             while not args.watch or time.monotonic() < deadline:
                 try:
-                    status = sweep(args.lead, args.ade_label, log, args.all_local)
+                    if args.daemon_url is not None:
+                        status = sweep(args.lead, args.ade_label, log, args.all_local, daemon_url=args.daemon_url)
+                    else:
+                        status = sweep(args.lead, args.ade_label, log, args.all_local)
                 except ProbeError:
                     log_event(log, "error", "enumeration-unavailable")
                     status = 1

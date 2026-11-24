@@ -53,7 +53,8 @@ def _run(tmp_path: Path, pools=None, aiuse_rc: int = 0, agents=None):
     lines.append("exit %d" % aiuse_rc)                       # the exit code is honoured with or without a reading
     (bin_dir / "aiuse").write_text(NL.join(lines) + NL)
     (bin_dir / "aiuse").chmod(0o755)
-    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", ADE_PASEO_TRANSPORT="cli")
+    env.pop("ADE_PASEO_URL", None)
     r = subprocess.run([str(CLI), "--json"], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
@@ -250,7 +251,8 @@ def test_the_human_table_says_a_non_pi_agent_has_no_pi_alternative(tmp_path: Pat
     (bin_dir / "paseo").chmod(0o755)
     (bin_dir / "aiuse").write_text("#!/bin/sh\nexit 1\n")
     (bin_dir / "aiuse").chmod(0o755)
-    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", ADE_PASEO_TRANSPORT="cli")
+    env.pop("ADE_PASEO_URL", None)
     r = subprocess.run([str(CLI)], env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert "STUCK" in r.stdout and "codex agent in error: no Pi alternative" in r.stdout
@@ -274,7 +276,8 @@ def test_the_listing_asks_for_background_workspaces(tmp_path: Path) -> None:
     (bin_dir / "paseo").chmod(0o755)
     (bin_dir / "aiuse").write_text("#!/bin/sh\nexit 1\n")
     (bin_dir / "aiuse").chmod(0o755)
-    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", ADE_PASEO_TRANSPORT="cli")
+    env.pop("ADE_PASEO_URL", None)
     r = subprocess.run([str(CLI), "--json"], env=env, capture_output=True, text=True)
     assert r.returncode == 0
     args = seen.read_text()

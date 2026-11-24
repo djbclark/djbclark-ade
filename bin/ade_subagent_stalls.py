@@ -45,6 +45,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_BIN_DIR = str(Path(__file__).resolve().parent)
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+import ade_paseo_client as paseo_client  # noqa: E402
+
 STUB_FIRST_LINE = "STATUS: working"
 FINAL_STOP_REASONS = frozenset({"end_turn", "stop_sequence"})
 TOOL_CALL_DEFAULT_GRACE_MIN = 35.0
@@ -95,6 +100,9 @@ class Config:
     max_notices: int = 2                     # per stall and per action: the first announcement and one repeat, then silence
     redirect_probe: Any = None               # (cfg, parent, warnings) -> redirect target | None; default `handed_off_to` (tests inject)
     max_inspects: int = 40                 # `paseo agent inspect` / guard probes per run; none after the first timeout
+    paseo_url: str | None = None           # optional explicit Paseo loopback daemon URL (ADE_PASEO_URL / --daemon-url)
+    paseo_client: Any = None               # optional injected PaseoClient (for offline tests)
+    use_daemon: bool = False               # True: use loopback daemon API (zero subprocesses) for inspect & send-guard probes
 
 
 def make_config(home: Path, **over: Any) -> Config:
@@ -578,17 +586,39 @@ def _scrubbed_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in SENDER_OVERRIDE_ENV}
 
 
+def _daemon_client(cfg: Config):
+    """Return a PaseoClient when daemon mode is active for this Config, else None (use cfg.paseo CLI)."""
+    if cfg.paseo_client is not None:
+        return cfg.paseo_client
+    if cfg.paseo_url is not None or cfg.use_daemon or (os.environ.get(paseo_client.ENV_DAEMON_URL) or "").strip():
+        return paseo_client.PaseoClient(url=cfg.paseo_url, timeout=NOTIFY_TIMEOUT_S)
+    return None
+
+
 def handed_off_to(cfg: Config, parent: str, warnings: list[str], run_state: dict | None = None) -> str | None:
     """The agent the send guard would redirect a send to `parent` to (a completed or acknowledged self-handoff), decided here before
     anything is sent: the shim redirects without checking the successor is idle, which would interrupt the new lead's turn and name
     the wrong recipient in the log (PR 938 round 2, LOW-1). A refusal also returns the parent itself: nothing is sent. When the
     guard reports that Paseo could not inspect `parent` (timeout or unreachable daemon), sets `run_state["down"] = True` so no
     further probes run this pass (PR 948 LOW-2)."""
-    if cfg.paseo is None:
+    try:
+        daemon = _daemon_client(cfg)
+    except paseo_client.DaemonError as exc:
+        warnings.append(f"paseo daemon client error for {parent}: {exc}")
+        if run_state is not None:
+            run_state["down"] = True
+        return None
+    if daemon is None and cfg.paseo is None:
         return None
     try:
         import ade_send_guard as guard_mod
-        d = guard_mod.guard(parent, paseo=str(cfg.paseo), env=_scrubbed_env())
+        if daemon is not None:
+            env = _scrubbed_env()
+            if cfg.paseo_url:
+                env[paseo_client.ENV_DAEMON_URL] = cfg.paseo_url
+            d = guard_mod.guard(parent, paseo="paseo", env=env)
+        else:
+            d = guard_mod.guard(parent, paseo=str(cfg.paseo), env=_scrubbed_env())
     except Exception as exc:  # noqa: BLE001 - the shim stays as the backstop
         warnings.append(f"send guard precheck failed for {parent}: {exc}")
         return None
@@ -605,9 +635,28 @@ def handed_off_to(cfg: Config, parent: str, warnings: list[str], run_state: dict
 
 
 def parent_idle(cfg: Config, paseo_id: str, warnings: list[str], run_state: dict | None = None) -> bool:
-    """True only when `paseo agent inspect` says the parent exists, is not archived and is idle: a send to a busy agent would interrupt
-    its turn, and one to an archived agent would un-archive it. A timeout or a failure to run sets `run_state["down"]` so the rest of
-    the run stops inspecting (PR 938 round 2, LOW-5)."""
+    """True only when Paseo says the parent exists, is not archived and is idle: a send to a busy agent would interrupt
+    its turn, and one to an archived agent would un-archive it. Uses the loopback daemon API when daemon mode is active
+    (zero Node subprocesses); a daemon failure or CLI timeout sets `run_state["down"]` so the rest of the run stops
+    inspecting (PR 938 round 2, LOW-5)."""
+    try:
+        daemon = _daemon_client(cfg)
+    except paseo_client.DaemonError as exc:
+        warnings.append(f"paseo daemon client error: {exc}")
+        if run_state is not None:
+            run_state["down"] = True
+        return False
+    if daemon is not None:
+        try:
+            info = daemon.inspect_agent(paseo_id, cli_shape=True)
+        except paseo_client.AgentNotFoundError:
+            return False
+        except paseo_client.DaemonError as exc:
+            warnings.append(f"paseo daemon inspect failed: {exc}")
+            if run_state is not None:
+                run_state["down"] = True
+            return False
+        return isinstance(info, dict) and info.get("Archived") is False and str(info.get("Status", "")).lower() == "idle"
     if cfg.paseo is None:
         warnings.append("no paseo path configured: parent not messaged")
         return False
@@ -646,6 +695,10 @@ def _send_argv_env(cfg: Config, parent: str, text: str) -> tuple[list[str], dict
         env = {**_scrubbed_env(), "PATH": SHIM_PATH}
         if cfg.paseo is not None:
             env["ADE_REAL_PASEO"] = str(cfg.paseo)
+        if cfg.paseo_url:
+            env[paseo_client.ENV_DAEMON_URL] = cfg.paseo_url
+        elif not cfg.use_daemon and not (env.get(paseo_client.ENV_DAEMON_URL) or "").strip():
+            env[paseo_client.ENV_TRANSPORT] = "cli"
         return [str(cfg.paseo_guard), "send", "--json", "--no-wait", "--", parent, text], env
     return [str(cfg.paseo), "send", "--json", "--no-wait", "--", parent, text], None
 
@@ -823,6 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--state-dir", type=Path)
     ap.add_argument("--hermes-ping", type=Path, help="absolute path of hermes-ping (default: <home>/.local/bin/hermes-ping)")
     ap.add_argument("--paseo", type=Path, help="absolute path of paseo (default: <home>/.local/bin/paseo)")
+    ap.add_argument("--daemon-url", default=None, help="Paseo loopback daemon URL for zero-subprocess inspect/guard probes")
     ap.add_argument("--paseo-guard", type=Path,
                     help="absolute path of the ADE send guard shim every send goes through (default: libexec/agent-bin/paseo of this checkout)")
     ap.add_argument("--max-notices", type=int, default=2,
@@ -851,6 +905,11 @@ def config_from_args(args: argparse.Namespace) -> Config:
     over["hermes_ping"] = args.hermes_ping if args.hermes_ping is not None else Path(home) / ".local/bin/hermes-ping"
     over["paseo"] = args.paseo if args.paseo is not None else Path(home) / ".local/bin/paseo"
     over["paseo_guard"] = args.paseo_guard if args.paseo_guard is not None else GUARD_SHIM
+    if args.daemon_url is not None:
+        over["paseo_url"] = args.daemon_url
+        over["use_daemon"] = True
+    elif args.paseo is None and paseo_client.transport_mode() == "daemon":
+        over["use_daemon"] = True
     return make_config(home, **over)
 
 

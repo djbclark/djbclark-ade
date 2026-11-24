@@ -57,7 +57,8 @@ def _paseo(bin_dir: Path, tmp_path: Path, sent: Path, rc: int = 5, archived: boo
 def _run(bin_dir: Path, home: Path, lead: str | None = LEAD) -> int:
     """Run the copy under the test's own HOME and state dir: the caller's ADE_SUPERVISOR_* never leak in."""
     state = home / ".local" / "state" / "djbclark-ade" / "supervisor"
-    env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}")
+    env = dict(os.environ, HOME=str(home), PATH=f"{bin_dir}:{os.environ['PATH']}", ADE_PASEO_TRANSPORT="cli")
+    env.pop("ADE_PASEO_URL", None)
     env.pop("ADE_SUPERVISOR_LEAD", None)
     env.pop("BASH_ENV", None)                       # bash would source ~/.bashrc, which puts the REAL paseo and
     env.pop("ENV", None)                            # hermes-ping ahead of the test's fakes (tests/test_ade_paseo_guard.py)
@@ -441,7 +442,8 @@ def test_live_mode_refuses_to_move_anyone_until_the_executor_is_built(tmp_path: 
     import os, subprocess
     env = dict(os.environ, HOME=str(env_home), PATH=f"{bin_dir}:{os.environ['PATH']}",
                ADE_SUPERVISOR_STATE_DIR=str(state), ADE_SUPERVISOR_LEAD=LEAD,
-               ADE_SUPERVISOR_REHANDOFF="live")
+               ADE_SUPERVISOR_REHANDOFF="live", ADE_PASEO_TRANSPORT="cli")
+    env.pop("ADE_PASEO_URL", None)
     env.pop("BASH_ENV", None)                       # see _run: bash must not source ~/.bashrc and reach the real paseo
     env.pop("ENV", None)
     assert subprocess.run([str(bin_dir / "ade-supervisor-scan")], env=env, capture_output=True, text=True).returncode == 0

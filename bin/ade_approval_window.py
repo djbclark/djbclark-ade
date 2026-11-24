@@ -34,6 +34,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+_BIN_DIR = str(Path(__file__).resolve().parent)
+if _BIN_DIR not in sys.path:
+    sys.path.insert(0, _BIN_DIR)
+import ade_paseo_client as _paseo_client  # noqa: E402
+
 GRANT_PATH = "/var/db/sudo-ask/grant"   # hard-coded: same as site-public-djbclark roles/sudo_ask_grant/files/sudo-ask-granted
 OWNER_UID = 0                            # the grant dir and file must be owned by root
 MIN_WINDOW_S = 60                        # the helper refuses a shorter grant
@@ -41,8 +46,8 @@ MAX_WINDOW_S = 86400                     # ... and a longer one; a file that exp
 CLOCK_SLACK_S = 120                      # tolerated skew for a grant stamped "in the future" (same as the helper)
 MAX_GRANT_BYTES = 4096
 
-DEFAULT_DAEMON_URL = "http://127.0.0.1:7263/mcp/agents"   # Paseo's loopback Agent MCP route (bootstrap.ts agentMcpRoute)
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+DEFAULT_DAEMON_URL = _paseo_client.DEFAULT_MCP_URL   # Paseo's loopback Agent MCP route (bootstrap.ts agentMcpRoute)
+LOOPBACK_HOSTS = _paseo_client.LOOPBACK_HOSTS
 MIN_POLL_S = 2.0                         # `watch` never polls faster
 COMMAND_PREFIX_CHARS = 200
 MAX_TEXT_CHARS = 200_000                 # a request string longer than this is not scanned: it stays pending (unreadable)
@@ -1980,70 +1985,31 @@ class AuditLog:
 # ---------------------------------------------------------------- Paseo's loopback Agent MCP route
 
 
-class DaemonError(Exception):
-    """The daemon could not be listed or answered; nothing is approved on this evidence."""
-
-
-Opener = Callable[[str, bytes, Dict[str, str], float], Tuple[int, str, bytes]]
-
-
-def urllib_opener(url: str, body: bytes, headers: Dict[str, str], timeout: float) -> Tuple[int, str, bytes]:
-    no_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # a loopback call never goes through a proxy
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with no_proxy.open(request, timeout=timeout) as resp:
-            return resp.status, resp.headers.get("Content-Type", ""), resp.read(8_000_000)
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.headers.get("Content-Type", "") if exc.headers else "", exc.read(65_536)
+DaemonError = _paseo_client.DaemonError
+Opener = _paseo_client.Opener
+urllib_opener = _paseo_client.urllib_opener
 
 
 class McpDaemon:
     """`list_pending_permissions` and `respond_to_permission` over Paseo's Agent MCP route (stateless streamable HTTP).
 
-    Source: packages/server/src/server/agent/tools/paseo-tools.ts lines 3211-3273 (the two tools), bootstrap.ts around 1537
-    (the route, no session, no password when none is configured). The `paseo permit ls --json` rows carry no command
-    (packages/cli/src/commands/permit/ls.ts lines 8-14 and 28-38: id, agentId, name, description only), so the CLI cannot show what a
-    Bash request would run; the MCP tool returns the whole request (input, detail, metadata)."""
+    Delegates HTTP/MCP framing and loopback enforcement to the shared `bin/ade_paseo_client.py` module (Queue #90,
+    2026-11-24). Source: packages/server/src/server/agent/tools/paseo-tools.ts lines 3211-3273 (the two tools),
+    bootstrap.ts around 1537 (the route, no session, no password when none is configured). The `paseo permit ls --json`
+    rows carry no command, so the MCP tool returns the whole request (input, detail, metadata)."""
 
     def __init__(self, url: str = DEFAULT_DAEMON_URL, opener: Opener = urllib_opener, timeout: float = 10.0) -> None:
-        parsed = urllib.parse.urlsplit(url)
-        host = parsed.hostname or ""
-        if parsed.scheme != "http" or host not in LOOPBACK_HOSTS or parsed.path != "/mcp/agents" or parsed.query:
-            raise DaemonError("daemon URL must be http://<loopback>:<port>/mcp/agents")
-        self.url, self.opener, self.timeout, self._id = url, opener, timeout, 0
+        self._client = _paseo_client.McpClient(
+            url=url,
+            opener=opener,
+            timeout=timeout,
+            auth=_paseo_client.read_local_auth(),
+            strict_mcp_path=True,
+        )
+        self.url, self.opener, self.timeout = self._client.url, opener, timeout
 
     def _call(self, tool: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        self._id += 1
-        body = json.dumps({"jsonrpc": "2.0", "id": self._id, "method": "tools/call",
-                           "params": {"name": tool, "arguments": arguments}}).encode("utf-8")
-        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
-        try:
-            status, ctype, raw = self.opener(self.url, body, headers, self.timeout)
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            raise DaemonError("daemon unreachable: %s" % type(exc).__name__) from exc
-        if status != 200:
-            raise DaemonError("daemon answered HTTP %s" % status)
-        text = raw.decode("utf-8", "replace")
-        messages: List[Any] = []
-        try:
-            if "text/event-stream" in ctype:
-                messages = [json.loads(line[5:]) for line in text.splitlines() if line.startswith("data:")]
-            else:
-                messages = [json.loads(text)]
-        except ValueError as exc:
-            raise DaemonError("daemon answer is not JSON") from exc
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("id") == self._id:
-                if "error" in msg:
-                    raise DaemonError("daemon refused %s" % tool)
-                result = msg.get("result")
-                if not isinstance(result, dict) or result.get("isError"):
-                    raise DaemonError("%s failed" % tool)
-                structured = result.get("structuredContent")
-                if not isinstance(structured, dict):
-                    raise DaemonError("%s returned no structured content" % tool)
-                return structured
-        raise DaemonError("no answer to %s" % tool)
+        return self._client.call_tool(tool, arguments)
 
     def list_pending(self) -> List[Request]:
         try:
@@ -2052,10 +2018,7 @@ class McpDaemon:
             raise DaemonError(str(exc)) from exc
 
     def allow(self, agent_id: str, request_id: str) -> None:
-        answer = self._call("respond_to_permission", {"agentId": agent_id, "requestId": request_id,
-                                                      "response": {"behavior": "allow"}})
-        if answer.get("success") is not True:
-            raise DaemonError("allow not confirmed")
+        self._client.respond_to_permission(agent_id, request_id, {"behavior": "allow"})
 
 
 # ---------------------------------------------------------------- one sweep
