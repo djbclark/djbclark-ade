@@ -21,7 +21,7 @@ target = "desktop-build-2"
 status = "landed:2"
 upstream = "https://github.com/getpaseo/paseo/pull/10534"
 order = 10
-notes = "one commit on upstream/main ec22b8265; upstream PR 10534 is a draft (Discussion 10120); CI green https://github.com/frdminc/paseo/actions/runs/45045661104; fork PR frdminc/paseo#3; obsolete earlier forms 36f49a46b and ffa8a54ac16437a7dba21f792ad4983ceea70e97 | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac) | upstream PR https://github.com/getpaseo/paseo/pull/10534 closed by paseo-bot under workflow-discussion policy -> linked at https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425 (2026-11-24)"
+notes = "one commit on upstream/main ec22b8265; upstream PR 10534 originally opened as a draft (Discussion 10120); CI green https://github.com/frdminc/paseo/actions/runs/45045661104; fork PR frdminc/paseo#3; obsolete earlier forms 36f49a46b and ffa8a54ac16437a7dba21f792ad4983ceea70e97 | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac) | upstream PR https://github.com/getpaseo/paseo/pull/10534 closed by paseo-bot under workflow-discussion policy -> linked at https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425 (2026-11-24)"
 
 [[pick]]
 id = "desktop-app-dist-precompress"
