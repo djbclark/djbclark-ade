@@ -108,7 +108,11 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 13
+    assert len(by_id) == 14
+    assert by_id["paseo-daemon-status-capabilities"]["targets"] == ["desktop-build-3", "android-build-3"]
+    assert by_id["paseo-daemon-status-capabilities"]["status"] == "queued"
+    assert by_id["paseo-daemon-status-capabilities"].get("hold")
+    assert all(k not in by_id["paseo-daemon-status-capabilities"] for k in ("commit", "branch", "pr"))
     assert by_id["paseo-settings-search"]["pr"] == 9875
     assert by_id["paseo-settings-search"]["expected_head"] == "084d2be0cc12e38bb961684bf45fac7de34e50c6"
     assert by_id["paseo-settings-search"]["targets"] == ["desktop-build-3", "android-build-3"]
