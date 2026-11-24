@@ -54,9 +54,9 @@ older `sudo-ask` rejects `--no-window`) or `/usr/bin/sudo -k`.
 ## II. The window file
 
 `/var/db/sudo-ask/grant` (directory `root:wheel 0755`, file `root:wheel 0644`), JSON `{expires_utc, granted_utc,
-granted_by_uid, duration_s, nonce}`, written by the root helper `sudo-ask-granted grant` (site-public-djbclark branch
-`feat/sudo-ask-grant-window`, `roles/sudo_ask_grant/files/sudo-ask-granted`, `read_grant`). `read_window` in
-`bin/ade_approval_window.py` mirrors that reader and fails closed. The window is open only when:
+granted_by_uid, duration_s, nonce}`, written by the root helper `sudo-ask-granted grant` (`site-public-djbclark`
+`master`, `roles/sudo_ask_grant/files/sudo-ask-granted`, `read_grant`; merged via PRs #304/#305/#306/#309/#310/#311).
+`read_window` in `bin/ade_approval_window.py` mirrors that reader and fails closed. The window is open only when:
 
 - the directory and the file are owned by root and neither is group- or world-writable (`mode & 0o022 == 0`);
 - the directory and the file are not symlinks (`lstat`; the open uses `O_NOFOLLOW` and re-checks the inode and mode on the
@@ -65,9 +65,11 @@ granted_by_uid, duration_s, nonce}`, written by the root helper `sudo-ask-grante
 - `duration_s` is 60 s to 24 h and `expires_utc - granted_utc == duration_s`; `granted_utc` is not more than 120 s ahead of the clock;
 - `expires_utc` is in the future and **not more than 24 h away** (a far-future file is tampering, so it is closed).
 
-Any error is "closed". The path is hard-coded; only function parameters (tests) move it. The installed
-`/usr/local/libexec/sudo-ask-granted` was an unreviewed draft when this was written: nothing here runs it, calls `sudo-ask
-grant|revoke|status` or uses sudo.
+Any error is "closed". The path is hard-coded; only function parameters (tests) move it. `roles/sudo_ask_grant` is
+merged on `site-public-djbclark` `master` (PRs #304/#305/#306/#309/#310/#311), adversary-reviewed, and installed live on
+`bigmac` (2026-11-24; `/usr/local/libexec/sudo-ask-granted` SHA-256
+`3e5bc8198c39de82895454a4dda241363948d97b85ab2192f319f0edf1c111af`). `bin/ade_approval_window.py` only reads
+`/var/db/sudo-ask/grant`: nothing here invokes `sudo`, calls `sudo-ask grant|revoke|status`, or runs the helper.
 
 ## III. Policy while the window is open
 

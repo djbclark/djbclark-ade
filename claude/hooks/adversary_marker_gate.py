@@ -79,6 +79,7 @@ MAX_FORCED = 400            # operand files / stdin texts read outside the byte 
 MAX_FORCED_BYTES = 2000000
 MAX_STARTS = 100
 PUNCT = ";&|()<>`\n"
+WORD_BREAK = set(" \t\r\n;&|(")
 HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 VERDICT_WORD = re.compile(r"adversary[-_ ]?verdict", re.IGNORECASE)
 APPROVE_WORD = re.compile(r"approve", re.IGNORECASE)
@@ -502,11 +503,158 @@ def merge_substitutions(tokens):
     return out
 
 
-def sub_files(word: str):
-    """(files read verbatim, files read through a filter) named inside the `$( ... )`/backticks of `word`: a lone
+def shell_substitutions(text: str, *, heredoc: bool = False, _depth: int = 0) -> list[str]:
+    """Active `$( ... )` and backtick bodies that POSIX/bash/zsh execute in `text`.
+
+    Single-quoted `'...'` and ANSI-C `$'...'` spans do not expand substitutions and are skipped;
+    unquoted and double-quoted `"..."` spans do (honouring `\\` escapes, `#` comments at word start,
+    nested quotes inside `$( ... )`, and nested substitutions). In an unquoted heredoc (`heredoc=True`),
+    `'` and `"` are literal characters and do not suppress substitutions. Unclosed `'...'`/`$'...'`
+    fail closed (the tail is scanned rather than skipped). Linear in `len(text)`.
+    """
+    out: list[str] = []
+    stack: list[tuple] = [("heredoc",) if heredoc else ("top",)]
+    i, n = 0, len(text)
+    at_word_start = not heredoc
+    squote_dead = ansi_dead = backtick_dead = False
+
+    while i < n:
+        frame = stack[-1][0]
+        ch = text[i]
+
+        if ch == "#" and at_word_start and frame in ("top", "cmdsub", "paren"):
+            nl = text.find("\n", i + 1)
+            i = n if nl == -1 else nl + 1
+            at_word_start = True
+            continue
+
+        if ch == "'" and frame in ("top", "cmdsub", "paren"):
+            if not squote_dead:
+                end = text.find("'", i + 1)
+                if end != -1:
+                    i = end + 1
+                    at_word_start = False
+                    continue
+                squote_dead = ansi_dead = True
+            i += 1
+            at_word_start = False
+            continue
+
+        if ch == "$" and i + 1 < n and text[i + 1] == "'" and frame in ("top", "cmdsub", "paren"):
+            if not ansi_dead:
+                j = i + 2
+                closed = False
+                while j < n:
+                    if text[j] == "\\":
+                        j += 2
+                    elif text[j] == "'":
+                        closed = True
+                        j += 1
+                        break
+                    else:
+                        j += 1
+                if closed:
+                    i = j
+                    at_word_start = False
+                    continue
+                ansi_dead = True
+            i += 2
+            at_word_start = False
+            continue
+
+        if ch == '"' and frame != "heredoc":
+            if frame == "dquote":
+                stack.pop()
+            else:
+                stack.append(("dquote",))
+            i += 1
+            at_word_start = False
+            continue
+
+        if ch == "\\":
+            if frame in ("dquote", "heredoc"):
+                if i + 1 < n and text[i + 1] in ("$", "`", "\\", "\n", '"' if frame == "dquote" else ""):
+                    i += 2
+                else:
+                    i += 1
+            else:
+                i += 2 if i + 1 < n else 1
+                at_word_start = False
+            continue
+
+        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            stack.append(("cmdsub", i + 2))
+            i += 2
+            at_word_start = True
+            continue
+
+        if ch == "(" and frame in ("cmdsub", "paren"):
+            stack.append(("paren",))
+            i += 1
+            at_word_start = True
+            continue
+
+        if ch == ")" and frame == "paren":
+            stack.pop()
+            i += 1
+            at_word_start = False
+            continue
+
+        if ch == ")" and frame == "cmdsub":
+            _, start = stack.pop()
+            out.append(text[start:i])
+            i += 1
+            at_word_start = False
+            continue
+
+        if ch == "`":
+            if not backtick_dead:
+                in_dq = frame == "dquote"
+                j = i + 1
+                buf = []
+                closed = False
+                while j < n:
+                    if text[j] == "\\" and j + 1 < n and text[j + 1] in ("$", "`", "\\", "\n", '"' if in_dq else ""):
+                        if text[j + 1] != "\n":
+                            buf.append(text[j + 1])
+                        j += 2
+                    elif text[j] == "`":
+                        closed = True
+                        j += 1
+                        break
+                    else:
+                        buf.append(text[j])
+                        j += 1
+                if closed:
+                    inner = "".join(buf)
+                    out.append(inner)
+                    if _depth < 4 and ("$(" in inner or "`" in inner):
+                        out.extend(shell_substitutions(inner, _depth=_depth + 1))
+                    i = j
+                    at_word_start = False
+                    continue
+                backtick_dead = True
+            i += 1
+            at_word_start = False
+            continue
+
+        if frame in ("top", "cmdsub", "paren"):
+            at_word_start = ch in WORD_BREAK
+        i += 1
+
+    # Unclosed `$( ...`: emit only the outermost one (keeps O(N) on `"$(" * 8000` while failing closed)
+    for item in stack:
+        if item[0] == "cmdsub":
+            out.append(text[item[1]:])
+            break
+    return out
+
+
+def sub_files_for_inners(inners):
+    """(files read verbatim, files read through a filter) from extracted substitution bodies: a lone
     `cat F ...` or `< F` keeps the file's fence; anything else (grep, sed, head, `<F tr`, a pipe) is a filter."""
     plain, filt = [], []
-    for inner in substitutions(word):
+    for inner in inners:
         toks = tokenize(inner)[0]
         words = [t for t in toks if t and not set(t) <= set(PUNCT)]
         piped = any(t and set(t) <= set(PUNCT) and "|" in t for t in toks)
@@ -518,6 +666,11 @@ def sub_files(word: str):
         else:
             filt.extend(words)
     return plain, filt
+
+
+def sub_files(word: str):
+    """(files read verbatim, files read through a filter) named inside the `$( ... )`/backticks of `word`."""
+    return sub_files_for_inners(substitutions(word))
 
 
 def prefix_stripped(words):
@@ -566,16 +719,31 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
         if depth < 3 and shell_head(head):     # a script fed to a shell: its gh writes read their operand files
             collect(body, cwd, scan, depth + 1)
     pipes = split_pipelines(tokens, cwd, scan.expand)
+    cwds = []
+    for pipe in pipes:
+        for seg in pipe.segments:
+            if seg["cwd"] not in cwds:
+                cwds.append(seg["cwd"])
+    active_subs = shell_substitutions(cleaned)
     own = Counter()                            # the write's own argument words, counted: a second identical word is another word
+    seen_sub_reads = set()
 
-    def subs(w: str, at: str) -> None:
-        """Files a `$( ... )`/backtick inside `w` reads: a lone `cat F` keeps its fence, a filter's output does not."""
-        if "$(" in w or "`" in w:
-            plain, filt = sub_files(w)
+    def scan_subs(inners, dirs) -> None:
+        """Files read by active `$( ... )`/backticks: a lone `cat F` keeps its fence, a filter's output does not."""
+        if not inners:
+            return
+        plain, filt = sub_files_for_inners(inners)
+        for at in dirs:
             for f in plain:
-                scan.add_file(f, at, operand=True)
+                key = (at, f, False)
+                if key not in seen_sub_reads:
+                    seen_sub_reads.add(key)
+                    scan.add_file(f, at, operand=True)
             for f in filt:
-                scan.add_file(f, at, operand=True, raw=True)
+                key = (at, f, True)
+                if key not in seen_sub_reads:
+                    seen_sub_reads.add(key)
+                    scan.add_file(f, at, operand=True, raw=True)
 
     def feeder(w: str, seg, raw: bool = False) -> None:
         scan.add(w)
@@ -585,6 +753,11 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                 scan.incidental += 1
                 for content in found:
                     scan.add(content, raw=raw)
+    if depth < 3:
+        for inner in active_subs:
+            if "gh" in inner:
+                for at in cwds[:8] or [cwd]:
+                    collect(inner, at, scan, depth + 1)
     for pipe in pipes:
         gh = [(seg, gh_invocation(seg["words"])) for seg in pipe.segments]
         writes = [(seg, g) for seg, g in gh if g and is_write(g[0], g[1], g[2])]
@@ -602,11 +775,6 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                 if code and depth < 3:
                     collect(code[0], seg["cwd"], scan, depth + 1)
                     break
-            if depth < 3:
-                for w in words:
-                    if "gh" in w and ("$(" in w or "`" in w):
-                        for inner in substitutions(w):
-                            collect(inner, seg["cwd"], scan, depth + 1)
         if not writes:
             continue
         scan.write = scan.token_write = True
@@ -638,26 +806,42 @@ def collect(command: str, cwd: str, scan: Scan, depth: int = 0) -> None:
                 own[w] -= 1                    # so a word that only equals a flag word elsewhere is scanned as written (am-02, C3)
             else:
                 scan.add(w)
-        cwds = []                              # `cd DIR && BODY="$(cat raw.md)"; gh ... "$BODY"`: each segment's own cwd
-        for pipe in pipes:
-            for seg in pipe.segments:
-                for w in seg["words"]:
-                    subs(w, seg["cwd"])
-                if seg["cwd"] not in cwds:
-                    cwds.append(seg["cwd"])
+        sub_dirs = cwds[:8] or [cwd]           # `cd DIR && BODY="$(cat raw.md)"; gh ... "$BODY"`: tracked cwds + event cwd
+        scan_subs(active_subs, sub_dirs)
         for body, _head, quoted in bodies:
             scan.add(body)
             if not quoted:                     # an unquoted heredoc expands its `$( )` lines; a quoted one does not
-                for at in cwds[:8] or [cwd]:
-                    subs(body, at)
+                scan_subs(shell_substitutions(body, heredoc=True), sub_dirs)
 
 
-def judge(command: str, cwd: str, am_loader) -> str:
-    """The deny reason, or "" to allow. `am_loader` is called only for a command that holds a gh write."""
-    if "gh" not in command:
+def collect_argv(argv: list[str], cwd: str, scan: Scan, stdin_path: str | None = None) -> None:
+    """Gather what an already-expanded `gh` process argv (e.g. from `bin/ade-gh-guard`) sends.
+    No shell runs backticks, `$( )`, heredocs or variable expansions on these words; only the write's
+    own arguments, its operand files and its spooled stdin are scanned (queue #117)."""
+    g = gh_invocation(argv)
+    if not (g and is_write(g[0], g[1], g[2])):
+        return
+    scan.write = scan.token_write = True
+    for shown in prefix_stripped(g[2]):
+        scan.add(shown, force=True)
+    for f in operand_files(g[0], g[2]):
+        scan.add_file(f, cwd, operand=True)
+    if stdin_path:
+        scan.add_file(stdin_path, cwd, operand=True)
+
+
+def judge(command: str, cwd: str, am_loader, *, argv: list[str] | None = None,
+          stdin_path: str | None = None) -> str:
+    """The deny reason, or "" to allow. `am_loader` is called only for a command that holds a gh write.
+    When `argv` is given (real process argv from `bin/ade-gh-guard`), no shell parsing or substitution
+    expansion runs on its words."""
+    if argv is None and "gh" not in command:
         return ""
     scan = Scan(cwd)
-    collect(command, cwd, scan)
+    if argv is not None:
+        collect_argv(argv, cwd, scan, stdin_path=stdin_path)
+    else:
+        collect(command, cwd, scan)
     if not scan.write:
         return ""
     am = am_loader()

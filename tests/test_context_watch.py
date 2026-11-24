@@ -525,7 +525,11 @@ def test_nudge_band_ladder_matches_the_hook_against_the_real_ceiling():
     assert cw.nudge_band(270_000, 267_000) == "wall"
     assert cw.nudge_band(20_000, 67_000) == "ok"  # a fresh session is not hard on a tiny wall (ASK_FLOOR)
     assert cw.nudge_band(66_999, 67_000) == "ok" and cw.nudge_band(67_000, 67_000) == "wall"
-    assert cw.nudge_band(79_999, 117_000) == "ok" and cw.nudge_band(80_000, 117_000) == "hard"
+    # queue #98: floor-clamped wall (117k -> ask 80k) requires ASK_MIN_GROWTH before hard
+    assert cw.nudge_band(85_000, 117_000) == "ok"
+    assert cw.nudge_band(85_000, 117_000, growth=0) == "ok"
+    assert cw.nudge_band(79_999, 117_000, growth=30_000) == "ok"
+    assert cw.nudge_band(80_000, 117_000, growth=16_000) == "hard"
 
 
 def test_paseo_meter_window_is_the_manifest_not_autocompact():
@@ -585,12 +589,16 @@ def test_ceiling_and_bands_are_the_hooks_own_functions_one_copy(box, monkeypatch
         wall = cw.ceiling(settings, model)
         assert wall == hook.compaction_wall(settings, model)
         tiers = hook._tiers(wall)
-        for total in range(0, wall + 5_000, 1_000):
-            band = cw.nudge_band(total, wall)
-            level = hook._level(total, 0, tiers)
-            assert (band in ("hard", "wall")) == (level >= 2), (settings, model, total)
-            if band == "boundary":
-                assert level < 2 and total >= tiers.boundary_total
-            if total < tiers.boundary_total:
-                assert band == "ok"
+        for growth in (0, hook.ASK_MIN_GROWTH):
+            for total in range(0, wall + 5_000, 1_000):
+                band = cw.nudge_band(total, wall, growth=growth)
+                level = hook._level(total, growth, tiers)
+                if total >= wall:
+                    assert band == "wall", (settings, model, total, growth)
+                else:
+                    assert (band == "hard") == (level >= 2), (settings, model, total, growth)
+                if band == "boundary":
+                    assert level < 2 and total >= tiers.boundary_total
+                if total < tiers.boundary_total and growth < hook.EARLY_GROWTH:
+                    assert band == "ok"
     assert not hasattr(cw, "_window") and not hasattr(cw, "MAX_WINDOW")

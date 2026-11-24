@@ -623,3 +623,78 @@ def test_hook_imports_without_fcntl(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.fcntl is None
+
+
+@pytest.mark.parametrize("window", [120_000, 150_000, 163_000])
+def test_q98_small_window_successor_above_80k_waits_for_growth(box, tmp_path, window):
+    """Queue #98 (PR 862 L2): on 114k-163k compaction windows where ask_total clamps to ASK_FLOOR
+    (80k), a fresh successor starting above 80k must not immediately re-hand-off on turn 1, and
+    must fire once it grows by ASK_MIN_GROWTH."""
+    (tmp_path / "settings.json").write_text(json.dumps({"autoCompactWindow": window}))
+    transcript = tmp_path / f"successor-{window}.jsonl"
+
+    def usage(total):
+        return json.dumps({"message": {"usage": {"input_tokens": total,
+                           "cache_read_input_tokens": 0}}}) + "\n"
+
+    def prompt(total, sid):
+        with transcript.open("a") as stream:
+            stream.write(usage(total))
+        payload = {"session_id": sid, "hook_event_name": "UserPromptSubmit",
+                   "transcript_path": str(transcript)}
+        return payload
+
+    # Turn 1: successor starts at 85k (> 80k), growth = 0 -> silent (no hard or boundary handoff).
+    sid = f"succ-{window}"
+    transcript.write_text(usage(85_000))
+    box.hook.STATE_PATH.unlink(missing_ok=True)
+    # Run through box's stdin capture by pointing transcript directly via helper:
+    import contextlib
+    buf = io.StringIO()
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(json.dumps({
+            "session_id": sid, "hook_event_name": "UserPromptSubmit",
+            "transcript_path": str(transcript),
+        }))
+        with contextlib.redirect_stdout(buf):
+            box.hook.main()
+        assert buf.getvalue() == ""
+        assert not box.hook.LOG_PATH.exists()
+
+        # Turn 2: modest growth below ASK_MIN_GROWTH (+10k -> 95k) -> still no handoff.
+        buf = io.StringIO()
+        sys.stdin = io.StringIO(json.dumps(prompt(85_000 + box.hook.ASK_MIN_GROWTH - 1, sid)))
+        with contextlib.redirect_stdout(buf):
+            box.hook.main()
+        assert buf.getvalue() == ""
+
+        # Turn 3: crosses ASK_MIN_GROWTH -> fires hard + boundary handoff.
+        buf = io.StringIO()
+        sys.stdin = io.StringIO(json.dumps(prompt(85_000 + box.hook.ASK_MIN_GROWTH, sid)))
+        with contextlib.redirect_stdout(buf):
+            box.hook.main()
+        out = buf.getvalue()
+        assert "Context is large:" in out and "At the next task completion" in out
+        assert [r["kind"] for r in box.records()] == ["ask", "midtask", "boundary"]
+    finally:
+        sys.stdin = old_stdin
+
+
+def test_q98_small_window_low_baseline_still_fires_at_80k_and_300k_window_unchanged(box, tmp_path):
+    """A low-floor session on a 150k window still triggers at 80k once grown, and the live 300k
+    window keeps its exact 187k boundary / 217k hard thresholds regardless of small growth."""
+    (tmp_path / "settings.json").write_text(json.dumps({"autoCompactWindow": 150_000}))
+    assert box(80_000, sid="s-low-150k")  # baseline 50k -> growth 30k >= ASK_MIN_GROWTH
+    assert [r["kind"] for r in box.records()] == ["ask", "midtask", "boundary"]
+
+    # Restore live 300k window: boundary at 187k and hard at 217k stay unchanged even with <16k growth.
+    (tmp_path / "settings.json").write_text(json.dumps({"autoCompactWindow": 300_000}))
+    box.hook.STATE_PATH.write_text(json.dumps({
+        "s-300k-b": {"baseline": 180_000},
+        "s-300k-h": {"baseline": 210_000},
+    }))
+    out_b = box(187_000, sid="s-300k-b")
+    assert "At the next task completion" in out_b and "Context is large:" not in out_b
+    out_h = box(217_000, sid="s-300k-h")
+    assert "Context is large:" in out_h and "267,000" in out_h

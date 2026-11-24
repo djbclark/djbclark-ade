@@ -10,9 +10,9 @@ This helper judges the REAL argv, cwd, operand files and stdin of the `gh` proce
   pass    (a read, a non-body write, a body with no live marker): exec the real gh with the same argv, stdin and environment
   refuse  (a write that carries a live marker, or one this gate cannot read): reason on stderr, exit 4, no exec
 
-How: `gh_invocation` finds the write (`pr`/`issue` create|edit|comment|review|close|reopen, `api` with a body flag), then the hook's `judge` runs on
-`shlex.join(["gh", *argv])`, a command this helper builds from the real argv (so it has no lexing to get wrong). A stdin the argv reads
-(`--body-file -`, `-F-`, `--input -`, `-F body=@-`) is spooled whole (never cut: gh submits every byte) into a private temp file, judged as `< FILE`, then handed to the real gh as its fd 0.
+How: `gh_invocation` finds the write (`pr`/`issue` create|edit|comment|review|close|reopen, `api` with a body flag), then the hook's `judge` runs directly on
+the real `argv` (no shell re-quoting or command-substitution expansion on already-expanded process words; queue #117). A stdin the argv reads
+(`--body-file -`, `-F-`, `--input -`, `-F body=@-`) is spooled whole (never cut: gh submits every byte) into a private temp file, judged via `stdin_path`, then handed to the real gh as its fd 0.
 Fails closed ONLY for a write that takes a body and that this gate cannot read (an error in `judge`); everything else that goes wrong runs the real gh.
 The real gh is ADE_REAL_GH (the shim passes it to this helper alone, which pops it) or the first non-shim `gh` on PATH; it is run with os.execv.
 Limits: docs/adversary-gh-shim.md.
@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import shlex
 import sys
 import tempfile
 
@@ -73,8 +72,7 @@ def judge_argv(argv: list[str], stdin_path: str | None, gate) -> str:
     g = gate.gh_invocation(words)
     if not (g and gate.is_write(g[0], g[1], g[2])):
         return ""                              # no body-taking write: nothing to judge
-    command = shlex.join(words) + (" < " + shlex.quote(stdin_path) if stdin_path else "")
-    return gate.judge(command, os.getcwd(), gate._checker)
+    return gate.judge("", os.getcwd(), gate._checker, argv=words, stdin_path=stdin_path)
 
 
 def run(argv: list[str], env=None) -> int:
