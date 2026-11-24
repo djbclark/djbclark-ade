@@ -34,7 +34,7 @@ status = "landed:2"
 upstream = "https://github.com/getpaseo/paseo/issues/10536"
 trial_required = false
 order = 12
-notes = "branch fix/desktop-app-dist-precompress on upstream/main ec22b8265, pushed to frdminc/paseo (local worktree /Users/djbclark/src/paseo-app-dist-precompress-wt); no upstream PR yet, on purpose: CONTRIBUTING needs QA evidence from build 2; report /Users/djbclark/.local/state/agent-reports/afa869f0-0e51-4ab7-937e-ccdc72f2c3af/app-dist-precompress-report.md; build-2 check: the packaged app-dist must contain .br/.gz beside index-*.js | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23); verified live on bigmac: 127.0.0.1:7263 serves .br 4,062,995 B / .gz 5,643,552 B vs 25,300,820 B identity"
+notes = "branch fix/desktop-app-dist-precompress on upstream/main ec22b8265, pushed to frdminc/paseo (local worktree /Users/djbclark/src/paseo-app-dist-precompress-wt); report /Users/djbclark/.local/state/agent-reports/afa869f0-0e51-4ab7-937e-ccdc72f2c3af/app-dist-precompress-report.md; build-2 check: the packaged app-dist must contain .br/.gz beside index-*.js | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23); verified live on bigmac: 127.0.0.1:7263 serves .br 4,062,995 B / .gz 5,643,552 B vs 25,300,820 B identity | upstream PR https://github.com/getpaseo/paseo/pull/10635 (OPEN, closes #10536)"
 
 [[pick]]
 id = "paseo-sidebar-nav-divider"
@@ -43,10 +43,10 @@ repo = "frdminc/paseo"
 commit = "d92ff0929d281a69e9f2575f22a3f303205c9bf3"
 intent = "draggable sidebar top-nav divider"
 target = "desktop-build-2"
-status = "carried"
+status = "landed:2"
 upstream = "https://github.com/getpaseo/paseo/discussions/10429"
 order = 15
-notes = "branch feat/sidebar-nav-divider; cherry-picked from 248cd11091076c758cf1d8c4b37b462e1bb97784 onto upstream/main ec22b8265, 10 files +395/-43; issue getpaseo/paseo#9872; upstream PR pending from lead b89b4844-9707-43b0-99c6-18795f4c7c29; already in build 2 base via 248cd110, so apply reports already-present"
+notes = "branch feat/sidebar-nav-divider; cherry-picked from 248cd11091076c758cf1d8c4b37b462e1bb97784 onto upstream/main ec22b8265, 10 files +395/-43; issue getpaseo/paseo#9872; upstream PR pending from lead b89b4844-9707-43b0-99c6-18795f4c7c29; already in build 2 base via 248cd110, so apply reports already-present | landed in desktop-build-2 (65d5323a0 in local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, 2026-11-23)"
 
 [[pick]]
 id = "paseo-about-fork-marker"
@@ -139,7 +139,7 @@ status = "landed:2"
 upstream = "https://github.com/getpaseo/paseo/issues/10539"
 trial_required = false
 order = 13
-notes = "branch fix/worktree-setup-sharp-global-libvips on frdminc/paseo, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74; build-2 check: a fresh worktree from the build-2 app completes its Setup tab; only worktrees whose base contains the commit benefit | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac)"
+notes = "branch fix/worktree-setup-sharp-global-libvips on frdminc/paseo, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74; build-2 check: a fresh worktree from the build-2 app completes its Setup tab; only worktrees whose base contains the commit benefit | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23, SMOKE PASS live on bigmac) | upstream PR https://github.com/getpaseo/paseo/pull/10636 (OPEN, closes #10539)"
 
 [[pick]]
 id = "plugin-acp-elicitation-forms"
@@ -152,7 +152,7 @@ status = "landed:2"
 trial_required = false
 upstream = "https://github.com/getpaseo/paseo/discussions/7470"
 order = 45
-notes = "branch feat/plugin-acp-elicitation-forms in the local worktree /Users/djbclark/src/paseo-plugin-elicitation-wt, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74, local only (not pushed); also getpaseo/paseo issue 9355 (https://github.com/getpaseo/paseo/issues/9355); build-2 check: needs a live agy acp session in build 2, hence trial_required | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23); live agy acp ask_question trial PASSED on bigmac (both single-select and multi-select with comma-containing labels), hold cleared and trial satisfied"
+notes = "branch feat/plugin-acp-elicitation-forms in the local worktree /Users/djbclark/src/paseo-plugin-elicitation-wt, base upstream/main ec22b8265924164c7deb749e2d3b6c9c425f6d74, local only (not pushed); also getpaseo/paseo issue 9355 (https://github.com/getpaseo/paseo/issues/9355); build-2 check: needs a live agy acp session in build 2, hence trial_required | landed in desktop-build-2 (v0.17.3, local/main-desktop-v0173-fork2-20261122 @ 2c5cb9d7fbe13bc9c36515d706e45cae48495d57, WarpBuild run 45089265694, 2026-11-23); live agy acp ask_question trial PASSED on bigmac (both single-select and multi-select with comma-containing labels), hold cleared and trial satisfied | upstream PR https://github.com/getpaseo/paseo/pull/10637 (rebased on upstream/main at 08fe5e5d5; closed by paseo-bot under workflow-discussion policy -> follow-up comment posted on https://github.com/getpaseo/paseo/discussions/7470#discussioncomment-19855124)"
 
 [[pick]]
 id = "paseo-settings-search"
