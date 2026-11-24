@@ -515,38 +515,86 @@ def test_ticket_never_covers_other_modes(tmp_path, monkeypatch):
     assert {row[1] for row in approvals_log(tmp_path)} == {"lw-pending-approved", "lw-ci-approved"}
 
 
-def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path):
+def run_inproc(tmp_path, monkeypatch, capsys, *args, account_home=None, **extra_env):
+    """Run bin/load-watch in-process with an injected trusted ACCOUNT_HOME (no env spoofing)."""
+    from types import SimpleNamespace
+
+    env = lw_env(tmp_path, **extra_env)
+    with monkeypatch.context() as mp:
+        for k in ("TENDCF_SITE", "TENDCF_OPS_ROOT", "OPS_ROOT", "XDG_CONFIG_HOME", "ADE_APPROVAL_GATE_BIN"):
+            if k not in extra_env:
+                mp.delenv(k, raising=False)
+        for k, v in env.items():
+            mp.setenv(k, v)
+        lw = load_module()
+        acct = tmp_path / "home" if account_home is None else account_home
+        mp.setattr(lw, "ACCOUNT_HOME", acct)
+        resolved = lw.resolve_bgrun_bin(acct)
+        mp.setattr(lw, "BGRUN_BIN", resolved)
+        mp.setattr(lw, "_DEFAULT_BGRUN_BIN", resolved)
+        mp.setattr(sys, "argv", ["load-watch", *args])
+        rc = lw.main(supervise=False)
+        cap = capsys.readouterr()
+        return SimpleNamespace(returncode=rc, stdout=cap.out, stderr=cap.err)
+
+
+def test_ci_decide_local_is_recorded_under_a_live_ticket_with_no_dialog(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
     ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
     bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
     bg_calls = stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
-    r = run(tmp_path, "ci", "decide", str(repo), "local", "offline focused tests")
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "offline focused tests")
     assert r.returncode == 0 and rows(tmp_path)[0][:2] == [os.path.realpath(repo), "local"]
     assert rows(tmp_path)[0][2] == "[ticket 0badc0de] offline focused tests"  # recorded as ticket-bound
     assert not ask_calls.exists() and bg_calls.read_text().splitlines() == [f"approve-local check {os.path.realpath(repo)}"]
     assert "0badc0de until" in r.stderr
-    top = os.path.realpath(repo)
-    assert run(tmp_path, "ci", "check", str(repo)).stdout.startswith("local\t[ticket 0badc0de] ")  # live: honoured
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(repo)).stdout.startswith("local\t[ticket 0badc0de] ")  # live: honoured
     stub_bgrun(bgrun, 1)  # ticket expired or revoked: the row no longer counts
-    r = run(tmp_path, "ci", "check", str(repo))
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(repo))
     assert r.returncode == 1 and r.stdout == "" and "no live ticket covers" in r.stderr
-    r = run(tmp_path, "ci", "decide", str(repo), "local", "new note")  # a ticket row's note cannot be changed into a permanent row without the dialog
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "new note")  # a ticket row's note cannot be changed into a permanent row without the dialog
     assert r.returncode == 1 and rows(tmp_path)[0][2].startswith("[ticket ")
     stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
-    r = run(tmp_path, "ci", "decide", str(repo), "pending", "note")  # a ticket is not a pending approval: the (denying) dialog decides
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "pending", "note")  # a ticket is not a pending approval: the (denying) dialog decides
     assert r.returncode == 1
 
 
-def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_path, monkeypatch):
-    """Queue #123 / Finding 1: Touch ID ticket authority reads ONLY trusted $HOME paths and ignores caller env overrides."""
+def test_spoofed_home_env_cannot_redirect_touch_id_ticket_authority(tmp_path, monkeypatch):
+    """Round 3 HIGH #1: real subprocess with spoofed HOME + env vars cannot redirect Touch ID ticket verification."""
     monkeypatch.delenv("TENDCF_SITE", raising=False)
     monkeypatch.delenv("TENDCF_OPS_ROOT", raising=False)
     monkeypatch.delenv("OPS_ROOT", raising=False)
     repo = _repo(tmp_path)
     stub_sudo_ask(tmp_path, 1)
-    home = tmp_path / "home"
-    (home / "tendcf-ops" / "tendcf-private-acme").mkdir(parents=True)
-    tendcf_pub_bgrun = home / "tendcf-ops" / "tendcf-public-acme" / "bin" / "bgrun"
+    evil_home = tmp_path / "home"
+    evil_local_calls = stub_bgrun(evil_home / ".local" / "bin" / "bgrun", 0, out="deadbeef until 2099-01-01 00:00 EST")
+    evil_legacy_calls = stub_bgrun(evil_home / "ops" / "site-private-djbclark" / "bin" / "bgrun", 0, out="deadbeef until 2099-01-01 00:00 EST")
+    (evil_home / "tendcf-ops" / "tendcf-private-evil").mkdir(parents=True)
+    evil_tendcf_calls = stub_bgrun(evil_home / "tendcf-ops" / "tendcf-public-evil" / "bin" / "bgrun", 0, out="deadbeef until 2099-01-01 00:00 EST")
+    evil_cfg = evil_home / ".config" / "tendcf" / "active-site"
+    evil_cfg.parent.mkdir(parents=True)
+    evil_cfg.write_text("evil\n", encoding="utf-8")
+
+    r = run(
+        tmp_path, "ci", "decide", str(repo), "local", "spoofed home",
+        TENDCF_OPS_ROOT=str(evil_home / "tendcf-ops"),
+        TENDCF_SITE="evil",
+        OPS_ROOT=str(evil_home / "ops"),
+        XDG_CONFIG_HOME=str(evil_home / ".config"),
+    )
+    assert r.returncode == 1
+    assert not evil_local_calls.exists()
+    assert not evil_legacy_calls.exists()
+    assert not evil_tendcf_calls.exists()
+
+
+def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_path, monkeypatch, capsys):
+    """Queue #123 / Finding 1: Touch ID ticket authority reads ONLY trusted OS account home paths and ignores caller env overrides."""
+    repo = _repo(tmp_path)
+    stub_sudo_ask(tmp_path, 1)
+    acct_home = tmp_path / "home"
+    (acct_home / "tendcf-ops" / "tendcf-private-acme").mkdir(parents=True)
+    tendcf_pub_bgrun = acct_home / "tendcf-ops" / "tendcf-public-acme" / "bin" / "bgrun"
     stub_bgrun(tendcf_pub_bgrun, 0, out="11223344 until 2026-11-25 02:10 EST")
 
     # Caller-supplied env overrides (TENDCF_OPS_ROOT, TENDCF_SITE, OPS_ROOT, XDG_CONFIG_HOME) MUST NOT
@@ -560,46 +608,46 @@ def test_ci_decide_local_dual_reads_local_bin_and_tendcf_bgrun_fail_closed(tmp_p
     alt_xdg.parent.mkdir(parents=True)
     alt_xdg.write_text("acme\n", encoding="utf-8")
 
-    r_env_site = run(tmp_path, "ci", "decide", str(repo), "local", "env site", TENDCF_SITE="acme")
+    r_env_site = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "env site", account_home=acct_home, TENDCF_SITE="acme")
     assert r_env_site.returncode == 1
-    r_env_root = run(tmp_path, "ci", "decide", str(repo), "local", "env root", TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
+    r_env_root = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "env root", account_home=acct_home, TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
     assert r_env_root.returncode == 1
-    r_env_legacy = run(tmp_path, "ci", "decide", str(repo), "local", "env legacy", OPS_ROOT=str(alt_legacy))
+    r_env_legacy = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "env legacy", account_home=acct_home, OPS_ROOT=str(alt_legacy))
     assert r_env_legacy.returncode == 1
-    r_env_xdg = run(tmp_path, "ci", "decide", str(repo), "local", "env xdg", XDG_CONFIG_HOME=str(tmp_path / "alt-xdg"))
+    r_env_xdg = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "env xdg", account_home=acct_home, XDG_CONFIG_HOME=str(tmp_path / "alt-xdg"))
     assert r_env_xdg.returncode == 1
 
-    # Trusted $HOME/.config/tendcf/active-site resolves $HOME/tendcf-ops/tendcf-public-acme/bin/bgrun.
-    trusted_cfg = home / ".config" / "tendcf" / "active-site"
+    # Trusted <ACCOUNT_HOME>/.config/tendcf/active-site resolves <ACCOUNT_HOME>/tendcf-ops/tendcf-public-acme/bin/bgrun.
+    trusted_cfg = acct_home / ".config" / "tendcf" / "active-site"
     trusted_cfg.parent.mkdir(parents=True)
     trusted_cfg.write_text("acme\n", encoding="utf-8")
-    r_trusted = run(tmp_path, "ci", "decide", str(repo), "local", "tendcf ticket", TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
+    r_trusted = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "tendcf ticket", account_home=acct_home, TENDCF_OPS_ROOT=str(alt_ops), TENDCF_SITE="evil")
     assert r_trusted.returncode == 0, r_trusted.stderr
     assert rows(tmp_path)[0][2] == "[ticket 11223344] tendcf ticket"
 
-    # Trusted ~/.local/bin/bgrun takes top precedence even without active-site.
+    # Trusted <ACCOUNT_HOME>/.local/bin/bgrun takes top precedence even without active-site.
     trusted_cfg.unlink()
-    local_bgrun = home / ".local" / "bin" / "bgrun"
+    local_bgrun = acct_home / ".local" / "bin" / "bgrun"
     stub_bgrun(local_bgrun, 0, out="55667788 until 2026-11-25 03:10 EST")
     (tmp_path / "ci-only.tsv").unlink()
-    r_local = run(tmp_path, "ci", "decide", str(repo), "local", "local bin ticket")
+    r_local = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "local bin ticket", account_home=acct_home)
     assert r_local.returncode == 0, r_local.stderr
     assert rows(tmp_path)[0][2] == "[ticket 55667788] local bin ticket"
 
 
-def test_a_ticket_never_overwrites_a_ci_decision_or_records_a_glob(tmp_path):
+def test_a_ticket_never_overwrites_a_ci_decision_or_records_a_glob(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
     ask_calls = stub_sudo_ask(tmp_path, 1)  # a dialog would be denied
     bg_calls = stub_bgrun(tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun", 0, out="0badc0de until 2026-11-22 02:10 EST")
-    assert run(tmp_path, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
-    r = run(tmp_path, "ci", "decide", str(repo), "local", "flip")  # live ticket, but a recorded `ci` decision: asks (and is denied)
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "ci", "scripts/ci-run").returncode == 0
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "flip")  # live ticket, but a recorded `ci` decision: asks (and is denied)
     assert r.returncode == 1 and rows(tmp_path)[0][1] == "ci" and ask_calls.exists() and not bg_calls.exists()
-    g = run(tmp_path, "ci", "decide", str(tmp_path) + "/*", "local", "everywhere")  # a glob row: asks too, ticket or no ticket
+    g = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(tmp_path) + "/*", "local", "everywhere")  # a glob row: asks too, ticket or no ticket
     assert g.returncode == 1 and all(r[0] != str(tmp_path) + "/*" for r in rows(tmp_path))
     assert not bg_calls.exists()
 
 
-def test_a_ci_row_recorded_during_the_ticket_check_is_not_overwritten(tmp_path):
+def test_a_ci_row_recorded_during_the_ticket_check_is_not_overwritten(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
     top = os.path.realpath(repo)
     ask_calls = stub_sudo_ask(tmp_path, 1)  # the dialog is denied
@@ -609,12 +657,12 @@ def test_a_ci_row_recorded_during_the_ticket_check_is_not_overwritten(tmp_path):
     # the stub covers the directory, but writes a `ci` row for it first (another agent deciding at the same moment)
     bgrun.write_text(f"#!/bin/sh\nmkdir -p '{reg.parent}'\nprintf '%s\\t%s\\t%s\\t%s\\n' '{top}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
     bgrun.chmod(0o755)
-    r = run(tmp_path, "ci", "decide", str(repo), "local", "race")
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "race")
     assert r.returncode == 1 and ask_calls.exists()  # the dialog decided (and denied), the ticket did not
     assert rows(tmp_path)[0][1] == "ci"
 
 
-def test_a_ci_row_at_the_main_checkout_or_a_glob_recorded_during_the_ticket_check_is_not_shadowed(tmp_path):
+def test_a_ci_row_at_the_main_checkout_or_a_glob_recorded_during_the_ticket_check_is_not_shadowed(tmp_path, monkeypatch, capsys):
     # the race guard must use decision() (main worktree, pasture source, covering glob), not only the row at the directory itself
     repo = _repo(tmp_path)
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -631,12 +679,12 @@ def test_a_ci_row_at_the_main_checkout_or_a_glob_recorded_during_the_ticket_chec
         reg = tmp_path / "ci-only.tsv"
         bgrun.write_text(f"#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\n' '{key}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
         bgrun.chmod(0o755)
-        r = run(tmp_path, "ci", "decide", str(wt), "local", "race")
+        r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(wt), "local", "race")
         assert r.returncode == 1 and ask_calls.exists(), key  # the dialog decided (and denied), not the ticket
         assert [row[0] for row in rows(tmp_path)] == [key]  # no row was written at the worktree
 
 
-def test_a_ci_row_at_a_pastures_source_recorded_during_the_ticket_check_is_not_shadowed(tmp_path):
+def test_a_ci_row_at_a_pastures_source_recorded_during_the_ticket_check_is_not_shadowed(tmp_path, monkeypatch, capsys):
     # the third key of decision(): a cow pasture inherits its source checkout's row (916 LOW-1; the guard must not drop it)
     pasture = tmp_path / "pasture"
     pasture.mkdir()
@@ -652,12 +700,12 @@ def test_a_ci_row_at_a_pastures_source_recorded_during_the_ticket_check_is_not_s
     reg = tmp_path / "ci-only.tsv"
     bgrun.write_text(f"#!/bin/sh\nprintf '%s\\t%s\\t%s\\t%s\\n' '{source}' ci scripts/ci-run 2026-11-21 > '{reg}'\necho '0badc0de until x'\nexit 0\n")
     bgrun.chmod(0o755)
-    r = run(tmp_path, "ci", "decide", str(pasture), "local", "race")
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(pasture), "local", "race")
     assert r.returncode == 1 and ask_calls.exists()  # the dialog decided (and denied), not the ticket
     assert [row[0] for row in rows(tmp_path)] == [source]  # no row was written at the pasture
 
 
-def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path):
+def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "x"], check=True)
@@ -666,16 +714,16 @@ def test_a_ticket_row_needs_a_live_ticket_over_the_directory_being_run(tmp_path)
     bgrun = tmp_path / "home" / "ops" / "site-private-djbclark" / "bin" / "bgrun"
     stub_sudo_ask(tmp_path, 1)
     stub_bgrun(bgrun, 0, out="0badc0de until 2026-11-22 02:10 EST")
-    assert run(tmp_path, "ci", "decide", str(repo), "local", "tests").returncode == 0
-    assert run(tmp_path, "ci", "check", str(wt)).returncode == 0  # the ticket covers the worktree too
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "decide", str(repo), "local", "tests").returncode == 0
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(wt)).returncode == 0  # the ticket covers the worktree too
     # a ticket scoped to the repo only: bgrun's check fails for the worktree path, so the inherited row does not apply there
     bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(wt)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
-    r = run(tmp_path, "ci", "check", str(wt))
+    r = run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(wt))
     assert r.returncode == 1 and "no live ticket covers" in r.stderr
-    assert run(tmp_path, "ci", "check", str(repo)).returncode == 0
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(repo)).returncode == 0
     # and the other way round: covered at the worktree but not at the row's own directory
     bgrun.write_text(f"#!/bin/sh\ncase \"$3\" in '{os.path.realpath(repo)}') exit 1 ;; esac\necho '0badc0de until x'\nexit 0\n")
-    assert run(tmp_path, "ci", "check", str(wt)).returncode == 1
+    assert run_inproc(tmp_path, monkeypatch, capsys, "ci", "check", str(wt)).returncode == 1
 
 
 def stub_approval_gate(path, rc, out="", sleep=0, extra_body=""):

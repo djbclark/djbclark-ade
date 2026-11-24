@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import errno
 import os
+import pwd
 import re
 import stat
 import sys
@@ -471,18 +472,32 @@ def find_bgrun(
     return None
 
 
-def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
-    """Fixed trusted `bgrun` paths under `home` for Touch ID / approval-authority verification.
+def real_account_home() -> Path:
+    """Return the OS account home directory from the passwd database (immune to `$HOME` spoofing)."""
+    try:
+        pw_dir = pwd.getpwuid(os.getuid()).pw_dir
+        if pw_dir and "\x00" not in pw_dir:
+            candidate = Path(pw_dir)
+            if candidate.is_absolute():
+                return candidate
+    except (KeyError, OSError, AttributeError):
+        pass
+    return Path.home()
 
-    Strictly ignores caller environment overrides (`OPS_ROOT`, `TENDCF_OPS_ROOT`, `TENDCF_SITE`,
+
+def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
+    """Fixed trusted `bgrun` paths under the OS account home for Touch ID / approval-authority verification.
+
+    Strictly ignores caller environment overrides (`HOME`, `OPS_ROOT`, `TENDCF_OPS_ROOT`, `TENDCF_SITE`,
     `XDG_CONFIG_HOME`) so a caller cannot redirect approval checks into an arbitrary checkout.
-    Resolution order under `h = Path.home() if home is None else home`:
+    Unit tests may pass an explicit `home=` path.
+    Resolution order under `h = real_account_home() if home is None else home`:
       1. `h/.local/bin/bgrun`
       2. `h/tendcf-ops/tendcf-{public,private}-<slug>/bin/bgrun` only when `h/.config/tendcf/active-site`
          selects a valid, real non-symlink pair under `h/tendcf-ops`
       3. legacy `h/ops/site-{private-djbclark,private,public-djbclark,djbclark}/bin/bgrun`
     """
-    h = Path.home() if home is None else home
+    h = real_account_home() if home is None else home
     empty_env: dict[str, str] = {}
     candidates: list[Path] = [h / ".local" / "bin" / "bgrun"]
 
@@ -499,7 +514,7 @@ def trusted_bgrun_paths(*, home: Path | None = None) -> list[Path]:
 
 
 def find_trusted_bgrun(*, home: Path | None = None) -> Path | None:
-    """Return the first existing executable trusted `bgrun` under `home` (ignoring caller env overrides)."""
+    """Return the first existing executable trusted `bgrun` under the OS account home (ignoring caller env overrides)."""
     for cand in trusted_bgrun_paths(home=home):
         try:
             if cand.is_file() and os.access(cand, os.X_OK):

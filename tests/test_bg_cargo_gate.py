@@ -137,3 +137,56 @@ await dispose();assert.equal(disposed,1);
         capture_output=True, text=True, timeout=20, env=env,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_cargo_gate_canonicalizes_symlinked_ops_roots(tmp_path):
+    """Round 3 LOW #3: bg-cargo-gate.js accepts both lexical symlink root and its canonical realpath."""
+    node = shutil.which("node")
+    assert node, "Node is required for the native OpenCode plugin regression"
+    source = ROOT / "opencode-plugins/bg-cargo-gate.js"
+
+    real_tendcf = tmp_path / "real-tendcf-ops"
+    (real_tendcf / "tendcf-public-acme" / "bin").mkdir(parents=True)
+    link_tendcf = tmp_path / "link-tendcf-ops"
+    link_tendcf.symlink_to(real_tendcf)
+
+    real_legacy = tmp_path / "real-legacy-ops"
+    (real_legacy / "site-private" / "bin").mkdir(parents=True)
+    link_legacy = tmp_path / "link-legacy-ops"
+    link_legacy.symlink_to(real_legacy)
+
+    unrelated = tmp_path / "unrelated-ops"
+    (unrelated / "tendcf-public-acme" / "bin").mkdir(parents=True)
+
+    script = r'''
+import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
+const text = readFileSync(process.argv[1], "utf8");
+const {requiresBg} = await import("data:text/javascript;base64," + Buffer.from(text).toString("base64"));
+const [lexT, realT, lexL, realL, bad] = process.argv.slice(2);
+for (const ok of [
+  `${lexT}/tendcf-public-acme/bin/bgrun cargo test`,
+  `${realT}/tendcf-public-acme/bin/bgrun cargo test`,
+  `${lexL}/site-private/bin/bgrun cargo test`,
+  `${realL}/site-private/bin/bgrun cargo test`,
+]) {
+  assert.equal(requiresBg(ok), false, ok);
+}
+assert.equal(requiresBg(`${bad}/tendcf-public-acme/bin/bgrun cargo test`), true);
+'''
+    env = {
+        **__import__("os").environ,
+        "HOME": str(tmp_path / "home"),
+        "TENDCF_OPS_ROOT": str(link_tendcf),
+        "OPS_ROOT": str(link_legacy),
+    }
+    result = subprocess.run(
+        [
+            node, "--input-type=module", "-e", script, str(source),
+            str(link_tendcf), str(real_tendcf.resolve()),
+            str(link_legacy), str(real_legacy.resolve()),
+            str(unrelated.resolve()),
+        ],
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

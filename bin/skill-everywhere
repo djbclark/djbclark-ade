@@ -127,10 +127,10 @@ _is_managed_legacy_repo_name() {
   local r=$1
   [[ $r =~ ^site-[A-Za-z0-9][A-Za-z0-9._-]*$ && $r != *-wt ]]
 }
-_is_managed_site_skill_path() {
-  local tgt=$1 sname=$2 repo_dir base rbase rel
-  [[ -n $tgt && $tgt != */../* && $tgt != */.. && $tgt == */skills/"$sname" ]] || return 1
-  repo_dir="${tgt%"/skills/$sname"}"
+_is_valid_site_skills_root() {
+  local root=$1 repo_dir base rbase rel
+  [[ -n $root && $root != */../* && $root != */.. && $root == */skills ]] || return 1
+  repo_dir="${root%/skills}"
   for base in "$managed_tendcf_base" "$HOME/tendcf-ops"; do
     [[ -n $base ]] || continue
     for rbase in "$base" "$(grealpath -- "$base" 2>/dev/null || true)"; do
@@ -153,14 +153,94 @@ _is_managed_site_skill_path() {
   done
   return 1
 }
+
+# Managed site-root provenance ledger (Finding 2, 2026-11-24): only roots `skill-everywhere` itself
+# previously installed from (or the canonical legacy default ~/ops/site-{private,public-djbclark}/skills
+# roots on a first-ever transition to a tendcf site pair before any ledger exists) are eligible for
+# automatic migration or stale-link/copy cleanup. Manually installed symlinks to arbitrary inactive
+# site layouts are never replaced or removed.
+_state_base="$HOME/.local/state"
+if [[ -n ${XDG_STATE_HOME:-} && ${XDG_STATE_HOME} == /* ]]; then
+  _state_base="$XDG_STATE_HOME"
+fi
+managed_roots_file="${SKILL_EVERYWHERE_STATE_FILE:-$_state_base/skill-everywhere/managed-roots.txt}"
+prior_managed_roots=()
+_add_prior_root() {
+  local r=$1 x
+  [[ -n $r ]] || return 0
+  _is_valid_site_skills_root "$r" || return 0
+  for x in "${prior_managed_roots[@]:-}"; do
+    [[ $x == "$r" ]] && return 0
+  done
+  prior_managed_roots+=("$r")
+}
+if [[ -f $managed_roots_file && ! -L $managed_roots_file ]]; then
+  while IFS= read -r _mr_line; do
+    _add_prior_root "$_mr_line"
+  done <"$managed_roots_file"
+elif [[ $priv_root == */tendcf-private-*/skills || $site_root == */tendcf-public-*/skills ]]; then
+  # Pre-ledger Mac transitioning from legacy ~/ops to ~/tendcf-ops for the first time.
+  _add_prior_root "$HOME/ops/site-private/skills"
+  _add_prior_root "$HOME/ops/site-public-djbclark/skills"
+fi
+
+_is_managed_site_skill_path() {
+  local tgt=$1 sname=$2 root rroot
+  [[ -n $tgt && $tgt != */../* && $tgt != */.. && $tgt == */skills/"$sname" ]] || return 1
+  for root in "${prior_managed_roots[@]:-}"; do
+    [[ -n $root ]] || continue
+    for rroot in "$root" "$(grealpath -- "$root" 2>/dev/null || true)"; do
+      [[ -n $rroot ]] || continue
+      if [[ $tgt == "$rroot/$sname" ]]; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+_root_to_grokbot_repo() {
+  local root=$1 repo_dir rname
+  repo_dir="${root%/skills}"
+  rname="${repo_dir##*/}"
+  case $rname in
+    tendcf-private-*|tendcf-public-*) printf '%s' "$rname" ;;
+    site-private|site-private-*) printf '%s' "site-private" ;;
+    site-public-*|site-djbclark) printf '%s' "site-djbclark" ;;
+    *) return 1 ;;
+  esac
+}
 _is_managed_site_grokbot_source() {
-  local line=$1 sname=$2 rest repo
+  local line=$1 sname=$2 rest repo root expected
   [[ $line == "source="* ]] || return 1
   rest="${line#source=}"
   [[ $rest == */skills/"$sname" ]] || return 1
   repo="${rest%"/skills/$sname"}"
   [[ $repo != */* ]] || return 1
-  _is_managed_tendcf_repo_name "$repo" || _is_managed_legacy_repo_name "$repo"
+  for root in "${prior_managed_roots[@]:-}"; do
+    [[ -n $root ]] || continue
+    expected="$(_root_to_grokbot_repo "$root" 2>/dev/null || true)"
+    [[ -n $expected && $repo == "$expected" ]] && return 0
+  done
+  return 1
+}
+_record_managed_roots() {
+  [[ $mode == link && $dry == 0 && $paseo_only == 0 ]] || return 0
+  [[ ! -L $managed_roots_file ]] || return 0
+  local dir tmp r merged=() x
+  for r in "${prior_managed_roots[@]:-}" "$priv_root" "$site_root"; do
+    [[ -n $r ]] || continue
+    _is_valid_site_skills_root "$r" || continue
+    local seen=0
+    for x in "${merged[@]:-}"; do
+      [[ $x == "$r" ]] && { seen=1; break; }
+    done
+    ((seen)) || merged+=("$r")
+  done
+  ((${#merged[@]})) || return 0
+  dir="$(dirname "$managed_roots_file")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$dir/.managed-roots.tmp.$$"
+  printf '%s\n' "${merged[@]}" >"$tmp" && mv -f "$tmp" "$managed_roots_file" || rm -f "$tmp"
 }
 
 # binary|skills dir to link into, or "via <dir>" when the TUI already reads a
@@ -676,6 +756,7 @@ stale_site_step() {
   done <<<"$targets"
 }
 stale_site_step
+_record_managed_roots
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

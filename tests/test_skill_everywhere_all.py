@@ -845,6 +845,7 @@ def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, t
     env.pop("TENDCF_SITE", None)
     env.pop("TENDCF_OPS_ROOT", None)
     env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
     env["SKILL_EVERYWHERE_ONLY"] = "codex,grokbot"
     grok_dir = home / "agent-data" / "workflows"
     grok_dir.mkdir(parents=True)
@@ -937,4 +938,51 @@ def test_tendcf_stage0_dual_read_skill_roots_and_fail_closed_fallback(catalog, t
     assert (links / "foreign-skill").readlink() == foreign_target
     assert (foreign_grok / "SKILL.md").read_text() == "foreign grok skill\n"
     assert run(catalog, "--check", "--all").returncode == 0
+
+
+def test_manually_installed_link_to_inactive_valid_site_layout_is_preserved(catalog, tmp_path):
+    """Round 3 MEDIUM #2: a manually installed link to another syntactically valid inactive site is never removed or replaced."""
+    home, public, _, env = catalog
+    env.pop("SKILL_EVERYWHERE_PRIVATE", None)
+    env.pop("SKILL_EVERYWHERE_SITE", None)
+    env.pop("OPS_ROOT", None)
+    env.pop("TENDCF_SITE", None)
+    env.pop("TENDCF_OPS_ROOT", None)
+    env["XDG_CONFIG_HOME"] = str(tmp_path / "xdg")
+    env["XDG_STATE_HOME"] = str(tmp_path / "state")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex"
+
+    # Active legacy roots.
+    lpriv = home / "ops" / "site-private" / "skills"
+    lsite = home / "ops" / "site-public-djbclark" / "skills"
+    lpriv.mkdir(parents=True)
+    lsite.mkdir(parents=True)
+    skill(lpriv, "legacy-priv")
+    skill(lsite, "active-site-skill")
+
+    # Another syntactically valid inactive tendcf site that skill-everywhere never managed.
+    inactive_pub = home / "tendcf-ops" / "tendcf-public-other" / "skills"
+    inactive_pub.mkdir(parents=True)
+    manual_only_src = skill(inactive_pub, "manual-inactive-skill")
+    manual_collide_src = skill(inactive_pub, "active-site-skill")
+
+    links = home / ".agents" / "skills"
+    # 1. Manually installed link to an inactive-site-only skill: routine --all and --check --all MUST preserve it silently.
+    (links / "manual-inactive-skill").symlink_to(manual_only_src)
+    r_all = run(catalog, "--all")
+    assert r_all.returncode == 0, r_all.stdout + r_all.stderr
+    assert (links / "manual-inactive-skill").readlink() == manual_only_src
+    r_chk = run(catalog, "--check", "--all")
+    assert r_chk.returncode == 0, r_chk.stdout + r_chk.stderr
+    assert "manual-inactive-skill" not in r_chk.stderr
+
+    # 2. Manually installed link to an inactive site with the SAME name as an active skill:
+    #    MUST be treated as a foreign link (`other link -> ...`, left alone, exit 1), NEVER silently replaced!
+    (links / "active-site-skill").unlink()
+    (links / "active-site-skill").symlink_to(manual_collide_src)
+    r_collide = run(catalog, "--all")
+    assert r_collide.returncode == 1
+    assert "other link ->" in r_collide.stdout
+    assert "migrating from" not in r_collide.stdout
+    assert (links / "active-site-skill").readlink() == manual_collide_src
 

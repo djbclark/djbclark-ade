@@ -278,6 +278,28 @@ def test_find_trusted_bgrun_ignores_caller_env_overrides(tmp_path: Path, monkeyp
     assert ops.find_trusted_bgrun(home=home) == local_bin
 
 
+def test_real_account_home_and_trusted_bgrun_immune_to_spoofed_home_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round 3 HIGH #1: spoofing $HOME cannot redirect real_account_home() or find_trusted_bgrun()."""
+    import pwd
+
+    expected_pw_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    evil_home = tmp_path / "evil-home"
+    _mk_exec(evil_home / ".local" / "bin" / "bgrun")
+    _mk_exec(evil_home / "ops" / "site-private-djbclark" / "bin" / "bgrun")
+    (evil_home / "tendcf-ops" / "tendcf-private-evil").mkdir(parents=True)
+    _mk_exec(evil_home / "tendcf-ops" / "tendcf-public-evil" / "bin" / "bgrun")
+    evil_cfg = evil_home / ".config" / "tendcf" / "active-site"
+    evil_cfg.parent.mkdir(parents=True)
+    evil_cfg.write_text("evil\n", encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(evil_home))
+    assert ops.real_account_home() == expected_pw_home
+    trusted_paths = ops.trusted_bgrun_paths()
+    assert all(not str(p).startswith(str(evil_home)) for p in trusted_paths)
+    found = ops.find_trusted_bgrun()
+    assert found is None or not str(found).startswith(str(evil_home))
+
+
 # --- bgrun dual-read discovery & path validation ------------------------------------------
 
 def _mk_exec(path: Path) -> Path:

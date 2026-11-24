@@ -1,5 +1,6 @@
 // 2026-10-28: require bg for Cargo compilation, including release builds.
 // This is an accidental-bypass guard, not a sandbox for arbitrary scripts.
+import {realpathSync} from "node:fs";
 const reason = "Cargo builds and tests must run through ~/.local/bin/bgrun (or ~/tendcf-ops/tendcf-{public,private}-<slug>/bin/bgrun or legacy ~/ops/site-private/bin/bgrun; use the full path). --release is not an exemption. If bgrun refuses or waits, use the repo's CI route or fix the refusal; never retry bare cargo.";
 const compile = new Set(["build", "b", "test", "t", "check", "c", "clippy", "bench", "run", "r", "rustc", "rustdoc", "doc", "d", "install", "fix", "nextest", "miri", "llvm-cov", "package", "publish"]);
 const wrappers = new Set(["env", "time", "nice", "nohup", "command", "exec", "rtk", "bgrun", "bg", "bgb", "timeout", "gtimeout", "sudo", "caffeinate", "xargs"]);
@@ -48,25 +49,42 @@ const hasPrefix = (parts, prefix) => {
   }
   return true;
 };
+const addRootWithCanonical = (list, parts) => {
+  if (!parts) return;
+  const key = parts.join("/");
+  if (!list.some((p) => p.join("/") === key)) list.push(parts);
+  try {
+    const real = realpathSync(`/${key}`);
+    const realParts = splitAbsParts(real);
+    if (realParts) {
+      const rkey = realParts.join("/");
+      if (!list.some((p) => p.join("/") === rkey)) list.push(realParts);
+    }
+  } catch {
+    // Path may not exist on disk in static/unit-test checks; lexical root remains active.
+  }
+};
 const getConfiguredRoots = () => {
+  const homeRoots = [];
   const homeParts = splitAbsParts(process?.env?.HOME);
+  addRootWithCanonical(homeRoots, homeParts);
   const tendcfRoots = [];
   if (process?.env && Object.prototype.hasOwnProperty.call(process.env, "TENDCF_OPS_ROOT")) {
     const custom = expandEnvRoot(process.env.TENDCF_OPS_ROOT, homeParts);
     if (custom) {
-      tendcfRoots.push(custom);
-      if (homeParts) tendcfRoots.push([...homeParts, "tendcf-ops"]);
+      addRootWithCanonical(tendcfRoots, custom);
+      for (const h of homeRoots) addRootWithCanonical(tendcfRoots, [...h, "tendcf-ops"]);
     }
-  } else if (homeParts) {
-    tendcfRoots.push([...homeParts, "tendcf-ops"]);
+  } else {
+    for (const h of homeRoots) addRootWithCanonical(tendcfRoots, [...h, "tendcf-ops"]);
   }
   const legacyRoots = [];
   if (process?.env?.OPS_ROOT) {
     const customLegacy = expandEnvRoot(process.env.OPS_ROOT, homeParts);
-    if (customLegacy) legacyRoots.push(customLegacy);
+    addRootWithCanonical(legacyRoots, customLegacy);
   }
-  if (homeParts) legacyRoots.push([...homeParts, "ops"]);
-  return {homeParts, tendcfRoots, legacyRoots};
+  for (const h of homeRoots) addRootWithCanonical(legacyRoots, [...h, "ops"]);
+  return {homeParts, homeRoots, tendcfRoots, legacyRoots};
 };
 const matchesAnchoredOpsRoots = (absParts) => {
   const {tendcfRoots, legacyRoots} = getConfiguredRoots();
@@ -106,10 +124,12 @@ const fullBg = (s) => {
   if (!parts) return false;
   const exe = parts[parts.length - 1];
   if (exe !== "bgrun" && exe !== "bg") return false;
-  const {homeParts} = getConfiguredRoots();
-  if (homeParts && parts.length === homeParts.length + 3 && hasPrefix(parts, homeParts)
-      && parts[homeParts.length] === ".local" && parts[homeParts.length + 1] === "bin") {
-    return true;
+  const {homeRoots} = getConfiguredRoots();
+  for (const h of homeRoots) {
+    if (parts.length === h.length + 3 && hasPrefix(parts, h)
+        && parts[h.length] === ".local" && parts[h.length + 1] === "bin") {
+      return true;
+    }
   }
   return matchesAnchoredOpsRoots(parts);
 };
