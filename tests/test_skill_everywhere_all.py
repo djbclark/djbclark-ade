@@ -541,3 +541,149 @@ def test_remove_paseo_removes_our_link_even_when_it_dangles(catalog, tmp_path): 
     (hermes / "paseo").symlink_to(tmp_path / "elsewhere")
     kept = run(catalog, "--remove", "paseo")
     assert kept.returncode == 0 and "left alone" in kept.stdout and (hermes / "paseo").is_symlink()
+
+
+# --- Retired skill cleanup and /self-handoff split (2026-11-24) -------------------------------------------------
+
+def test_retired_handoff_skills_cleaned_across_targets_and_gemini(catalog, tmp_path):
+    """Link mode removes stale symlinks (and Grok Bot managed copies) for retired skills while preserving foreign entries."""
+    home, public, _, env = catalog
+    bindir = tmp_path / "bin"
+    for cli in ("claude", "hermes"):
+        fake = bindir / cli
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+    env["SKILL_EVERYWHERE_ONLY"] = ""
+    env["PATH"] = os.pathsep.join([str(bindir), "/usr/bin", "/bin"])
+    # Paseo skill must exist for claude and hermes too so --check --all can go green after cleanup.
+    for pdir in (home / ".claude" / "skills" / "paseo",):
+        pdir.mkdir(parents=True)
+        (pdir / "SKILL.md").write_text("---\nname: paseo\ndescription: Paseo\n---\n")
+
+    skill(public, "self-handoff")
+    skill(public, "handoff")
+    skill(public, "hand")
+
+    claude_dir = home / ".claude" / "skills"
+    agents_dir = home / ".agents" / "skills"
+    hermes_dir = home / ".local" / "share" / "skill-everywhere" / "skills"
+    gemini_dir = home / ".gemini" / "skills"
+    grok_dir = home / "agent-data" / "workflows"
+    for d in (claude_dir, agents_dir, hermes_dir, gemini_dir, grok_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Stale symlinks pointing into our public root (now gone) across all dirs.
+    for d in (claude_dir, agents_dir, hermes_dir, gemini_dir):
+        (d / "old-handoff-use-paseo-handoff").symlink_to(public / "old-handoff-use-paseo-handoff")
+        (d / "old-hand-use-paseo-handoff").symlink_to(public / "old-hand-use-paseo-handoff")
+
+    # Managed Grok Bot copy of a retired skill should also be removed.
+    grok_copy = grok_dir / "ade-old-handoff-use-paseo-handoff"
+    grok_copy.mkdir()
+    (grok_copy / ".skill-everywhere").write_text("source=djbclark-ade/skills/old-handoff-use-paseo-handoff\n")
+    (grok_copy / "SKILL.md").write_text("---\nname: old-handoff-use-paseo-handoff\n---\n")
+
+    # Foreign Grok Bot dir without .skill-everywhere marker must stay untouched.
+    foreign_grok = grok_dir / "ade-old-hand-use-paseo-handoff"
+    foreign_grok.mkdir()
+    (foreign_grok / "SKILL.md").write_text("foreign copy")
+
+    # --dry-run --all previews removal without deleting anything.
+    dry = run(catalog, "--dry-run", "--all")
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "would remove retired" in dry.stdout
+    assert (gemini_dir / "old-handoff-use-paseo-handoff").is_symlink()
+    assert grok_copy.is_dir()
+
+    # --check --all fails with warnings while retired links remain.
+    chk_before = run(catalog, "--check", "--all")
+    assert chk_before.returncode == 1
+    assert "retired skill link still present" in chk_before.stderr
+    assert "retired skill copy still present" in chk_before.stderr
+
+    # Link mode installs self-handoff/handoff/hand and removes all our retired links + managed copy.
+    applied = run(catalog, "--all")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "== retired skills" in applied.stdout
+    for d in (claude_dir, agents_dir, hermes_dir):
+        assert (d / "self-handoff").readlink() == public / "self-handoff"
+        assert (d / "handoff").readlink() == public / "handoff"
+        assert (d / "hand").readlink() == public / "hand"
+    for d in (claude_dir, agents_dir, hermes_dir, gemini_dir):
+        assert not os.path.lexists(d / "old-handoff-use-paseo-handoff")
+        assert not os.path.lexists(d / "old-hand-use-paseo-handoff")
+    assert not grok_copy.exists()
+    assert (foreign_grok / "SKILL.md").read_text() == "foreign copy"
+
+    # Subsequent --check --all passes and rerun --all is quiet/idempotent on retired skills.
+    chk_after = run(catalog, "--check", "--all")
+    assert chk_after.returncode == 0, chk_after.stdout + chk_after.stderr
+    rerun = run(catalog, "--all")
+    assert rerun.returncode == 0 and "== retired skills" not in rerun.stdout
+
+
+def test_retired_cleanup_leaves_foreign_links_real_dirs_and_live_root_skills(catalog, tmp_path):
+    """Foreign symlinks, real directories, and names still present in a root are never removed."""
+    home, public, _, _ = catalog
+    skill(public, "steps")
+    agents_dir = home / ".agents" / "skills"
+    foreign_link = agents_dir / "old-handoff-use-paseo-handoff"
+    foreign_link.symlink_to(tmp_path / "someone-else")
+    foreign_dir = agents_dir / "old-hand-use-paseo-handoff"
+    foreign_dir.mkdir()
+    (foreign_dir / "SKILL.md").write_text("foreign real dir")
+
+    res = run(catalog, "--all")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "== retired skills" not in res.stdout
+    assert foreign_link.is_symlink() and foreign_link.readlink() == tmp_path / "someone-else"
+    assert foreign_dir.is_dir() and not foreign_dir.is_symlink()
+
+    # If a root still ships a live SKILL.md under a retired name, it is linked, never removed.
+    foreign_link.unlink()
+    live = skill(public, "old-handoff-use-paseo-handoff")
+    res2 = run(catalog, "--all")
+    assert res2.returncode == 0, res2.stdout + res2.stderr
+    assert (agents_dir / "old-handoff-use-paseo-handoff").readlink() == live
+
+
+def test_repo_self_handoff_split_and_deprecation_aliases(catalog):
+    """Real repo layout: self-handoff exists, old-* retired and cleaned, handoff/hand alias paseo-handoff."""
+    repo = SCRIPT.resolve().parents[1]
+    skills_dir = repo / "skills"
+    assert (skills_dir / "self-handoff" / "SKILL.md").is_file()
+    assert not (skills_dir / "old-handoff-use-paseo-handoff").exists()
+    assert not (skills_dir / "old-hand-use-paseo-handoff").exists()
+
+    for alias in ("handoff", "hand"):
+        p = skills_dir / alias / "SKILL.md"
+        assert p.is_file() and not p.is_symlink() and not p.parent.is_symlink()
+        text = p.read_text(encoding="utf-8")
+        assert f"name: {alias}\n" in text
+        assert "paseo-handoff" in text
+        assert "/self-handoff" in text
+        assert "old-handoff-use-paseo-handoff" not in text
+        assert "old-hand-use-paseo-handoff" not in text
+
+    loose_text = (skills_dir / "loose" / "SKILL.md").read_text(encoding="utf-8")
+    assert "self-handoff" in loose_text
+    assert "the `handoff` skill" not in loose_text
+
+    # Run bin/skill-everywhere --all against the real repo skills/ into isolated HOME.
+    home, _, _, env = catalog
+    env["SKILL_EVERYWHERE_ADE"] = str(skills_dir)
+    agents_dir = home / ".agents" / "skills"
+    gemini_dir = home / ".gemini" / "skills"
+    gemini_dir.mkdir(parents=True)
+    for d in (agents_dir, gemini_dir):
+        (d / "old-handoff-use-paseo-handoff").symlink_to(skills_dir / "old-handoff-use-paseo-handoff")
+        (d / "old-hand-use-paseo-handoff").symlink_to(skills_dir / "old-hand-use-paseo-handoff")
+    env["SKILL_EVERYWHERE_ONLY"] = "codex,gemini"
+    res = run(catalog, "--all")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert (agents_dir / "self-handoff").readlink() == skills_dir / "self-handoff"
+    assert (agents_dir / "handoff").readlink() == skills_dir / "handoff"
+    assert (agents_dir / "hand").readlink() == skills_dir / "hand"
+    for d in (agents_dir, gemini_dir):
+        assert not os.path.lexists(d / "old-handoff-use-paseo-handoff")
+        assert not os.path.lexists(d / "old-hand-use-paseo-handoff")

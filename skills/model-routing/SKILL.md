@@ -60,7 +60,7 @@ B3. A running session cannot re-tier itself mid-turn. The levers: dispatch the s
 dispatched judgment question, not a raised session.
 B4. What dominates cost is the conversation re-sent on every request (prompt caching makes the re-read cheap, not
 free; the cache lives an hour on a subscription, five minutes on credits or API keys). The cheapest move is usually a
-shorter conversation: clear between unrelated tasks; let auto-compaction and the `handoff` skill handle a long one;
+shorter conversation: clear between unrelated tasks; let auto-compaction and the `self-handoff` skill handle a long one;
 send verbose work (test runs, logs, fetches) to a sub-agent that returns a summary. An effort change keeps the cache.
 B5. The context window is a choice next to model and effort: the agent's default unless the slice reads a whole corpus
 or a long log. Bigger windows bill more per token on some services (Cursor 2× above 256k) and can be slower.

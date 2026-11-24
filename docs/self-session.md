@@ -436,7 +436,7 @@ The successor inherits the predecessor's name (C-id), so a chain's agents all re
    title, `command` appends a cleaned, `NAME_LIMIT`-bounded, shell-quoted `--window-middle <middle>`. The stderr progress hint only
    appends optional `[--window-middle "WORK"]` and/or `[--repo REPO]` placeholders for whichever flags were not already filled in. It only
    observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs
-   it itself (SKILL `handoff`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
+   it itself (SKILL `self-handoff`, `skills/self-handoff/SKILL.md`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
 
 ### C0a. Lead ids pinned elsewhere follow the successor (2026-11-14)
 A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own

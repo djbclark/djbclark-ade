@@ -161,7 +161,7 @@ windows, carry the slice, and a tab may mention its worktree. Never one window p
    must receive an explicit supported target or not be used. Reports and scratch folders are artifact locations, never
    reasons to create a project or window.
 7. **Not a worker:** a handoff **successor** is a new lead, not a worker. It keeps its own placement (a top-level
-   `paseo run` of its own, `skills/handoff`) and, once it answers, archives its predecessor; it names its own window
+   `paseo run` of its own, `skills/self-handoff`) and, once it answers, archives its predecessor; it names its own window
    `LEAD <repo> (<work>)` and **reuses the chain's WORKER and OTHER boxes** when it dispatches (item 2). Workers still carry `--label ade.lead=<lead id>` (#623), and an
    env-stripped launch still drops `PASEO_AGENT_ID`, `PASEO_AGENT_CWD` and `PASEO_WORKSPACE_ID`.
    **Windows and workers survive the handoff (2026-11-14):** `ade-worker-run` treats an archived predecessor whose completed

@@ -195,7 +195,7 @@ treat every owner as possibly live (step 4).
 
   The title is NOT evidence, and a first prompt alone is not either: an operator-typed or relayed `/baton PATH` naming
   the chain proves only that the operator named it (exemption C). Once you have answered, archive the predecessor
-  (`paseo agent archive <S>`, never `--force`) and tell its siblings your id (`handoff` Step 9).
+  (`paseo agent archive <S>`, never `--force`) and tell its siblings your id (`self-handoff` Step 9).
 - **C. Your own chain after `/clear`, no live other owner:** the operator named the chain (`/baton PATH`, `--dir
   .../chains/<key>`) and its `workspaces[].dir` includes your cwd, which is only naming; or the same agent cleared its
   own context (`/clear` keeps the Paseo id, so S matches your caller row and A applies). C waives the no-match question
@@ -328,5 +328,5 @@ Pointer (`<repo>/<task>/SESSION_LOG.md`):
 - **Reading/resuming** does NOT require being inside a workspace — cwd
   outside any resolvable repo (e.g. the bare home directory) triggers the
   chain discovery fallback above, not a refusal.
-- Deep recovery (12-item mining, chain docs) is the separate `handoff`
+- Deep recovery (12-item mining, chain docs) is the separate `self-handoff`
   skill (Tier 2). This skill is the cheap pointer only.

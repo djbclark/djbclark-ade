@@ -142,7 +142,7 @@ def owner_session_id(ancestors: Callable[[], Iterable[int]] | None = None) -> st
 
 
 if __name__ == "__main__":
-    # `python3 claude_identity.py`: the owner id for a shell script (skills/baton, skills/handoff), "" and exit 1 when there is none.
+    # `python3 claude_identity.py`: the owner id for a shell script (skills/baton, skills/self-handoff), "" and exit 1 when there is none.
     _sid = owner_session_id()
     print(_sid)
     raise SystemExit(0 if _sid else 1)

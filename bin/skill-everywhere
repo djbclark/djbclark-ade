@@ -25,7 +25,7 @@
 # symlinks (the old TUI -> site-private/skills -> site-djbclark/skills ->
 # djbclark-ade chain is retired; ops-repo churn can no longer break skill
 # loading). Editing the skill in its git repo updates it everywhere; never
-# copy (copies drift, e.g. ~/.agents/skills/handoff).
+# copy (copies drift, e.g. ~/.agents/skills/self-handoff).
 # A name found in more than one root resolves in that order: public, private, site, chrome-use.
 # In link mode, any existing link whose realpath equals the target but whose
 # readlink differs (a leftover chain) is atomically replaced with the direct
@@ -408,6 +408,91 @@ paseo_step() {
   done <<<"$targets"
 }
 paseo_step
+
+# Skills retired from this repository (2026-11-24: consolidated into skills/self-handoff).
+# In link mode (except a paseo-only invocation), stale symlinks pointing at one of our four
+# roots and Grok Bot managed copies are removed cleanly across every target dir plus legacy
+# ~/.gemini/skills (when not excluded by SKILL_EVERYWHERE_ONLY). Foreign links and real
+# directories are never touched, and a name that still exists in any root is skipped.
+# In `--check --all` mode, any remaining retired link/copy warns on stderr and sets rc=1;
+# named `--check` stays untouched so `bin/ade-update` row parsing is unaffected.
+retired_skills=(
+  old-handoff-use-paseo-handoff
+  old-hand-use-paseo-handoff
+)
+paseo_only=0
+((paseo_named)) && [[ $# == 1 ]] && paseo_only=1
+retired_step() {
+  ((paseo_only)) && return 0
+  [[ $mode == link ]] || [[ $mode == check && $all == 1 ]] || return 0
+  local rname bin dir dest seen_dirs printed=0
+  _retired_header() {
+    if ((!printed)); then
+      echo "== retired skills"
+      printed=1
+    fi
+  }
+  _clean_retired_link() {
+    local tbin=$1 tdir=$2 tname=$3
+    local l="$tdir/$tname" tgt m=0 s
+    [[ -L $l ]] || return 0
+    tgt="$(greadlink -- "$l")"
+    for s in "$ade_root/$tname" "$priv_root/$tname" "$site_root/$tname" "$chrome_root/$tname"; do
+      [[ $tgt == "$s" ]] && { m=1; break; }
+    done
+    ((m)) || return 0
+    if [[ $mode == check ]]; then
+      printf 'warning: retired skill link still present: %s -> %s (run skill-everywhere --all to remove)\n' "$l" "$tgt" >&2
+      rc=1
+    else
+      _retired_header
+      bin=$tbin
+      act "remove retired $l" rm -- "$l"
+      ((dry)) || printf '  %-13s removed retired %s\n' "$bin" "$l"
+    fi
+  }
+  for rname in "${retired_skills[@]}"; do
+    # Never treat a name as retired while any root still ships a live SKILL.md for it.
+    if [[ -f $ade_root/$rname/SKILL.md || -f $priv_root/$rname/SKILL.md \
+       || -f $site_root/$rname/SKILL.md || -f $chrome_root/$rname/SKILL.md ]]; then
+      continue
+    fi
+    seen_dirs="|"
+    while IFS='|' read -r bin dir; do
+      [[ -z $bin ]] && continue
+      wanted "$bin" || continue
+      if [[ $dir == copy\ * ]]; then
+        ((no_copy)) && continue
+        dir="${dir#copy }"; dir="${dir/#\~/$HOME}"
+        dest="$dir/ade-$rname"
+        if [[ -d $dest && ! -L $dest && -f $dest/.skill-everywhere ]]; then
+          if [[ $mode == check ]]; then
+            printf 'warning: retired skill copy still present: %s (run skill-everywhere --all to remove)\n' "$dest" >&2
+            rc=1
+          else
+            _retired_header
+            act "remove retired $dest" rm -rf -- "$dest"
+            ((dry)) || printf '  %-13s removed retired %s\n' "$bin" "$dest"
+          fi
+        fi
+        continue
+      fi
+      [[ $dir == via* || $dir == x* ]] && continue
+      dir="${dir/#\~/$HOME}"
+      [[ $seen_dirs == *"|$dir|"* ]] && continue
+      seen_dirs="${seen_dirs}${dir}|"
+      _clean_retired_link "$bin" "$dir" "$rname"
+    done <<<"$targets"
+    # Legacy ~/.gemini/skills links (e.g. Antigravity / Gemini CLI) are cleaned unless filtered out.
+    if [[ -z $only ]] || wanted gemini; then
+      dir="$HOME/.gemini/skills"
+      if [[ $seen_dirs != *"|$dir|"* ]]; then
+        _clean_retired_link gemini "$dir" "$rname"
+      fi
+    fi
+  done
+}
+retired_step
 # --check ends with a sentinel so a caller (bin/ade-update) can tell a complete report from one cut short by a crash
 if [[ $mode == check ]]; then echo "== end"; fi
 

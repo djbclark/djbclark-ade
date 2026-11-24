@@ -28,8 +28,8 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 
 | Skill | What it does | How to use |
 |---|---|---|
-| `old-handoff-use-paseo-handoff` (`handoff` compatibility alias) | Compatibility recovery flow; whole-session replacement uses acknowledged self-handoff. Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation; Step 8 names the agent (`paseo agent update --name`), Step 9 defaults to `ade-self-session handoff`: the agent launches its successor, verifies checkpoint acknowledgement and idle-only retirement; an agent-run fallback handles pre-creation refusal (2026-11-12). `/handoff paseo` uses the same ADE lifecycle; the external installed `paseo-handoff` supplies a briefing format, not the retirement protocol. | `/handoff`; "do a handoff"; before ending a long session. |
-| `old-hand-use-paseo-handoff` (`hand` compatibility alias) | Compatibility alias for acknowledged ADE self-handoff. Runs the legacy recovery handoff with the same arguments. | `/hand`, `$hand`. |
+| `self-handoff` | Whole-session acknowledged ADE self-handoff (`bin/ade-self-session`, 2026-11-24 split consolidating the retired `old-handoff-use-paseo-handoff` / `old-hand-use-paseo-handoff`). Deep Tier 2 handoff document, chain-tagged and mined from the whole conversation; Step 8 names the agent (`paseo agent update --name`), Step 9 defaults to `ade-self-session handoff` (quota-floor guard, `--provider`, `--thinking`, verified checkpoint acknowledgement, idle-only/error retirement, WORKER/OTHER box reuse, `supervisor/lead` & `ade-net-resume` tracking, agent-run fallback). | `/self-handoff`; "do a self-handoff"; before replacing a long session or lead. |
+| `handoff`, `hand` | Deprecated thin aliases (2026-11-24) forwarding verbatim to Paseo's installed `paseo-handoff` skill (task handoff to a fresh child subagent), with a pointer to `/self-handoff` for whole-session ADE replacement. | `/handoff`, `/hand`, `$hand` (prefer `/paseo-handoff` or `/self-handoff`). |
 | `session-handoff` | Reads and writes the Tier 1 pointer (`SESSION_LOG.md`) for any git repo, with the owner check before a first write. | Runs at session start and end; "update session log". |
 | `baton` | Resumes a workspace from its Tier 1 pointer and re-arms detached jobs. | `/baton` or `/resume` at the start of a session; a successor's first prompt. |
 | `loose` | Audits the session for loose ends, steps through them, then offers handoff and continue, finish (archive once idle) or keep working. On Grok Bot the Mac-only steps have equivalents or skips. | `/loose`; "any loose ends?". |
@@ -82,7 +82,9 @@ terminus-kira, todo. Unlinked from here (2026-11-06, E1); the operator relinks t
 `_shared`, cow-workspaces, ralph-tui-orchestration, skillopt-sleep-learned, jevlike (E1, E2); helm, autorename (E4);
 session-finder's skill and peer-relay (E3); loadwatch (E5; alias restored #539); skills-everywhere, skillopt-sleep (E10); watch, paseowatch,
 cfenginewatch and the six vendored `ade-paseo*` copies (Wave 3b; watch restored #539); bigteam (E6, now `fan-out`); effort-routing and
-fallback-chains (E7, folded into `model-routing`). The skills, plugins and MCP servers switched off in Claude Code on
+fallback-chains (E7, folded into `model-routing`); `old-handoff-use-paseo-handoff` and `old-hand-use-paseo-handoff`
+(retired 2026-11-24, consolidated into `self-handoff`, with `handoff`/`hand` repointed as deprecated aliases to
+`paseo-handoff`). The skills, plugins and MCP servers switched off in Claude Code on
 2026-10-10 are listed in `history/disabled-skills.md`.
 
 ## Adding or moving a skill

@@ -164,7 +164,7 @@ By hand (what the helper does; a hand-made window has no ownership record, so `a
 launch and never guessed by cwd or name, `paseo workspace rename`, `--workspace wks_…` on later launches, `paseo agent update
 <full agent id> --name "worker <NAME> <LEAD>"`.
 
-A handoff **successor** is a new lead, not a worker: it starts as `skills/handoff` says (its own top-level `paseo run`), keeps
+A handoff **successor** is a new lead, not a worker: it starts as `skills/self-handoff` says (its own top-level `paseo run`), keeps
 its own placement (its own LEAD window), and reuses the chain's WORKER and OTHER boxes when it dispatches (it opens none beside them).
 
 Always pass the provider-native unattended mode at launch (Codex `--mode full-access`): switching with `set_agent_mode full-access` mid-run did not stop repeated approval cards for graft MCP, commits, pushes, gh or bg tests on 2026-11-12; Pi exposes no selectable modes and omits the flag.

@@ -158,7 +158,7 @@ Rules:
 
 ### D2. handoff
 
-1. On handoff (legacy `skills/handoff` / `old-handoff-use-paseo-handoff`, or
+1. On handoff (`skills/self-handoff`, formerly `skills/handoff` / `old-handoff-use-paseo-handoff`, or
    Paseo's `paseo-handoff`): the predecessor's verifyCmd record is either
    **re-keyed to the successor agent id** (same argv, `attempt` preserved) or
    **cleared** if the handoff brief drops acceptance. Silent orphan records

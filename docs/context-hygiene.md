@@ -174,7 +174,7 @@ owned handoff and a supported, acknowledged successor/baton path. A successful
 compaction request alone was not that evidence. The successor path remains a
 top-level `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …` (a new lead with its own
 placement, not a worker in a `WORKER …` box, `docs/workspace-layout.md`) that archives its
-predecessor once it answers (`skills/handoff` Step 9; `self-slash --finish --successor`
+predecessor once it answers (`skills/self-handoff` Step 9; `self-slash --finish --successor`
 went 2026-11-06).
 
 OpenCode V2 settings were `compaction.auto`, `compaction.keep.tokens` and
