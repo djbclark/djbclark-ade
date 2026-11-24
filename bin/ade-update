@@ -78,6 +78,12 @@ Steps, in order:
    the checkout (agent-id before PR 842 lands) is skipped with an info line, never an error; `--check` on a checkout
    that is behind says the tool is new upstream. `--check` writes nothing (missing and stale links count as exit 10, like
    a missing ~/.claude link); a non-canonical --repo is report-only and never links, because the links would point at it.
+3e. (canonical checkout) Standalone executable copies in `~/.local/libexec/ade/`: every `(name, rel)` in `LIBEXEC_COPIES`
+   (`mcp-lazy` from `bin/mcp-lazy`, docs/mcp-on-demand.md §11.3) is installed as a standalone regular file (mode 0755,
+   never a symlink into the checkout, so another branch or dirty tree never breaks live sessions). Follows the same
+   committed-revision, working-tree-match, syntax-validation, backup-and-atomic-replace rules as step 3a (`graft_helper`),
+   with in-process Python syntax validation (`compile`, never executed). Report-only outside the canonical checkout;
+   skipped when the source path is absent from both the revision and the working tree.
 4. The CHANGELOG.md entries new since the revision recorded in the state file (parsed from
    `git show <rev>:CHANGELOG.md` at both revisions; an entry moved under a release heading is not
    new), or every Unreleased entry when nothing is recorded; plus the entries of `changelog.d/` fragments
@@ -130,6 +136,10 @@ OK_LINK_STATES = ("linked", "not installed")
 # before (and without) any config parse, and a name here is a promise that bin/<name> exists (or is skipped with a note).
 BIN_LINKS = ("git-commit-own", "load-watch", "agent-id", "lsp-root-guard")
 BIN_LINK_DIR = "~/.local/bin"
+# Standalone executable copies installed into ~/.local/libexec/ade/<name> (step 3e), never symlinked into the
+# checkout so another branch or dirty tree never breaks live sessions (docs/mcp-on-demand.md §11.3).
+LIBEXEC_COPIES = (("mcp-lazy", "bin/mcp-lazy"),)
+LIBEXEC_DIR = "~/.local/libexec/ade"
 CHECK_SENTINEL = "== end"  # last line of `skill-everywhere --check`
 SKILL_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # fullmatch: `$` would admit a trailing newline
 # Repository-location variables that would make git act on another repo than --repo.
@@ -622,6 +632,96 @@ def install_graft_helper(repo, check, can_install, revision, authorized):
             os.unlink(tmp)
 
 
+def install_libexec_copy(repo, name, rel, check, can_install, revision, authorized, check_behind=False):
+    """Step 3e: install a standalone executable copy into ~/.local/libexec/ade/<name> (never a symlink)."""
+    source = Path(repo) / rel
+    live = Path(os.path.expanduser(LIBEXEC_DIR)) / name
+    row = {"name": name, "path": str(live), "state": "skipped", "mode": "apply" if can_install and not check else "report-only"}
+    rc, listing, err = git(repo, "ls-tree", "-z", revision, "--", rel)
+    if rc:
+        raise Stop(EXIT_ERROR, f"libexec copy ({name}) ls-tree failed (rc={rc}): {(err or listing).strip()}")
+    if not listing:
+        if not source.exists():
+            return row
+        row.update(state="refused", detail=f"{rel} is not in the authorized revision")
+        return row
+    entry = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40}|[0-9a-f]{64})\t" + re.escape(rel) + r"\x00", listing)
+    if entry is None:
+        raise Stop(EXIT_ERROR, f"libexec copy ({name}) ls-tree entry is not one regular-file blob: " + repr(listing))
+    oid = entry.group(2)
+    rc, out, err = git(repo, "cat-file", "-e", f"{revision}:{rel}")
+    if rc:
+        raise Stop(EXIT_ERROR, f"libexec copy ({name}) cat-file failed (rc={rc}): {(err or out).strip()}")
+    tmp = None
+    try:
+        blob = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", oid],
+                              capture_output=True, timeout=LOCAL_TIMEOUT, env=git_env())
+        if blob.returncode:
+            raise OSError(f"cannot read committed {rel} (rc={blob.returncode}): "
+                          + blob.stderr.decode("utf-8", errors="replace").strip())
+        wanted = blob.stdout
+        if can_install:
+            row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
+            reason = None
+            if not authorized:
+                reason = "libexec copy install requires master at the fetched origin/master revision"
+            elif not check_behind and (source.is_symlink() or not source.is_file() or source.read_bytes() != wanted):
+                reason = f"working-tree {rel} differs from the authorized revision; inspect local edits before retrying"
+            elif not wanted.startswith(b"#!/usr/bin/env python3\n") or not wanted.partition(b"\n")[2].strip():
+                reason = f"committed {rel} is empty or lacks its Python 3 entrypoint"
+            else:
+                try:
+                    compile(wanted, rel, "exec")
+                except (SyntaxError, ValueError) as exc:
+                    reason = f"committed {rel} fails Python syntax validation: {exc}"
+            if reason:
+                row.update(state="refused", detail=reason)
+                return row
+        if live.is_dir() and not live.is_symlink():
+            raise OSError(f"destination {live} is a directory")
+        previous = live.read_bytes() if live.exists() else None
+        row["state"] = "missing" if previous is None else "differs"
+        if previous == wanted and not live.is_symlink() and stat.S_IMODE(live.stat().st_mode) == 0o755:
+            row["state"] = "ok"
+            return row
+        if not can_install:
+            return row
+        row["fix"] = shlex.join(["ade-update", "--repo", str(repo)])
+        if check:
+            return row
+        live.parent.mkdir(parents=True, exist_ok=True)
+        if previous is not None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup = live.with_name(live.name + ".bak-" + stamp)
+            for n in range(100):
+                candidate = backup if n == 0 else backup.with_name(backup.name + f".{n}")
+                try:
+                    with candidate.open("xb") as f:
+                        f.write(previous)
+                    candidate.chmod(stat.S_IMODE(live.stat().st_mode))
+                    row["backup"] = str(candidate)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                raise OSError("no free backup name")
+        fd, tmp = tempfile.mkstemp(prefix=live.name + ".", dir=live.parent)
+        with os.fdopen(fd, "wb") as f:
+            f.write(wanted)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, live)  # temp beside + atomic rename; standalone regular copy, never a symlink
+        tmp = None
+        row["state"] = "installed"
+        return row
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Stop(EXIT_ERROR, f"libexec copy ({name}) install/check failed: {e}") from e
+    finally:
+        if tmp is not None:
+            os.unlink(tmp)
+
+
 # --- symlinks -----------------------------------------------------------------------------
 
 def check_claude_md(repo):
@@ -1074,8 +1174,8 @@ def update(rep, args, repo):
         rep.say("~/.local/bin tool links: report-only: not the canonical checkout; the links point at its bin/, never here")
 
     # 3a. installed graft hook copy, separate from the report-only symlink inventory.
-    helper = install_graft_helper(repo, check, can_link, target,
-                                  branch == "master" and upstream == "origin/master" and target == up)
+    authorized_copy = branch == "master" and upstream == "origin/master" and target == up
+    helper = install_graft_helper(repo, check, can_link, target, authorized_copy)
     d["graft_helper"] = helper
     if helper["state"] not in ("ok", "skipped"):
         if can_link:
@@ -1085,6 +1185,25 @@ def update(rep, args, repo):
                 problems.append("graft helper")
         else:
             rep.say(f"graft helper: {helper['state']}; report-only: not the canonical checkout")
+
+    # 3e. standalone libexec copies (~/.local/libexec/ade/<name>, e.g. mcp-lazy; never symlinked into checkout).
+    libexec_rows = {}
+    libexec_problem = False
+    for name, rel in LIBEXEC_COPIES:
+        row = install_libexec_copy(repo, name, rel, check, can_link, target, authorized_copy,
+                                   check_behind=bool(check and behind))
+        libexec_rows[name] = row
+        if row["state"] not in ("ok", "skipped"):
+            if can_link:
+                rep.say(f"libexec copy ({name}): {row['state']}; {row.get('detail', '')}; "
+                        f"fix: {row.get('fix', f'inspect the committed {rel} before retrying')}")
+                if row["state"] != "installed":
+                    libexec_problem = True
+            else:
+                rep.say(f"libexec copy ({name}): {row['state']}; report-only: not the canonical checkout")
+    d["libexec_copies"] = libexec_rows
+    if libexec_problem:
+        problems.append("libexec copies")
 
     # 3b. the GUI-hog dialog bundle (docs/gui-hog-dialog.md D2). FAIL OPEN: a missing swiftc, a failed build or a timeout is a note, never a problem; the
     # sampler shows no dialog for a missing or stale bundle. Only the canonical checkout builds (it is the one whose sources the live sampler matches), only on
