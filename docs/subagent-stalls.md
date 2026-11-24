@@ -95,22 +95,21 @@ included, so a mass orphaning drains over several runs, both at first and at the
 `--dry-run` prints what would be sent and writes nothing; **`--baseline`** records every stall found now as known and announces nothing, for
 the run that switches the watcher on (otherwise the first run pings every orphan of the last 48 hours). Both tools are called by the absolute paths `~/.local/bin/hermes-ping` and `~/.local/bin/paseo` (override: `--hermes-ping`, `--paseo`); nothing looks at PATH (the guard shim gets a fixed one, `/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`, for its python3). When `--paseo` is omitted and `ADE_PASEO_TRANSPORT` is not `cli`, parent-idle inspects and in-process send-guard probes talk directly to Paseo's loopback daemon API via `bin/ade_paseo_client.py` (override target with `--daemon-url` or `ADE_PASEO_URL`), avoiding `paseo` CLI subprocesses; `--paseo` still selects the CLI binary path (used both for explicit CLI mode and for the actual `paseo send`). `suggested_action` is a shell-quoted command (`shlex.join`).
 
-## Hook-in (site-public)
+## Scheduling
 
-`fleet-watch` lives in `~/ops/site-public-djbclark/bin/fleet-watch` (another repo; not edited from here: `~/CLAUDE.md` item 13 and AGENTS order 11, so
-the hook-in waits for the operator's yes). Once, to start quiet:
+On macOS, [`bin/ade-agent-sweep`](../bin/ade-agent-sweep) runs `ade-subagent-stalls --notify`
+as its third step through [`com.djbclark.ade-agent-sweep.plist`](../launchd/com.djbclark.ade-agent-sweep.plist).
+See the [macOS cutover](scheduling.md#macos-cutover) for installation. Keep the notification
+ledger at its existing path. To record already-known stalls without sending notices at
+cutover, optionally run:
 
-```
+```sh
 ~/src/djbclark-ade/bin/ade-subagent-stalls --notify --baseline
 ```
 
-Then one line in fleet-watch's periodic pass (exit 1 means "stalls exist", not failure, hence `|| true`):
-
-```
-"$HOME/src/djbclark-ade/bin/ade-subagent-stalls" --notify >>"$HOME/.local/state/djbclark-ade/subagent-stalls.log" 2>&1 || true
-```
-
-The scan reads the 48-hour window of stubs and the matching transcripts; a run took 5 to 8 seconds on 2026-11-22 (30 working stubs in the window).
+A normal notification scan can exit 1 when stalls exist. The sweep records that status and the
+scanner's output in its launchd logs. The scan reads the 48-hour window of stubs and the matching
+transcripts. A run took 5 to 8 seconds on 2026-11-22 with 30 working stubs in the window.
 
 ## Limits
 
