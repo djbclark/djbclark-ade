@@ -221,8 +221,8 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
 6. **Never wait on CI** (`gh pr checks --watch`, `gh run watch`). Report
    "CI running" with the run URL and stop: the lead reads CI. For `github.com` PRs
    (since 2026-11-25, GitHub Event Streams public preview), the lead's preferred wait
-   is `bin/gh-pr-wait PR --for checks --json` (or `gh event listen`, SSE with zero
-   polling and automatic `>= 60 s` polling fallback; [skills/gh-event-streams](../skills/gh-event-streams/SKILL.md)),
+   is `bin/gh-pr-wait PR --for checks --json` (or `gh event listen`, event-driven
+   with slow safety-net re-checks and `>= 60 s` polling fallback; [skills/gh-event-streams](../skills/gh-event-streams/SKILL.md)),
    run in the background; for workflow runs or non-`github.com` hosts, the polling fallback is
    `gh pr checks PR --watch --required --interval 60` (since 2026-11-06); a merge-ready decision needs no agent parked on it.
    `claude/hooks/bash_habits_gate.py` enforces this since 2026-11-14 ([docs/bash-habits-gate.md](bash-habits-gate.md)):

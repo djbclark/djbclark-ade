@@ -1,7 +1,7 @@
 ### Added
 
-- Added `bin/gh-pr-wait` to wait for `github.com` PR checks, reviews, merges, or events over GitHub Event Streams (`gh event listen`) with attach-then-read ordering, safety-net re-reads, stop-before-delete subscription cleanup, `bin/deadline` self-supervision, automatic `>= 60 s` polling fallback, and a `cleanup` subcommand (#995).
-- Added the `gh-event-streams` skill (`skills/gh-event-streams/SKILL.md`) documenting Event Streams prerequisites, `gh-pr-wait` usage, attach-then-read, subscription cap cleanup, and trust boundaries (#995).
+- Added `bin/gh-pr-wait` to wait for `github.com` PR checks, reviews, merges, or events over GitHub Event Streams (`gh event listen`) with attach-then-read ordering, slow safety-net re-checks, mode-specific field-limited queries, `flock`-coordinated best-effort stop-before-delete cleanup, `bin/deadline` self-supervision, automatic `>= 60 s` polling fallback, and a `cleanup` subcommand (#995).
+- Added the `gh-event-streams` skill (`skills/gh-event-streams/SKILL.md`) documenting Event Streams prerequisites, `gh-pr-wait` usage, attach-then-read, subscription cap cleanup, field-limited queries, and trust boundaries (#995).
 
 ### Changed
 
