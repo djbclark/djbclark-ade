@@ -1,0 +1,135 @@
+#!/usr/bin/env -S python3 -I
+"""Automated Herdr self-handoff for non-Paseo sessions running inside a Herdr pane.
+
+Usage:
+  ade-herdr-handoff --checkpoint ABS_PATH --tier1 PATH [--kind claude|codex]
+                    [--model MODEL] [--effort LEVEL] [--mode MODE] [--cwd DIR]
+                    [--title TEXT] [--name NAME] [--focus|--no-focus]
+                    [--start-timeout MS] [--prompt-timeout MS]
+                    [--state-dir DIR] [--herdr-bin PATH] [--dry-run] [--json]
+  ade-herdr-handoff --status RECORD_PATH [--json]
+
+Exit codes:
+  0  launched, dry-run succeeded, or --status read cleanly
+  1  operational / Herdr failure (predecessor pane preserved; inspect record)
+  2  usage or input validation error (no Herdr mutation)
+  4  refused by caller/lock guard (PASEO_AGENT_ID set, not in Herdr, pane mismatch, or handoff in progress)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ade_herdr_handoff import (
+    DEFAULT_PROMPT_TIMEOUT_MS,
+    DEFAULT_START_TIMEOUT_MS,
+    EXIT_ERROR,
+    EXIT_OK,
+    EXIT_USAGE,
+    HerdrHandoffError,
+    HerdrHandoffService,
+    bounded,
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ade-herdr-handoff",
+        description="Automated Herdr self-handoff for non-Paseo sessions inside a Herdr pane.",
+    )
+    p.add_argument("--status", metavar="RECORD", type=Path, help="inspect an existing handoff record JSON without calling Herdr")
+    p.add_argument("--checkpoint", metavar="ABS_PATH", type=Path, help="absolute path to the Tier 2 checkpoint file")
+    p.add_argument("--tier1", metavar="PATH", type=Path, help="path to the Tier 1 pointer (SESSION_LOG.md) for /baton or $baton")
+    p.add_argument("--kind", default="claude", help="successor TUI kind: claude (default) or codex")
+    p.add_argument("--model", help="optional concrete model id or alias for the successor TUI")
+    p.add_argument("--effort", help="optional reasoning/effort level (claude: low|medium|high|xhigh|max; codex: none|minimal|low|medium|high|xhigh)")
+    p.add_argument("--mode", help="optional claude --permission-mode (default: bypassPermissions; claude only)")
+    p.add_argument("--cwd", type=Path, help="working directory for the new tab (default: current cwd)")
+    p.add_argument("--title", help="optional Herdr tab label (default: derived from cwd basename)")
+    p.add_argument("--name", help="optional unique Herdr agent name matching [a-z][a-z0-9_-]{0,31}")
+    focus_group = p.add_mutually_exclusive_group()
+    focus_group.add_argument("--no-focus", dest="focus", action="store_false", help="keep focus in the current tab (default)")
+    focus_group.add_argument("--focus", dest="focus", action="store_true", help="focus the new successor tab")
+    p.set_defaults(focus=False)
+    p.add_argument("--start-timeout", type=int, default=DEFAULT_START_TIMEOUT_MS, metavar="MS", help="herdr agent start timeout in ms (default %(default)d)")
+    p.add_argument("--prompt-timeout", type=int, default=DEFAULT_PROMPT_TIMEOUT_MS, metavar="MS", help="Python subprocess timeout in ms for non-waiting herdr agent prompt (default %(default)d)")
+    p.add_argument("--state-dir", type=Path, help="state directory override (default: $ADE_HERDR_HANDOFF_STATE or ~/.local/state/djbclark-ade/herdr-handoff)")
+    p.add_argument("--herdr-bin", help="explicit path to herdr executable (default: $ADE_HERDR_BIN or PATH)")
+    p.add_argument("--dry-run", action="store_true", help="run preflight checks and print planned Herdr commands without mutating layout")
+    p.add_argument("--json", action="store_true", help="emit structured JSON output (always JSON on stdout)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    service = HerdrHandoffService(
+        state_dir=args.state_dir,
+        herdr_bin=args.herdr_bin,
+        progress=lambda msg: print(msg, file=sys.stderr, flush=True),
+    )
+
+    try:
+        if args.status is not None:
+            if args.checkpoint is not None or args.tier1 is not None or args.dry_run:
+                raise HerdrHandoffError(
+                    "--status cannot be combined with --checkpoint, --tier1, or --dry-run",
+                    code="invalid_arguments",
+                    exit_code=EXIT_USAGE,
+                )
+            record = service.status(args.status)
+            print(json.dumps(record, indent=2, sort_keys=True))
+            return EXIT_OK
+
+        if args.checkpoint is None or args.tier1 is None:
+            raise HerdrHandoffError(
+                "--checkpoint and --tier1 are required unless --status is passed",
+                code="missing_required_arguments",
+                exit_code=EXIT_USAGE,
+            )
+
+        result = service.handoff(
+            checkpoint=args.checkpoint,
+            tier1=args.tier1,
+            kind=args.kind,
+            model=args.model,
+            effort=args.effort,
+            mode=args.mode,
+            cwd=args.cwd,
+            title=args.title,
+            name=args.name,
+            focus=args.focus,
+            start_timeout_ms=args.start_timeout,
+            prompt_timeout_ms=args.prompt_timeout,
+            dry_run=args.dry_run,
+        )
+    except HerdrHandoffError as exc:
+        payload = {
+            "status": "refused" if exc.exit_code == 4 else "error",
+            "code": exc.code,
+            "reason": bounded(str(exc), 300),
+        }
+        if exc.detail:
+            payload["detail"] = exc.detail
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return exc.exit_code
+    except Exception as exc:  # noqa: BLE001
+        payload = {
+            "status": "error",
+            "code": "unexpected_error",
+            "reason": bounded(f"{type(exc).__name__}: {exc}", 300),
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return EXIT_ERROR
+
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return EXIT_OK if result.get("status") in ("launched", "dry-run") else EXIT_ERROR
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

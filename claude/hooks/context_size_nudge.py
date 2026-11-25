@@ -89,11 +89,14 @@ History:
   had reached fired >= 2 (or already carried `handoff_due`), emit `post_compact_handoff_due`
   on post-compaction turns (rate-limited on PostToolUse, emitted on UserPromptSubmit), and send
   one hermes-ping for that compaction.
-- 2026-11-25 (Carried #122, operator ruling 2026-11-25): detect Paseo mode via non-blank
-  `PASEO_AGENT_ID` (`_in_paseo()`). When set, keep Paseo self-handoff Step 9 guidance and
-  "never hand the operator a /new" (even if `HERDR_ENV=1` was inherited from a daemon). When
-  unset/blank (non-Paseo / Herdr Claude Code mode), direct local `/self-handoff` Steps 0-7,
-  skip Step 9 (`ade-self-session` is Paseo-only), and let the operator run `/new` + `/baton`.
+- 2026-11-25 (Carried #122, operator ruling 2026-11-25): detect 3-way session mode via
+  `_session_mode()`: (1) Paseo mode (`PASEO_AGENT_ID` set and non-blank — always wins even if
+  `HERDR_ENV=1` was inherited from a daemon) keeps Paseo Step 9 (`ade-self-session handoff`) and
+  "never hand the operator a /new"; (2) Herdr mode (`PASEO_AGENT_ID` unset/blank AND `HERDR_ENV=1`
+  AND `HERDR_PANE_ID` non-blank) directs `/self-handoff` Steps 0-7 locally plus either
+  `bin/ade-herdr-handoff` (automated Herdr tab/pane successor) or manual `/new` + `/baton`;
+  (3) standalone non-Paseo / non-Herdr mode directs local `/self-handoff` Steps 0-7, skips Step 9,
+  and lets the operator run `/new` + `/baton`.
 
 Measure: input + cache_creation + cache_read tokens of the newest usage block,
 i.e. the real context size (cache_read alone reads 0 after a cache miss).
@@ -677,20 +680,63 @@ def _early_message(total, growth):
     )
 
 
-def _successor_note(successor, in_paseo=None):
+def _in_paseo():
+    """True when running under Paseo (PASEO_AGENT_ID set and non-blank); False for Herdr/standalone Claude Code.
+
+    Matches skills/herdr/SKILL.md ADE rule 1: `HERDR_ENV=1` can be inherited from a daemon started
+    in a pane, so a set `PASEO_AGENT_ID` always wins as Paseo mode.
+    """
+    return bool(os.environ.get("PASEO_AGENT_ID", "").strip())
+
+
+def _in_herdr():
+    """True when running outside Paseo inside a Herdr pane (PASEO_AGENT_ID unset/blank,
+    HERDR_ENV=1, and HERDR_PANE_ID non-blank).
+    """
+    return (not _in_paseo()
+            and os.environ.get("HERDR_ENV", "").strip() == "1"
+            and bool(os.environ.get("HERDR_PANE_ID", "").strip()))
+
+
+def _session_mode():
+    """Return 'paseo', 'herdr', or 'standalone' for handoff guidance."""
+    if _in_paseo():
+        return "paseo"
+    if _in_herdr():
+        return "herdr"
+    return "standalone"
+
+
+def _resolve_mode(mode=None, in_paseo=None):
+    if mode is not None:
+        return mode
+    if in_paseo is not None:
+        return "paseo" if in_paseo else ("herdr" if _in_herdr() else "standalone")
+    return _session_mode()
+
+
+def _successor_note(successor, in_paseo=None, mode=None):
     """The Fable-lead ruling (2026-10-23): a Fable session hands off to Opus."""
     if not successor:
         return ""
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     spec, why = successor
     model_name = spec.split("/", 1)[1]
-    if in_paseo:
+    if resolved == "paseo":
         return (
             f" Note: {why}; switching to `{spec}` is advisory and requires explicit operator "
             f"authorization first — once authorized, pass `--provider {spec}` to "
             "`ade-self-session handoff` (retaining Paseo acknowledgement and retirement checks); "
             "without operator authorization, retain the standard Paseo `ade-self-session handoff` "
             "procedure and its quota guard."
+        )
+    if resolved == "herdr":
+        return (
+            f" Note: {why}; after writing the local handoff (Steps 0-7), launch the Herdr successor "
+            f"with `~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint <abs-tier2-path> "
+            f"--tier1 <exact-tier1-pointer> --model {model_name}` (or, instead of `/new` in this "
+            f"Fable process, let the operator relaunch `claude --model {model_name}` and resume "
+            "with `/baton <exact Tier 1 pointer>` (or `/baton`))."
         )
     return (
         f" Note: {why}; after writing the local handoff (Steps 0-7), instead of `/new` in this "
@@ -699,36 +745,38 @@ def _successor_note(successor, in_paseo=None):
     )
 
 
-def _in_paseo():
-    """True when running under Paseo (PASEO_AGENT_ID set and non-blank); False for standalone/Herdr Claude Code.
-
-    Matches skills/herdr/SKILL.md ADE rule 1: `HERDR_ENV=1` can be inherited from a daemon started
-    in a pane, so a set `PASEO_AGENT_ID` always wins as Paseo mode.
-    """
-    return bool(os.environ.get("PASEO_AGENT_ID", "").strip())
-
-
 _SELF_HANDOFF = ("`~/src/djbclark-ade/bin/ade-self-session handoff`, an acknowledged self-handoff; "
                  "add `--thinking LEVEL` to pin the successor's thinking level")
 
+_HERDR_HANDOFF = (
+    "Herdr mode (no `PASEO_AGENT_ID`, `HERDR_ENV=1` + `HERDR_PANE_ID` set): "
+    "run `/self-handoff` Steps 0-7 locally (write, validate, commit/push the Tier 2 handoff doc and "
+    "update Tier 1), then either run `~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint <abs-tier2-path> "
+    "--tier1 <exact-tier1-pointer>` (automated Herdr tab/pane successor; verifies the live pane and keeps "
+    "this pane intact) OR let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) "
+    "manually when preferred (operator ruling 2026-11-25)"
+)
+
 _LOCAL_HANDOFF = (
-    "no `PASEO_AGENT_ID` is present (non-Paseo / Herdr Claude Code mode — operator ruling 2026-11-25): "
+    "no `PASEO_AGENT_ID` is present (standalone non-Paseo Claude Code mode — operator ruling 2026-11-25): "
     "run `/self-handoff` Steps 0-7 locally (write, validate, commit/push the Tier 2 handoff doc and "
     "update Tier 1), skip Step 9 (`ade-self-session` is Paseo-only), and let the operator run "
     "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready"
 )
 
 
-def _boundary_message(total, successor=None, wall=None, in_paseo=None):
+def _boundary_message(total, successor=None, wall=None, in_paseo=None, mode=None):
     wall = AUTO_COMPACT_WALL if wall is None else wall
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     left = max(0, wall - total)
-    if in_paseo:
+    if resolved == "paseo":
         action = (
             f"run self-handoff Step 9 yourself ({_SELF_HANDOFF}) instead of /compact, "
             "and never hand the operator a /new "
             "(operator ruling 2026-11-14: when handing off, do it yourself)"
         )
+    elif resolved == "herdr":
+        action = f"do a Herdr handoff instead of /compact — {_HERDR_HANDOFF}"
     else:
         action = f"do a local handoff instead of /compact — {_LOCAL_HANDOFF}"
     return (
@@ -739,7 +787,7 @@ def _boundary_message(total, successor=None, wall=None, in_paseo=None):
         f"work is not a direct continuation and work remains, {action}: a fresh session "
         "re-writes ~46k, a compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
-        + _successor_note(successor, in_paseo=in_paseo)
+        + _successor_note(successor, mode=resolved)
     )
 
 
@@ -770,16 +818,18 @@ def _midtask_note(total, in_context, wall=None):
     return lead + "right after it, with no further tool rounds" + alternative
 
 
-def _ask_message(total, growth, repeat, successor=None, wall=None, in_paseo=None):
+def _ask_message(total, growth, repeat, successor=None, wall=None, in_paseo=None, mode=None):
     wall = AUTO_COMPACT_WALL if wall is None else wall
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     lead = "Context is still growing" if repeat else "Context is large"
-    if in_paseo:
+    if resolved == "paseo":
         action = (
             "run self-handoff Step 9 yourself "
             f"(the `self-handoff` skill's Tier 2 document, then {_SELF_HANDOFF}) and never "
             "hand the operator a /new (operator ruling 2026-11-14)"
         )
+    elif resolved == "herdr":
+        action = f"do a Herdr handoff ({_HERDR_HANDOFF})"
     else:
         action = f"do a local handoff ({_LOCAL_HANDOFF})"
     # bin/self-slash is gone (2026-11-06, slim-down E4): there is no path to queue a /compact for the session, so
@@ -797,18 +847,20 @@ def _ask_message(total, growth, repeat, successor=None, wall=None, in_paseo=None
         "re-writes ~46k. Keep going in-context only when the work must "
         "continue. "
         + _midtask_note(total, "let the auto-compaction take it", wall)
-        + _successor_note(successor, in_paseo=in_paseo) + " "
+        + _successor_note(successor, mode=resolved) + " "
         + _COST_NOTE
     )
 
 
-def _hard_repeat_message(total, growth, repeat_num, successor=None, wall=None, in_paseo=None):
+def _hard_repeat_message(total, growth, repeat_num, successor=None, wall=None, in_paseo=None, mode=None):
     wall = AUTO_COMPACT_WALL if wall is None else wall
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     left = max(0, wall - total)
     urgency = "URGENT — imminent auto-compaction" if left <= HANDOFF_RESERVE else "Hard handoff reminder"
-    if in_paseo:
+    if resolved == "paseo":
         action = f"run `/self-handoff` Step 9 now ({_SELF_HANDOFF}) before auto-compaction hits. "
+    elif resolved == "herdr":
+        action = f"do a Herdr handoff now before auto-compaction hits ({_HERDR_HANDOFF}). "
     else:
         action = f"do a local handoff now before auto-compaction hits ({_LOCAL_HANDOFF}). "
     return (
@@ -817,13 +869,13 @@ def _hard_repeat_message(total, growth, repeat_num, successor=None, wall=None, i
         "Still at or above the hard handoff tier — stop starting inline work and "
         + action
         + _midtask_note(total, "let the auto-compaction take it", wall)
-        + _successor_note(successor, in_paseo=in_paseo)
+        + _successor_note(successor, mode=resolved)
     )
 
 
-def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None, in_paseo=None):
+def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None, in_paseo=None, mode=None):
     wall = AUTO_COMPACT_WALL if wall is None else wall
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     pre_peak = handoff_due.get("peak") if isinstance(handoff_due, dict) else None
     pre_wall = handoff_due.get("wall") if isinstance(handoff_due, dict) else None
     if not _is_int(pre_wall) or pre_wall <= 0:
@@ -833,11 +885,13 @@ def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None,
         if _is_int(pre_peak) and pre_peak > 0
         else f"after reaching the hard handoff tier (wall {pre_wall:,})"
     )
-    if in_paseo:
+    if resolved == "paseo":
         action = (
             f"Run `/self-handoff` Step 9 now ({_SELF_HANDOFF}) and never hand the operator a /new "
             "(operator ruling 2026-11-14)."
         )
+    elif resolved == "herdr":
+        action = f"Do a Herdr handoff now ({_HERDR_HANDOFF})."
     else:
         action = f"Do a local handoff now ({_LOCAL_HANDOFF})."
     return (
@@ -845,7 +899,7 @@ def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None,
         f"and is now at {total:,} tokens in degraded compacted context. "
         "A hard handoff was already missed — do not keep working in this compacted session. "
         + action
-        + _successor_note(successor, in_paseo=in_paseo)
+        + _successor_note(successor, mode=resolved)
     )
 
 
@@ -862,18 +916,24 @@ def _repo_name(data):
     return os.path.basename((data.get("cwd") or "").rstrip("/")) or "claude"
 
 
-def _ping_compacted_overdue(data, handoff_due, total=None, in_paseo=None):
-    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
+def _ping_compacted_overdue(data, handoff_due, total=None, in_paseo=None, mode=None):
+    resolved = _resolve_mode(mode=mode, in_paseo=in_paseo)
     repo = _repo_name(data)
     pre_peak = handoff_due.get("peak") if isinstance(handoff_due, dict) else None
     pre_wall = handoff_due.get("wall") if isinstance(handoff_due, dict) else None
     peak_str = f"~{pre_peak // 1000}k" if _is_int(pre_peak) and pre_peak > 0 else "hard tier"
     wall_str = f"/{pre_wall // 1000}k" if _is_int(pre_wall) and pre_wall > 0 else ""
     now_str = f", now ~{total // 1000}k" if _is_int(total) else ""
-    if in_paseo:
+    if resolved == "paseo":
         msg = (
             f"{repo}: Claude Code auto-compacted after missed hard handoff "
             f"(peak {peak_str}{wall_str}{now_str}); /self-handoff is overdue."
+        )
+    elif resolved == "herdr":
+        msg = (
+            f"{repo}: Claude Code auto-compacted after missed hard handoff "
+            f"(peak {peak_str}{wall_str}{now_str}, Herdr mode); "
+            "/self-handoff (Steps 0-7 + bin/ade-herdr-handoff or manual /new + /baton) is overdue."
         )
     else:
         msg = (
@@ -1099,7 +1159,7 @@ def _check_state(data, event, session_id, transcript_path):
     seen = [v for v in (session_state.get("last"), session_state.get("peak")) if _is_int(v)]
     peak = max(seen) if seen else None
 
-    in_paseo = _in_paseo()
+    mode = _session_mode()
     if total == COMPACTED:
         # Compacted, no request since: the next measured size is the new floor.
         saved_wall = session_state.get("wall")
@@ -1116,7 +1176,7 @@ def _check_state(data, event, session_id, transcript_path):
             last_hard_nudge=None, hard_repeat_count=0,
         )
         if newly_due and not prev_paged:
-            _ping_compacted_overdue(data, session_state["handoff_due"], in_paseo=in_paseo)
+            _ping_compacted_overdue(data, session_state["handoff_due"], mode=mode)
             session_state["handoff_due"]["paged"] = True
         state[session_id] = session_state
         _save_state(state)
@@ -1184,7 +1244,7 @@ def _check_state(data, event, session_id, transcript_path):
             messages.append((_early_message(total, growth), "early"))
         else:
             messages.append((_ask_message(total, growth, repeat=fired >= 2,
-                                         successor=get_successor(), wall=wall, in_paseo=in_paseo), "ask"))
+                                         successor=get_successor(), wall=wall, mode=mode), "ask"))
             session_state["last_hard_nudge"] = now
             session_state["hard_repeat_count"] = 0
     elif level >= 2 and fired >= 2:
@@ -1196,7 +1256,7 @@ def _check_state(data, event, session_id, transcript_path):
             session_state["hard_repeat_count"] = repeat_count
             session_state["last_hard_nudge"] = now
             messages.append((_hard_repeat_message(total, growth, repeat_count,
-                                                 successor=get_successor(), wall=wall, in_paseo=in_paseo),
+                                                 successor=get_successor(), wall=wall, mode=mode),
                              "ask_repeat"))
     # Never lower the stored level on a dip: a compaction or a real shrink already reset it
     # above, and a smaller dip must not let the next climb past the tier reprint the message.
@@ -1206,7 +1266,7 @@ def _check_state(data, event, session_id, transcript_path):
     if (total >= tiers.boundary_total and _handoff_growth_ok(growth, tiers)
             and not session_state.get("boundary")):
         session_state["boundary"] = True
-        messages.append((_boundary_message(total, successor=get_successor(), wall=wall, in_paseo=in_paseo),
+        messages.append((_boundary_message(total, successor=get_successor(), wall=wall, mode=mode),
                          "boundary"))
 
     # Post-compaction handoff_due: if auto-compaction happened after reaching hard tier,
@@ -1218,7 +1278,7 @@ def _check_state(data, event, session_id, transcript_path):
         if event != "PostToolUse" or not _rate_limited(last_post, now, HARD_REPEAT_SECONDS):
             session_state["last_post_compact_nudge"] = now
             messages.append((_post_compact_handoff_message(total, handoff_due,
-                                                          successor=get_successor(), wall=wall, in_paseo=in_paseo),
+                                                          successor=get_successor(), wall=wall, mode=mode),
                              "post_compact_handoff_due"))
 
     if messages:
@@ -1241,11 +1301,19 @@ def _check_state(data, event, session_id, transcript_path):
             session_state["paged"] = True
             pinged_this_call = True
             repo = _repo_name(data)
-            if in_paseo:
+            if mode == "paseo":
                 ping_msg = (
                     f"{repo}: Claude Code context at ~{total // 1000}k/{wall // 1000}k "
                     f"(+{growth // 1000}k since start or last compact, hard handoff tier); "
                     "guided to run acknowledged /self-handoff Step 9 transfer "
+                    "(or continue in-context / let auto-compaction take it only if required)."
+                )
+            elif mode == "herdr":
+                ping_msg = (
+                    f"{repo}: Claude Code context at ~{total // 1000}k/{wall // 1000}k "
+                    f"(+{growth // 1000}k since start or last compact, hard handoff tier, "
+                    "Herdr mode); guided to write /self-handoff (Steps 0-7) and launch "
+                    "bin/ade-herdr-handoff (or manual /new + /baton) "
                     "(or continue in-context / let auto-compaction take it only if required)."
                 )
             else:
@@ -1263,7 +1331,7 @@ def _check_state(data, event, session_id, transcript_path):
     if handoff_due is not None and not handoff_due.get("paged") and not pinged_this_call:
         handoff_due["paged"] = True
         session_state["handoff_due"] = handoff_due
-        _ping_compacted_overdue(data, handoff_due, total=total, in_paseo=in_paseo)
+        _ping_compacted_overdue(data, handoff_due, total=total, mode=mode)
 
     state[session_id] = session_state
     _save_state(state)

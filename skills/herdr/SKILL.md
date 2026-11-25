@@ -32,11 +32,15 @@ djbclark-ade `AGENTS.md`). Where the upstream text below disagrees, these win.
    status. See the agent-surfaces skill and `docs/cross-harness-messaging.md`.
    Typing into a pane is only for a pane the operator names, and answering an
    approval or question card stays the operator's call.
-3. **Launching agents is not `herdr agent start`.** Launch through
+3. **Launching agents is not `herdr agent start`.** Ad-hoc worker delegation goes through
    `bin/route_agent.py plan` then `ade-worker-run` (`skills/fan-out`), so quota,
-   labels and the delivery footer apply. Use `herdr agent start` only when the
-   operator asks for it by name, and never in a workspace another writer holds,
-   in a claimed worktree you do not own, or in a shared checkout (`~/src/<repo>`).
+   labels and the delivery footer apply. The one sanctioned automated Herdr launcher
+   is `bin/ade-herdr-handoff` for whole-session self-handoff of a genuinely Herdr-hosted
+   session (outside Paseo, `PASEO_AGENT_ID` unset, `HERDR_ENV=1` + `HERDR_PANE_ID` confirmed
+   via `herdr pane current --current`; [docs/self-session.md Section H](../../docs/self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25)).
+   Otherwise use `herdr agent start` only when the operator asks for it by name, and never
+   in a workspace another writer holds, in a claimed worktree you do not own, or in a shared
+   checkout (`~/src/<repo>`).
 4. **Builds and tests in a pane** still go through `~/ops/site-private-djbclark/bin/bgrun`
    (after `load-watch ci decide`): `pane run` is not a way around it.
 

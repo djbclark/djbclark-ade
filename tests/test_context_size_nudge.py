@@ -888,8 +888,8 @@ def test_legacy_hard_state_without_prior_ping_pages_on_compacted_boundary_once(b
     assert len(pings) == 1
 
 
-def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
-    """Carried #122: non-Paseo / Herdr mode emits local-handoff guidance over PostToolUse JSON and pings."""
+def test_q122_herdr_posttooluse_and_compaction_flow(box, monkeypatch):
+    """Carried #122 Phase 2: Herdr mode emits bin/ade-herdr-handoff OR manual /new + /baton guidance."""
     monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w3H:p10")
@@ -901,9 +901,9 @@ def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
     assert "Context is large:" in msg0 and "At the next task completion" in msg0
     assert "never hand the operator a /new" not in msg0
     assert "ade-self-session handoff" not in msg0
-    assert "skip Step 9" in msg0 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg0
-    assert len(pings) == 1 and "non-Paseo local mode" in pings[0]
-    assert "guided to write local /self-handoff (Steps 0-7) for manual /new + /baton" in pings[0]
+    assert "bin/ade-herdr-handoff" in msg0 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg0
+    assert len(pings) == 1 and "Herdr mode" in pings[0]
+    assert "bin/ade-herdr-handoff" in pings[0] and "/new + /baton" in pings[0]
     assert "at its next boundary" not in pings[0]
 
     box.clock[0] += 65
@@ -912,7 +912,7 @@ def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
     assert "Hard handoff reminder (#1):" in msg1
     assert "never hand the operator a /new" not in msg1
     assert "ade-self-session handoff" not in msg1
-    assert "skip Step 9" in msg1
+    assert "bin/ade-herdr-handoff" in msg1
 
     box.clock[0] += 65
     assert box(compact=True, event="PostToolUse", sid="s-herdr") == ""
@@ -922,5 +922,35 @@ def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
     assert "Post-compaction handoff due:" in msg2
     assert "never hand the operator a /new" not in msg2
     assert "ade-self-session handoff" not in msg2
+    assert "bin/ade-herdr-handoff" in msg2 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg2
+    assert len(pings) == 2 and "Herdr mode" in pings[1] and "bin/ade-herdr-handoff" in pings[1]
+
+
+def test_q122_standalone_posttooluse_and_compaction_flow(box, monkeypatch):
+    """Carried #122: standalone non-Paseo / non-Herdr mode keeps local-handoff + manual /new + /baton."""
+    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    monkeypatch.delenv("HERDR_ENV", raising=False)
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
+    pings = []
+    monkeypatch.setattr(box.hook, "_send_ping", lambda msg, cwd=None: pings.append(msg))
+
+    out0 = box(220_000, event="PostToolUse", sid="s-standalone")
+    msg0 = json.loads(out0)["hookSpecificOutput"]["additionalContext"]
+    assert "Context is large:" in msg0 and "At the next task completion" in msg0
+    assert "never hand the operator a /new" not in msg0
+    assert "ade-self-session handoff" not in msg0
+    assert "ade-herdr-handoff" not in msg0
+    assert "skip Step 9" in msg0 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg0
+    assert len(pings) == 1 and "non-Paseo local mode" in pings[0]
+    assert "guided to write local /self-handoff (Steps 0-7) for manual /new + /baton" in pings[0]
+
+    box.clock[0] += 65
+    assert box(compact=True, event="PostToolUse", sid="s-standalone") == ""
+    box.clock[0] += 65
+    out2 = box(101_000, event="PostToolUse", sid="s-standalone")
+    msg2 = json.loads(out2)["hookSpecificOutput"]["additionalContext"]
+    assert "Post-compaction handoff due:" in msg2
+    assert "never hand the operator a /new" not in msg2
+    assert "ade-herdr-handoff" not in msg2
     assert "skip Step 9" in msg2 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg2
     assert len(pings) == 2 and "non-Paseo local mode" in pings[1] and "/new + /baton" in pings[1]

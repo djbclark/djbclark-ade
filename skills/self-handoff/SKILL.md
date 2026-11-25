@@ -53,13 +53,21 @@ document and Tier 1 pointer (Steps 1-7), then runs Step 9 for a whole-session tr
 ADE's acknowledged self-handoff lifecycle; ADE performs successor launch, acknowledgement, and
 retirement itself. Partial transfers follow Step 9's partial-transfer rule and keep this agent running.
 
-**Claude Code outside Paseo / Herdr mode (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
-when `$PASEO_AGENT_ID` is unset or blank (e.g. a Herdr pane or standalone Claude Code terminal),
+**Herdr mode (no `$PASEO_AGENT_ID`, genuine Herdr pane with `HERDR_ENV=1` + `HERDR_PANE_ID`, Carried #122 Phase 2, 2026-11-25):**
 complete Steps 0–7 locally (write, validate, commit/push the Tier 2 handoff doc and update Tier 1),
-skip Steps 8 and 9 (`ade-self-session` and Section C1 require Paseo), report the Tier 1 pointer
-path, Tier 2 handoff path, and next action, and let the operator run `/new` then
-`/baton <exact Tier 1 pointer>` (or bare `/baton` when workspace resolution is unambiguous) manually
-when ready.
+skip Step 8 (`paseo agent update` is Paseo-only), then in Step 9 either launch an automated Herdr
+successor tab via `~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint <abs-tier2-path> --tier1 <exact-tier1-pointer>`
+(verifies `herdr pane current --current`, opens a real interactive `claude` or `codex` TUI in a new
+tab of the same workspace, submits `/baton <tier1>` or `$baton <tier1>` once, writes a durable
+`schema_version: 1` record in `~/.local/state/djbclark-ade/herdr-handoff/`, and leaves this pane
+intact) OR let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually
+when preferred (operator ruling 2026-11-25).
+
+**Standalone non-Paseo / non-Herdr mode (no `$PASEO_AGENT_ID` and not in Herdr, operator ruling 2026-11-25):**
+complete Steps 0–7 locally, skip Steps 8 and 9 (`ade-self-session` and Section C1 require Paseo),
+report the Tier 1 pointer path, Tier 2 handoff path, and next action, and let the operator run
+`/new` then `/baton <exact Tier 1 pointer>` (or bare `/baton` when workspace resolution is
+unambiguous) manually when ready.
 
 ## Step 0 — Run the `loose` sweep silently first (operator rule, 2026-10-08)
 
@@ -327,10 +335,35 @@ blocker. For Paseo-hosted sessions, asking the operator to type reset or resume 
 the fallback. A separately authorized model change follows routing policy and the same
 acknowledgement/retirement checks.
 
-**Non-Paseo / Herdr Claude Code mode (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
-`ade-self-session` and Section C1 require Paseo. Outside Paseo, skip Steps 8 and 9 after completing
-Steps 0–7 locally, report the Tier 1 pointer path, Tier 2 handoff path, and next action, and let the
-operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready.
+**Herdr Step 9 path (no `$PASEO_AGENT_ID`, genuine Herdr pane, Carried #122 Phase 2, 2026-11-25):**
+after completing Steps 0–7 locally (skipping Step 8), run:
+
+```bash
+~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint ABSOLUTE_TIER2_PATH --tier1 EXACT_TIER1_POINTER [--kind claude|codex] [--model MODEL] [--effort LEVEL] [--title TEXT]
+```
+
+`ade-herdr-handoff` refuses if `$PASEO_AGENT_ID` is set (Paseo always wins), verifies exact
+`herdr pane current --current` plus OS ancestor process-tree membership via
+`herdr pane process-info --pane <id>`, validates all flags (including per-kind `--effort`) and
+checkpoint (symlinks refused) / Tier 1 files before mutating Herdr layout, acquires a per-pane
+advisory `flock`, opens a new tab in the same Herdr workspace, starts a real interactive TUI
+(`claude` with `--permission-mode bypassPermissions` or `codex` with
+`--dangerously-bypass-approvals-and-sandbox`), submits `/baton <tier1>` (Claude) or `$baton <tier1>`
+(Codex) once via non-waiting `herdr agent prompt`, writes a `schema_version: 1` JSON record (`0600`)
+under `~/.local/state/djbclark-ade/herdr-handoff/`, and leaves this predecessor pane intact (never
+closes or kills it, and never blind-retries on `agent_not_ready` / `agent_blocked` /
+`agent_prompt_stalled` / unknown outcomes; the successor establishes resume authority from the
+durable record and `session-handoff` live-owner check rather than treating the submitted prompt as
+operator consent; see
+[docs/self-session.md Section H](../../docs/self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25)).
+If the operator prefers manual reset in Herdr (operator ruling 2026-11-25), report the Tier 1/Tier 2
+paths and let them run `/new` + `/baton <exact Tier 1 pointer>` instead.
+
+**Standalone non-Paseo / non-Herdr mode (no `$PASEO_AGENT_ID` and not in Herdr, operator ruling 2026-11-25):**
+`ade-self-session` and Section C1 require Paseo. Outside both Paseo and Herdr, skip Steps 8 and 9
+after completing Steps 0–7 locally, report the Tier 1 pointer path, Tier 2 handoff path, and next
+action, and let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually
+when ready.
 
 **Automatic tracking & worker adoption:** A lead's other top-level workers (started with
 `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`, so they are not its
@@ -381,13 +414,14 @@ kept by `paseo logs` once `/baton` runs; an archived predecessor's log stays und
 Anything the operator must read goes into the handoff document, the Tier 1 pointer and the
 hermes-ping (`~/.local/bin/hermes-ping`, sent **before** this step), not only into the final message.
 
-**Document only:** skip this step when running Claude Code outside Paseo / in Herdr with no
+**Document only:** skip Step 9 when running in a standalone non-Paseo / non-Herdr terminal with no
 `$PASEO_AGENT_ID` (operator ruling 2026-11-25: complete Steps 0–7 locally and let the operator run
-`/new` then `/baton <exact Tier 1 pointer>` or `/baton`), when a skill that clears the session
+`/new` then `/baton <exact Tier 1 pointer>` or `/baton`), when the operator prefers manual `/new` +
+`/baton` inside Herdr, when a skill that clears the session
 itself runs the handoff, when the operator says "doc only" or otherwise asks for the document
 without a restart, or when you are a sub-agent or a dispatched slice (above). `loose` Rule 4 option
-1 wants this step to run in Paseo sessions: it does not make a Paseo handoff document-only. Say in
-the report that Step 9 was skipped and why.
+1 wants this step to run in Paseo (and automated Herdr) sessions: it does not make a handoff
+document-only. Say in the report that Step 9 was skipped and why.
 
 ## Opt-in NATS coordination
 
