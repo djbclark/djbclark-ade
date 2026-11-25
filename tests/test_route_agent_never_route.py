@@ -484,3 +484,17 @@ def test_automatic_discovery_excludes_explicit_mcp_profiles(monkeypatch):
     found = {svc.name for svc in r.discover({})}
     assert profiles.isdisjoint(found)
     assert "unrelated" in found
+
+
+def test_pi_catalog_excludes_operator_gated_models(shipped_policy, monkeypatch):
+    allowed = "zai/glm-5.3"
+    manual = ["Venice/z-ai-glm-5-3", "rfab/openai:gpt-6.2-sol"]
+    ids = [allowed, *manual]
+    rows = [{"id": model, "thinkingOptionIds": ["high"]} for model in ids]
+    monkeypatch.setattr(r, "_paseo_json", lambda _: (rows, None))
+    monkeypatch.setattr(r, "_pi_models", lambda models: models)
+    monkeypatch.setattr(r, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(r, "_PROVIDER_THINKING", {})
+    assert all(r.pi_excluded(model) for model in manual)
+    assert r.provider_models("pi") == [allowed]
+    assert r.provider_thinking_options("pi") == {allowed: ("high",)}

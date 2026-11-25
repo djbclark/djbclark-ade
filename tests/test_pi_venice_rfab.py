@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socketserver
 import subprocess
@@ -60,7 +61,6 @@ def broker(tmp_path, monkeypatch):
     exe = tmp_path / "sudo-secretspec"
     exe.write_text(f"#!/bin/sh\nprintf '%s' '{FIXTURE_KEY}'\n")
     exe.chmod(0o700)
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     for key in ("RFAB_API_KEY", "VENICE_API_KEY"):
         monkeypatch.delenv(key, raising=False)
     return exe
@@ -161,7 +161,7 @@ def run_pi(tmp_path, broker, provider, model, status, *, use_tool=False):
     before = '{"extensions":[],"customSetting":"retain"}\n'
     settings.write_text(before)
     env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent)}
-    with tempfile.TemporaryDirectory(dir=ROOT, prefix=".pi-http-") as directory:
+    with tempfile.TemporaryDirectory(dir="/tmp", prefix="pi-http-") as directory:
         if sys.platform == "darwin":
             # HTTP over an owned Unix socket keeps the Mac's TCP registry untouched.
             socket_path = str(Path(directory) / "http.sock")
@@ -196,10 +196,19 @@ const stream = (config) => (model, context, options) =>
             server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             transport = "const stream = (config) => config.streamSimple;\n"
             base_url = f"http://127.0.0.1:{server.server_port}/v1"
+        broker_command = json.dumps("!" + shlex.quote(str(broker)))
         wrapper.write_text(
             f"import load from {json.dumps(extension.as_uri())};\n" + transport +
-            "export default pi => load({registerProvider: (name, config) => "
-            f"pi.registerProvider(name, {{...config, baseUrl: {json.dumps(base_url)}, streamSimple: stream(config)}})}});\n"
+            """export default pi => load({ registerProvider(name, config) {
+  if (!config.apiKey.startsWith("!sudo-secretspec ")) {
+    throw new Error("fixture expected a sudo-secretspec command");
+  }
+""" + f"""  pi.registerProvider(name, {{
+    ...config, baseUrl: {json.dumps(base_url)}, streamSimple: stream(config),
+    apiKey: {broker_command} + config.apiKey.slice("!sudo-secretspec".length),
+  }});
+}} }});
+"""
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -235,7 +244,7 @@ def test_rfab_is_only_attached_by_explicit_worker_selection():
 def test_bridge_exits_on_eof_or_after_idle_without_resolving_secret(tmp_path, broker, eof):
     marker = tmp_path / "called"
     broker.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
-    with subprocess.Popen([str(BRIDGE), "--idle-timeout", "0.2"], stdin=subprocess.PIPE,
+    with subprocess.Popen([str(BRIDGE), "--secretspec-bin", str(broker), "--idle-timeout", "0.2"], stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
         try:
             if eof:
@@ -251,7 +260,8 @@ def test_bridge_exits_on_eof_or_after_idle_without_resolving_secret(tmp_path, br
 
 def test_bridge_broker_error_is_redacted(broker):
     write_fake_broker_error(broker)
-    result = subprocess.run([str(BRIDGE)], input='{"jsonrpc":"2.0","id":7,"method":"initialize"}\n',
+    result = subprocess.run([str(BRIDGE), "--secretspec-bin", str(broker)],
+                            input='{"jsonrpc":"2.0","id":7,"method":"initialize"}\n',
                             capture_output=True, text=True, check=True, timeout=20)
     reply = json.loads(result.stdout)
     assert reply["id"] == 7
@@ -307,7 +317,7 @@ def test_bridge_forwards_json_sse_and_closes_its_remote_session(broker):
         def close(self):
             closed.append(True)
 
-    bridge = mcp.Bridge(connect=Connection, output=output)
+    bridge = mcp.Bridge(connect=Connection, output=output, read_key=lambda: mcp.read_key(broker))
     bridge.forward({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                     "params": {"capabilities": {"roots": {}, "sampling": {}, "elicitation": {}}}})
     bridge.forward({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -324,3 +334,36 @@ def test_bridge_forwards_json_sse_and_closes_its_remote_session(broker):
     assert init["id"] == 1
     assert listed["result"]["text"] == "[redacted]"
     assert failed["error"]["message"] == "RFab MCP HTTP 401"
+
+
+@pytest.mark.parametrize(("status", "reply"), [
+    (401, {}),
+    (200, {"error": {"code": -32000, "message": FIXTURE_KEY}}),
+    (200, {"result": {"protocolVersion": "2025-11-25", "capabilities": None}}),
+])
+def test_failed_initialize_drops_key_and_blocks_tools_list(monkeypatch, status, reply):
+    from contextlib import contextmanager
+    from email.message import Message
+
+    requests = []
+    output = io.StringIO()
+
+    @contextmanager
+    def request(method, body):
+        requests.append((method, json.loads(body)))
+        response = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": 1, **reply}).encode())
+        response.status = status
+        response.headers = Message()
+        with response:
+            yield response
+
+    bridge = mcp.Bridge(output=output, read_key=lambda: FIXTURE_KEY)
+    monkeypatch.setattr(bridge, "request", request)
+    bridge.forward({"jsonrpc": "2.0", "method": "initialize", "id": 1})
+    assert bridge.key is None and bridge.protocol is None and bridge.session is None
+    bridge.forward({"jsonrpc": "2.0", "method": "tools/list", "id": 2})
+    assert len(requests) == 1
+    assert FIXTURE_KEY not in output.getvalue()
+    failed, refused = map(json.loads, output.getvalue().splitlines())
+    assert "error" in failed
+    assert refused["error"]["message"] == "Initialize the RFab MCP session first"

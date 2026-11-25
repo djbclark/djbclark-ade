@@ -1716,12 +1716,12 @@ PI_EXCLUDED_NAMESPACES = ("antigravity",)   # operator 2026-11-21: no antigravit
 
 def pi_excluded(model: str) -> bool:
     """Does `model` (`<namespace>/<id> ...`) sit in a namespace Pi must not route? Case-insensitive on the namespace."""
-    return model.partition("/")[0].lower() in PI_EXCLUDED_NAMESPACES
+    namespace = model.partition("/")[0].lower()
+    return namespace in PI_EXCLUDED_NAMESPACES or namespace in OPERATOR_GATED
 
 
-def _without_antigravity(ids: list[str] | None) -> list[str] | None:
-    """Pi's model list minus the namespaces Pi must not route (`antigravity/*`: Pi reaches Antigravity only through pre-paid
-    API money; the native `antigravity` Paseo provider is the route, operator 2026-11-21)."""
+def _routable_pi_models(ids: list[str] | None) -> list[str] | None:
+    """Pi's catalog for automatic routing, excluding all reserved model namespaces."""
     if ids is None:
         return None
     return [m for m in ids if not pi_excluded(m)]
@@ -1737,7 +1737,7 @@ def provider_models(provider: str) -> list[str] | None:
         ids: list[str] | None = parsed[0] if parsed is not None else None
         thinking: dict[str, tuple[str, ...]] = parsed[1] if parsed is not None else {}
         if provider == "pi":
-            ids = _without_antigravity(_pi_models(ids))
+            ids = _routable_pi_models(_pi_models(ids))
             allowed = set(ids or ())
             thinking = {m: opts for m, opts in thinking.items() if m in allowed}
         _PROVIDER_MODELS[provider] = ids

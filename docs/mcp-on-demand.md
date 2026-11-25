@@ -749,6 +749,6 @@ task-only attachment. ADE excludes task MCP profiles from automatic routing.
 Section 11.3's user-scope lazy bridge would expose
 the server to ordinary sessions.
 
-See the [launch and unload commands](mcp-servers.md#reality-fabricator-on-demand).
+See the [launch and unload commands](mcp-servers.md#reality-fabricator-on-demand-added-2026-11-25).
 Keep RFab out of the shared client MCP settings and attach it only on explicit
 operator request.

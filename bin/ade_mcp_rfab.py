@@ -24,10 +24,10 @@ class BridgeError(Exception):
     """A fixed, safe diagnostic. Never use an upstream error body as its text."""
 
 
-def read_key() -> str:
+def read_key(broker_bin: str | os.PathLike[str] = "sudo-secretspec") -> str:
     try:
         result = subprocess.run(
-            ["sudo-secretspec", "get", "RFAB_API_KEY", "--reason", "mcp-rfab-request"],
+            [broker_bin, "get", "RFAB_API_KEY", "--reason", "mcp-rfab-request"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -86,8 +86,9 @@ def response_messages(response):
 
 
 class Bridge:
-    def __init__(self, connect=http.client.HTTPSConnection, output=None):
+    def __init__(self, connect=http.client.HTTPSConnection, output=None, *, read_key=read_key):
         self.connect = connect
+        self.read_key = read_key
         self.output = sys.stdout if output is None else output
         self.key = None
         self.session = None
@@ -125,15 +126,19 @@ class Bridge:
                 self.emit({"jsonrpc": "2.0", "id": request_id,
                            "error": {"code": -32601, "message": "RFab MCP exposes tools only"}})
             return
+        initializing = method == "initialize"
         try:
-            if method == "initialize":
+            if initializing:
+                if self.protocol is not None:
+                    raise BridgeError("RFab MCP session is already initialized")
+                if not expects_result:
+                    raise BridgeError("RFab MCP initialize requires a request id")
                 # The remote server needs no access to local roots, client sampling or elicitation.
                 params = message.get("params", {})
                 message = {**message, "params": {**params, "capabilities": {}}}
-            if self.key is None:
-                if method != "initialize" or not expects_result:
-                    raise BridgeError("Initialize the RFab MCP session first")
-                self.key = read_key()
+                self.key = self.read_key()
+            elif self.protocol is None:
+                raise BridgeError("Initialize the RFab MCP session first")
             with self.request("POST", json.dumps(message).encode()) as response:
                 if response.status == 202 and not expects_result:
                     return
@@ -149,15 +154,17 @@ class Bridge:
                     matching = expects_result and "id" in reply and reply["id"] == request_id
                     if not matching:
                         continue
-                    if method == "initialize" and "result" in reply:
+                    if initializing and "result" in reply and "error" not in reply:
                         result = reply["result"]
                         version = result.get("protocolVersion")
                         if not isinstance(version, str) or not version:
                             raise BridgeError("RFab MCP initialization omitted the protocol version")
-                        self.protocol = version
-                        self.session = response.headers.get("Mcp-Session-Id")
                         caps = result.get("capabilities", {})
+                        if not isinstance(caps, dict):
+                            raise BridgeError("Invalid RFab MCP capabilities")
                         result["capabilities"] = {"tools": caps["tools"]} if "tools" in caps else {}
+                        self.session = response.headers.get("Mcp-Session-Id")
+                        self.protocol = version
                     self.emit(reply)
                     return
                 if expects_result:
@@ -168,6 +175,9 @@ class Bridge:
                 self.emit({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": detail}})
             else:
                 print(f"ade-mcp-rfab: {detail}", file=sys.stderr)
+        finally:
+            if initializing and self.protocol is None:
+                self.key = None
 
     def close(self):
         if self.session:
@@ -182,10 +192,14 @@ class Bridge:
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--idle-timeout", type=float, default=300, metavar="SECONDS")
+    parser.add_argument("--secretspec-bin", default="sudo-secretspec", metavar="PATH",
+                        help="absolute path to the credential broker")
     args = parser.parse_args(argv)
     if not math.isfinite(args.idle_timeout) or args.idle_timeout <= 0:
         parser.error("--idle-timeout must be positive and finite")
-    bridge = Bridge()
+    if args.secretspec_bin != "sudo-secretspec" and not os.path.isabs(args.secretspec_bin):
+        parser.error("--secretspec-bin must be an absolute path")
+    bridge = Bridge(read_key=lambda: read_key(args.secretspec_bin))
     try:
         for frame in messages(sys.stdin.fileno(), args.idle_timeout):
             if not frame.strip():

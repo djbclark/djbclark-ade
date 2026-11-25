@@ -1,5 +1,7 @@
 # Reality Fabricator API reference
 
+Model IDs and pricing were checked on 2026-11-25.
+
 Use Reality Fabricator only when the operator explicitly requests it for the
 task. Send only art prompts and approved public art references to the media
 API or MCP tools. Keep code, files, and private data out of those requests.
@@ -51,5 +53,5 @@ tokens, and a picture at default quality can cost a few cents.
 
 The manual [Pi provider](pi-services.md#veniceai-and-reality-fabricator-manual-access-2026-11-25)
 lives in `pi-extensions/rfab/`. For media tools, attach the
-[on-demand MCP bridge](mcp-servers.md#reality-fabricator-on-demand) with
+[on-demand MCP bridge](mcp-servers.md#reality-fabricator-on-demand-added-2026-11-25) with
 `ade-mcp-rfab` to the authorized task session.

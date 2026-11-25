@@ -182,7 +182,7 @@ def test_no_pi_pool_resolves_to_an_antigravity_model():
         assert not str(out.get("model_id") or "").startswith("antigravity/"), (kind, out)
         assert out.get("service") not in {"antigravity-neon", "antigravity-argon"}, (kind, out)
     for svc in router.SERVICES:
-        if svc.acp_agent == "pi":
+        if svc.acp_agent == "pi" and not router.is_never_routed(svc.name):
             for model in svc.models.values():
                 assert not router.pi_excluded(model.split()[0]), (svc.name, model)      # the one case-insensitive check
     # the native provider rows are the antigravity pools
@@ -204,4 +204,4 @@ def test_excluded_namespaces_match_case_insensitively():
     assert router.pi_excluded("antigravity/gemini-4-neon")
     assert router.pi_excluded("Antigravity/x") and router.pi_excluded("ANTIGRAVITY/x --effort high")
     assert not router.pi_excluded("cursor/composer-2.5") and not router.pi_excluded("antigravity-like/x")
-    assert router._without_antigravity(["Antigravity/x", "zai/glm-5.3-flash"]) == ["zai/glm-5.3-flash"]
+    assert router._routable_pi_models(["Antigravity/x", "zai/glm-5.3-flash"]) == ["zai/glm-5.3-flash"]
