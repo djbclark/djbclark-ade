@@ -24,10 +24,44 @@ def _run(*args: str, root: Path | None = None) -> subprocess.CompletedProcess:
     )
 
 
+FIXTURE_POLICY = """
+schema_version = 1
+[hardening]
+owners = ["djbclark"]
+check_user_interaction_limits = true
+api_version = "2026-03-10"
+
+[hardening.defaults]
+pr_creation_policy = "collaborators_only"
+issue_creation_policy = "collaborators_only"
+disable_wiki = true
+disable_projects = true
+disable_discussions = true
+fork_pr_workflows_approval = "all_external_contributors"
+default_workflow_permissions = "read"
+can_approve_pull_request_reviews = false
+
+[hardening.forks]
+pr_creation_policy = "disabled"
+
+[hardening.interaction_limits]
+limit = "collaborators_only"
+min_remaining_days = 14
+expiry = "six_months"
+
+[[hardening.repo]]
+owner = "djbclark"
+name = "djbclark-ade"
+profile = "active"
+merge_gate_ruleset = true
+ruleset_name = "merge-gate"
+"""
+
+
 def _fixture_root(tmp_path: Path, *, toml: str | None = None) -> Path:
     root = tmp_path / "repo"
     (root / "config").mkdir(parents=True)
-    text = toml if toml is not None else (REPO / "config" / "hardening.toml").read_text()
+    text = toml if toml is not None else FIXTURE_POLICY
     (root / "config" / "hardening.toml").write_text(text)
     (root / "config" / "hardening.schema.json").write_text(
         (REPO / "config" / "hardening.schema.json").read_text()
@@ -37,7 +71,11 @@ def _fixture_root(tmp_path: Path, *, toml: str | None = None) -> Path:
 
 def test_repo_hardening_toml_check_clean():
     cfg = ah.load_config(root=REPO)
-    assert cfg.owners == ["djbclark"]
+    assert cfg.owners == ["djbclark", "frdminc"]
+    assert cfg.inventory_max_inactive_days == 365
+    org_repos = [row for row in cfg.repos if row["owner"] == "frdminc"]
+    assert len(org_repos) == 19
+    assert all(row["profile"] == "active" for row in org_repos)
     assert any(
         r["owner"] == "djbclark" and r["name"] == "djbclark-ade" for r in cfg.repos
     )
@@ -46,6 +84,27 @@ def test_repo_hardening_toml_check_clean():
     payload = json.loads(proc.stdout)
     assert payload["ok"] is True
     assert "djbclark/djbclark-ade" in payload["summary"]["repos"]
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [("", None), ("inventory_max_inactive_days = 365", 365)],
+)
+def test_load_inventory_max_inactive_days(tmp_path, setting, expected):
+    toml = f"schema_version = 1\n[hardening]\n{setting}\n[hardening.defaults]\n"
+    cfg = ah.load_config(root=_fixture_root(tmp_path, toml=toml))
+    assert cfg.inventory_max_inactive_days == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "true", "false", '"365"', "365.0"])
+def test_rejects_invalid_inventory_max_inactive_days(tmp_path, value):
+    toml = (
+        f"schema_version = 1\n[hardening]\ninventory_max_inactive_days = {value}"
+        "\n[hardening.defaults]\n"
+    )
+    root = _fixture_root(tmp_path, toml=toml)
+    with pytest.raises(ah.HardenError, match="inventory_max_inactive_days"):
+        ah.load_config(root=root)
 
 
 def test_rejects_bad_pr_policy(tmp_path):
@@ -609,3 +668,82 @@ pr_creation_policy = "disabled"
     unc = next(f for f in findings if f.setting == "inventory.uncovered")
     assert unc.status == "uncovered"
     assert "frdminc/secret" in unc.found
+
+
+def test_inventory_inactivity_cutoff_through_observe(tmp_path):
+    now = datetime(2026, 11, 25, tzinfo=timezone.utc)
+    boundary = "2025-11-25T00:00:00Z"
+    old = "2025-11-24T23:59:59.999999Z"
+    recent = "2026-11-24T12:00:00Z"
+    toml = """
+schema_version = 1
+[hardening]
+owners = ["frdminc"]
+inventory_max_inactive_days = 365
+check_user_interaction_limits = false
+[hardening.defaults]
+[[hardening.repo]]
+owner = "frdminc"
+name = "listed"
+"""
+    cfg = ah.load_config(root=_fixture_root(tmp_path, toml=toml))
+    rows = {
+        "dormant": {"pushed_at": old, "updated_at": recent},
+        "listed": {"pushed_at": old},
+        "fork": {"pushed_at": old, "fork": True},
+        "boundary": {"pushed_at": boundary},
+        "recent": {"pushed_at": recent, "updated_at": old},
+        "missing": {},
+        "date-only": {"pushed_at": "2020-01-01", "updated_at": "2020-01-01T00:00:00"},
+        "malformed": {"pushed_at": "bad", "updated_at": "invalid"},
+        "fallback-old": {"pushed_at": None, "updated_at": old},
+        "fallback-recent": {"pushed_at": "bad", "updated_at": recent},
+    }
+    calls = []
+
+    def runner(argv):
+        calls.append(argv)
+        if _is_gh_user_login(argv):
+            payload = {"login": "djbclark"}
+        elif "orgs/frdminc/repos?type=all&per_page=100" in argv:
+            assert "pushed_at,updated_at}" in argv[-1]
+            payload = [
+                {"full_name": f"frdminc/{name}", "owner": "frdminc", **fields}
+                for name, fields in rows.items()
+            ]
+        elif "user/interaction-limits" in argv:
+            payload = {}
+        elif "repos/frdminc/listed" in argv:
+            payload = {"fork": False}
+        else:
+            pytest.fail(f"unexpected probe: {argv}")
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+    findings, rc = ah.observe(cfg, runner=runner, now=now)
+    assert rc == 1
+    inventory = {f.setting: f for f in findings if f.target == "owner:frdminc"}
+    skipped = inventory["inventory.inactive_skipped"]
+    assert skipped.status == "ok"
+    assert skipped.found == ["frdminc/dormant", "frdminc/fallback-old"]
+    assert inventory["inventory.forks"].found == ["frdminc/fork"]
+    uncovered = inventory["inventory.uncovered"]
+    assert uncovered.status == "uncovered"
+    assert uncovered.found == [
+        "frdminc/boundary",
+        "frdminc/date-only",
+        "frdminc/fallback-recent",
+        "frdminc/malformed",
+        "frdminc/missing",
+        "frdminc/recent",
+    ]
+    assert any("repos/frdminc/listed" in argv for argv in calls)
+
+    rows["dormant"]["pushed_at"] = recent
+    after_push = {f.setting: f for f in ah.observe_inventory(cfg, runner=runner, now=now)}
+    assert after_push["inventory.inactive_skipped"].found == ["frdminc/fallback-old"]
+    assert "frdminc/dormant" in after_push["inventory.uncovered"].found
+
+    del cfg.data["hardening"]["inventory_max_inactive_days"]
+    unfiltered = {f.setting: f for f in ah.observe_inventory(cfg, runner=runner, now=now)}
+    assert "inventory.inactive_skipped" not in unfiltered
+    assert "frdminc/fallback-old" in unfiltered["inventory.uncovered"].found

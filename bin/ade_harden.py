@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -85,6 +85,10 @@ class HardenConfig:
     def owners(self) -> list[str]:
         raw = self.hardening.get("owners") or []
         return [str(x) for x in raw if str(x).strip()]
+
+    @property
+    def inventory_max_inactive_days(self) -> int | None:
+        return self.hardening.get("inventory_max_inactive_days")
 
     @property
     def defaults(self) -> dict[str, Any]:
@@ -209,6 +213,9 @@ def _validate_hardening(data: dict[str, Any], *, path: Path) -> list[str]:
     if owners is not None:
         if not isinstance(owners, list) or any(not isinstance(x, str) or not x for x in owners):
             errors.append(f"{path}: hardening.owners must be a string array")
+    inactive_days = hard.get("inventory_max_inactive_days")
+    if inactive_days is not None and (type(inactive_days) is not int or inactive_days <= 0):
+        errors.append(f"{path}: hardening.inventory_max_inactive_days must be a positive integer")
     il = hard.get("interaction_limits")
     if il is not None:
         if not isinstance(il, dict):
@@ -860,7 +867,7 @@ def observe_repo(
     return findings
 
 
-def _parse_expires_at(raw: Any) -> datetime | None:
+def _parse_github_datetime(raw: Any, *, require_timezone: bool = False) -> datetime | None:
     if not isinstance(raw, str) or not raw.strip():
         return None
     text = raw.strip()
@@ -868,11 +875,13 @@ def _parse_expires_at(raw: Any) -> datetime | None:
         text = text[:-1] + "+00:00"
     try:
         dt = datetime.fromisoformat(text)
-    except ValueError:
+        if dt.tzinfo is None:
+            if require_timezone:
+                return None
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def observe_interaction_limits(
@@ -973,7 +982,7 @@ def observe_interaction_limits(
             remediation=rem,
         )
     )
-    expires = _parse_expires_at(data.get("expires_at"))
+    expires = _parse_github_datetime(data.get("expires_at"))
     if expires is None:
         findings.append(
             DriftFinding(
@@ -1041,12 +1050,14 @@ def observe_inventory(
     cfg: HardenConfig,
     *,
     runner: Runner,
+    now: datetime | None = None,
 ) -> list[DriftFinding]:
     """Name non-archived owner repos that lack an explicit [[hardening.repo]].
 
     Forks without a row are covered by [hardening.forks] (status ok/covered note).
-    Non-forks without a row are uncovered (drift). Does not deep-probe unlisted
-    repos in this unit. Uses authenticated user/org endpoints so private repos
+    Unlisted non-forks are uncovered unless their last push (or last update)
+    predates the optional inactivity cutoff. Does not deep-probe unlisted repos.
+    Uses authenticated user/org endpoints so private repos
     appear in the inventory (Argon E1.1 / pr-policy).
     """
     if not cfg.owners:
@@ -1074,6 +1085,11 @@ def observe_inventory(
                 detail=login_detail,
             )
         ]
+    days = cfg.inventory_max_inactive_days
+    as_of = now if now is not None else datetime.now(timezone.utc)
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=timezone.utc)
+    max_age = timedelta(days=min(days, timedelta.max.days)) if days is not None else None
     for owner in cfg.owners:
         path = _inventory_repos_path(owner, login)
         data, detail = _gh_json(
@@ -1083,7 +1099,8 @@ def observe_inventory(
                 "--paginate",
                 path,
                 "--jq",
-                ".[] | select(.archived|not) | {full_name,fork,name,owner:.owner.login}",
+                ".[] | select(.archived|not) | "
+                "{full_name,fork,name,owner:.owner.login,pushed_at,updated_at}",
             ],
             api_version=cfg.api_version,
         )
@@ -1102,6 +1119,7 @@ def observe_inventory(
         rows = data if isinstance(data, list) else [data]
         uncovered: list[str] = []
         fork_covered: list[str] = []
+        inactive_skipped: list[str] = []
         owner_l = owner.lower()
         for row in rows:
             if not isinstance(row, dict):
@@ -1117,8 +1135,15 @@ def observe_inventory(
                 continue
             if row.get("fork"):
                 fork_covered.append(full)
-            else:
-                uncovered.append(full)
+                continue
+            if max_age is not None:
+                modified = _parse_github_datetime(row.get("pushed_at"), require_timezone=True)
+                if modified is None:
+                    modified = _parse_github_datetime(row.get("updated_at"), require_timezone=True)
+                if modified is not None and as_of - modified > max_age:
+                    inactive_skipped.append(full)
+                    continue
+            uncovered.append(full)
         if fork_covered:
             findings.append(
                 DriftFinding(
@@ -1131,6 +1156,17 @@ def observe_inventory(
                         f"{len(fork_covered)} unlisted fork(s) covered by "
                         "[hardening.forks] (deep probe deferred)"
                     ),
+                )
+            )
+        if inactive_skipped:
+            findings.append(
+                DriftFinding(
+                    target=f"owner:{owner}",
+                    setting="inventory.inactive_skipped",
+                    wanted=f"last push or update within {days}d or explicit [[hardening.repo]]",
+                    found=sorted(inactive_skipped),
+                    status="ok",
+                    detail=f"{len(inactive_skipped)} unlisted non-fork repo(s) untouched >{days}d skipped",
                 )
             )
         if uncovered:
@@ -1156,7 +1192,7 @@ def observe_inventory(
                     wanted=[],
                     found=[],
                     status="ok",
-                    detail="no uncovered non-fork repos on first pages",
+                    detail="no uncovered non-fork repos",
                 )
             )
     return findings
@@ -1200,7 +1236,7 @@ def observe(
     for row in cfg.repos:
         findings.extend(observe_repo(cfg, row, runner=run))
     findings.extend(observe_interaction_limits(cfg, runner=run, now=now))
-    findings.extend(observe_inventory(cfg, runner=run))
+    findings.extend(observe_inventory(cfg, runner=run, now=now))
     findings.extend(
         _coverage_findings(
             cfg,

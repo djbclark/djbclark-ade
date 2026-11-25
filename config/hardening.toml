@@ -7,11 +7,9 @@ schema_version = 1
 
 [hardening]
 # Owners scanned for uncovered repos (E1.1). Empty skips inventory.
-# Known gap (org move, 2026-11-21): repos that moved to the frdminc org (82 repos, 35 of them
-# non-forks on 2026-11-21; Carried 110 holds the decision) are not scanned: adding "frdminc" would make every unlisted non-fork read as
-# uncovered and turn the daily harden-check red until each gets a [[hardening.repo]] row.
-# Operator call; the moved forks lost their implicit [hardening.forks] cover meanwhile.
-owners = ["djbclark"]
+# Operator ruling (2026-11-25): skip unlisted non-forks untouched for over 365 days.
+owners = ["djbclark", "frdminc"]
+inventory_max_inactive_days = 365
 check_user_interaction_limits = true
 api_version = "2026-03-10"
 
@@ -56,3 +54,98 @@ name = "djbclark-ade"
 profile = "active"
 merge_gate_ruleset = true
 ruleset_name = "merge-gate"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "RevengeQuickSwitcher"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "android-text-integrated-icons"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "autojs6-typescript"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "barnowl-test-evidence"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "herdr-plain-line"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "herdr-sleeper"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "herdr4paseo"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "homebrew-sudo-secretspec"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "ops-djbclark"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "paseo-plugin-dann-workspace-accent"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "paseo-plugin-questions-please"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "paseo-runner"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "peer-link"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "site-private-dann"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "techno-euphora"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "tendcf"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "warpbuild-pilot"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "wristchess-phone"
+profile = "active"
+
+[[hardening.repo]]
+owner = "frdminc"
+name = "wristchess-unihertz-titan-2-elite-mod"
+profile = "active"
