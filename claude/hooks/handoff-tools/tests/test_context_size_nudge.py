@@ -60,8 +60,17 @@ def settings_file(monkeypatch, tmp_path_factory):
 
 @pytest.fixture
 def hook(monkeypatch, tmp_path, capsys):
-    """Run the hook once per call; returns (stdout, pings sent)."""
+    """Run the hook once per call; returns (stdout, pings sent).
+
+    Defaults to Paseo mode (`PASEO_AGENT_ID` set) so existing Paseo-mode tests stay
+    deterministic under GitHub Actions CI where `PASEO_AGENT_ID` is unset; non-Paseo
+    tests explicitly clear/blank `PASEO_AGENT_ID`.
+    """
+    monkeypatch.setenv("PASEO_AGENT_ID", "11111111-1111-4111-8111-111111111111")
+    monkeypatch.delenv("HERDR_ENV", raising=False)
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(nudge, "LOG_PATH", tmp_path / "nudges.log")
     pings = []
     monkeypatch.setattr(
         subprocess, "Popen", lambda cmd, **kwargs: pings.append(cmd),
@@ -226,8 +235,11 @@ def test_ask_message_at_the_hard_tier_bare(hook, tmp_path):
     assert "/new is ready" not in out and "never hand the operator a /new" in out
     assert "self-slash" not in out
     assert f"{nudge.AUTO_COMPACT_WALL - nudge.ASK_TOTAL:,} from now" in out
-    # 2026-11-24 (e0d271f5 fix): hard tier (level >= 2) now pages once per climb on every wall.
-    assert len(pings) == 1 and "/self-handoff then /new" in pings[0][1]
+    # 2026-11-24 (e0d271f5 fix) / 2026-11-25 (q122 r2): hard tier pages once per climb with
+    # accurate Paseo Step 9 guidance (never advertising /new or promising unverified actions).
+    assert len(pings) == 1
+    assert "acknowledged /self-handoff Step 9 transfer" in pings[0][1]
+    assert "/new" not in pings[0][1] and "at its next boundary" not in pings[0][1]
 
 
 def test_ask_message_at_ask_total(hook, tmp_path):
@@ -686,7 +698,8 @@ def test_page_once_at_plus_300k(hook, tmp_path):
     _, pings = hook("s-page", path)
     assert len(pings) == 1
     assert pings[0][0] == str(nudge.PING_BIN)
-    assert "/self-handoff then /new" in pings[0][1]
+    assert "acknowledged /self-handoff Step 9 transfer" in pings[0][1]
+    assert "/new" not in pings[0][1]
     _append(path, _usage(40_000 + nudge.PAGE_GROWTH + 10_000))
     _, pings = hook("s-page", path)
     assert pings == []
@@ -750,16 +763,26 @@ def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
 
 
 _OPUS_NOTE = "relaunch `claude --model claude-opus-5-5`"
+_PASEO_OPUS_AUTH = "switching to `claude/claude-opus-5-5` is advisory and requires explicit operator authorization first"
 
 
 def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     path = _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-fable", path)
-    assert out.count(_OPUS_NOTE) == 1 and "At the next task completion" in out
+    assert "At the next task completion" in out
     assert "this session runs on Fable" in out and "self-slash" not in out
+    assert out.count(_PASEO_OPUS_AUTH) == 1
+    assert "once authorized, pass `--provider claude/claude-opus-5-5` to `ade-self-session handoff`" in out
+    assert "retaining Paseo acknowledgement and retirement checks" in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
     _append(path, _model_transcript(tmp_path, _FABLE, nudge.ASK_TOTAL, name="x.jsonl").read_text())
     out, _ = hook("s-fable", path)
-    assert "Context is large" in out and _OPUS_NOTE in out
+    assert "Context is large" in out
+    assert _PASEO_OPUS_AUTH in out
+    assert "once authorized, pass `--provider claude/claude-opus-5-5` to `ade-self-session handoff`" in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
 
 
 def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
@@ -769,7 +792,7 @@ def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     assert nudge._fable_lead_allowed() is True
     out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
+    assert "this session runs on Fable" not in out and "--provider" not in out and "relaunch" not in out
     monkeypatch.delenv("ROUTING_POLICY")
     shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "ade.toml"
     assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
@@ -797,12 +820,14 @@ def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     assert nudge._fable_lead_allowed() is False
     out, _ = hook("s-fable-nolead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
-    assert _OPUS_NOTE in out
+    assert _PASEO_OPUS_AUTH in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
 
 
 def test_other_models_get_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-opus", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
+    assert "this session runs on Fable" not in out and "--provider" not in out and "relaunch" not in out
 
 
 def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):
@@ -947,3 +972,130 @@ def test_q98_small_window_successor_above_80k_does_not_re_handoff_until_growth(h
     _append(path, _usage(85_000 + nudge.ASK_MIN_GROWTH))
     out, _ = hook(f"s-q98-{window}", path)
     assert "Context is large" in out and "At the next task completion" in out
+
+
+# --- Carried #122 (2026-11-25): Paseo vs non-Paseo / Herdr Claude Code local-handoff mode ---
+
+
+@pytest.mark.parametrize("env_overrides", [
+    {"PASEO_AGENT_ID": None},
+    {"PASEO_AGENT_ID": ""},
+    {"PASEO_AGENT_ID": "   "},
+    {"PASEO_AGENT_ID": None, "HERDR_ENV": "1", "HERDR_PANE_ID": "w3H:p10"},
+])
+def test_q122_non_paseo_herdr_mode_all_four_messages_and_pings(hook, tmp_path, monkeypatch, env_overrides):
+    """Operator ruling 2026-11-25: without PASEO_AGENT_ID, direct local /self-handoff Steps 0-7,
+    skip Step 9, and manual /new + /baton across boundary, ask, ask_repeat, and post_compact_handoff_due."""
+    for key, val in env_overrides.items():
+        if val is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, val)
+    assert nudge._in_paseo() is False
+
+    # 1. boundary
+    path = _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL, name="nonpaseo.jsonl")
+    out_boundary, pings_b = hook("s-np", path)
+    assert "At the next task completion" in out_boundary and pings_b == []
+
+    # 2. ask (hard tier) + hard-tier ping
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out_ask, pings_ask = hook("s-np", path)
+    assert "Context is large" in out_ask
+    assert len(pings_ask) == 1
+    assert "non-Paseo local mode" in pings_ask[0][1]
+    assert "guided to write local /self-handoff (Steps 0-7) for manual /new + /baton" in pings_ask[0][1]
+    assert "Step 9" not in pings_ask[0][1] and "at its next boundary" not in pings_ask[0][1]
+
+    # 3. ask_repeat (still at/above hard tier)
+    _append(path, _usage(nudge.ASK_TOTAL + 10_000))
+    out_repeat, pings_rep = hook("s-np", path)
+    assert "Hard handoff reminder (#1):" in out_repeat and pings_rep == []
+
+    # 4. post_compact_handoff_due + post-compaction overdue ping
+    _append(path, _BOUNDARY_LINE + _usage(104_000))
+    out_post, pings_post = hook("s-np", path)
+    assert "Post-compaction handoff due:" in out_post
+    assert len(pings_post) == 1
+    assert "auto-compacted after missed hard handoff" in pings_post[0][1]
+    assert "non-Paseo local mode" in pings_post[0][1]
+    assert "Steps 0-7" in pings_post[0][1] and "/new + /baton" in pings_post[0][1]
+
+    for label, text in (
+        ("boundary", out_boundary),
+        ("ask", out_ask),
+        ("ask_repeat", out_repeat),
+        ("post_compact_handoff_due", out_post),
+    ):
+        assert "never hand the operator a /new" not in text, label
+        assert "ade-self-session handoff" not in text, label
+        assert "Step 9 yourself" not in text and "Step 9 now" not in text, label
+        assert "non-Paseo / Herdr Claude Code mode" in text, label
+        assert "/self-handoff" in text and "Steps 0-7" in text, label
+        assert "skip Step 9" in text, label
+        assert "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in text, label
+
+
+def test_q122_paseo_mode_wins_even_when_herdr_env_is_inherited(hook, tmp_path, monkeypatch):
+    """skills/herdr/SKILL.md ADE rule 1: HERDR_ENV=1 can be inherited from a daemon started in a pane;
+    when PASEO_AGENT_ID is set, Paseo mode still preserves Step 9 and 'never hand the operator a /new'."""
+    monkeypatch.setenv("PASEO_AGENT_ID", "22222222-2222-4222-8222-222222222222")
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w3H:p10")
+    assert nudge._in_paseo() is True
+
+    path = _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL, name="paseo-herdr.jsonl")
+    out_boundary, _ = hook("s-ph", path)
+    assert "never hand the operator a /new" in out_boundary
+    assert "ade-self-session handoff" in out_boundary and "skip Step 9" not in out_boundary
+
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out_ask, pings_ask = hook("s-ph", path)
+    assert "never hand the operator a /new" in out_ask
+    assert "ade-self-session handoff" in out_ask and "skip Step 9" not in out_ask
+    assert len(pings_ask) == 1
+    assert "acknowledged /self-handoff Step 9 transfer" in pings_ask[0][1]
+    assert "/new" not in pings_ask[0][1] and "at its next boundary" not in pings_ask[0][1]
+
+    _append(path, _usage(nudge.ASK_TOTAL + 10_000))
+    out_repeat, _ = hook("s-ph", path)
+    assert "Hard handoff reminder (#1):" in out_repeat
+    assert "ade-self-session handoff" in out_repeat and "skip Step 9" not in out_repeat
+
+    _append(path, _BOUNDARY_LINE + _usage(104_000))
+    out_post, pings_post = hook("s-ph", path)
+    assert "Post-compaction handoff due:" in out_post
+    assert "never hand the operator a /new" in out_post
+    assert "ade-self-session handoff" in out_post and "skip Step 9" not in out_post
+    assert len(pings_post) == 1 and "/self-handoff is overdue." in pings_post[0][1]
+
+
+def test_q122_non_paseo_fable_transcript_coherent_relaunch_and_baton_note(hook, tmp_path, monkeypatch):
+    """Round 2 LOW #1: non-Paseo Fable session with fable_lead=false gets a single coherent sequence
+    (Steps 0-7, instead of /new in Fable, relaunch claude --model claude-opus-5-5 + /baton)."""
+    monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w3H:p10")
+
+    path = _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL, name="np-fable.jsonl")
+    out_boundary, _ = hook("s-np-fable", path)
+    _append(path, _model_transcript(tmp_path, _FABLE, nudge.ASK_TOTAL, name="np-f2.jsonl").read_text())
+    out_ask, _ = hook("s-np-fable", path)
+    _append(path, _model_transcript(tmp_path, _FABLE, nudge.ASK_TOTAL + 10_000, name="np-f3.jsonl").read_text())
+    out_repeat, _ = hook("s-np-fable", path)
+    _append(path, _BOUNDARY_LINE + _model_transcript(tmp_path, _FABLE, 104_000, name="np-f4.jsonl").read_text())
+    out_post, _ = hook("s-np-fable", path)
+
+    for label, text in (
+        ("boundary", out_boundary),
+        ("ask", out_ask),
+        ("ask_repeat", out_repeat),
+        ("post_compact_handoff_due", out_post),
+    ):
+        assert "this session runs on Fable" in text, label
+        assert "instead of `/new` in this Fable process" in text, label
+        assert _OPUS_NOTE in text, label
+        assert "resume with `/baton <exact Tier 1 pointer>` (or `/baton`)" in text, label
+        assert "--provider" not in text, label
+        assert "ade-self-session handoff" not in text, label
+        assert "never hand the operator a /new" not in text, label

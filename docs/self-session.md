@@ -33,9 +33,14 @@ The executable requires the full `PASEO_AGENT_ID` supplied by Paseo. Handoff als
 requires `PASEO_WORKSPACE_ID` in Paseo's `wks_` plus 16 lowercase hexadecimal
 digit format (verified against `paseo workspace ls --json`, 2026-11-12). Agent
 IDs retain UUID validation. An unrelated shell or a cross-host invocation is
-unsupported. `--paseo-home DIR` pins the local daemon home for every command;
-use the same home/state directory for every step. The default state directory is
-`~/.local/state/djbclark-ade/self-session`.
+unsupported. **Non-Paseo / Herdr Claude Code exception (operator ruling 2026-11-25):**
+when `PASEO_AGENT_ID` is unset or blank (such as a Herdr pane or standalone Claude
+Code terminal), `ade-self-session` refuses with a local-handoff hint; write the
+Tier 1/Tier 2 handoff locally (`/self-handoff` Steps 0–7), skip Step 9, and let
+the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)
+manually when ready. `--paseo-home DIR` pins
+the local daemon home for every command; use the same home/state directory for
+every step. The default state directory is `~/.local/state/djbclark-ade/self-session`.
 
 ## B. Self-compact
 
@@ -517,9 +522,14 @@ inspect before retry. A partial transfer leaves the predecessor running.
 
 If native identity/mode checks or acknowledgement cannot be completed, preserve
 the checkpoint and predecessor, report the precise blocker, and continue safe
-work in the existing session where possible. Operator typing is never a fallback;
-do not inject reset commands into a terminal. Unsupported runtime remains a
-blocker, not a successful handoff.
+work in the existing session where possible. For Paseo-hosted sessions, operator
+typing is never a fallback; do not inject reset commands into a terminal.
+Unsupported runtime remains a blocker, not a successful handoff. **Non-Paseo /
+Herdr Claude Code exception (operator ruling 2026-11-25):** Section C1 applies to
+Paseo workspaces only; in a Claude Code session outside Paseo (no `PASEO_AGENT_ID`,
+e.g. a Herdr pane or standalone terminal), write the Tier 1/Tier 2 handoff locally
+(`/self-handoff` Steps 0–7), skip Step 9 and C1, and let the operator run `/new`
+then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready.
 
 ## D. Duplicates, partial failures and status
 

@@ -10,15 +10,23 @@ description: >-
 
 # Baton — resume a task workspace from its Tier 1 pointer
 
-**Provider scope.** Compaction (Claude/Pi auto-compaction) continues an existing session; it does not start a new baton. Only resume a fresh session after the
-owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor. Never
+**Provider scope.** Compaction (Claude/Pi auto-compaction) continues an existing session; it does not start a new baton. Never
 clear a parent session to make a child resume. See [context hygiene](../../docs/context-hygiene.md).
 
-After a whole-session handoff, the predecessor runs `ade-self-session handoff`
-with its durable checkpoint; the new agent resumes from that checkpoint and its
-exact Tier 1 pointer. See [self-session](../../docs/self-session.md#c-self-handoff-to-a-new-session)
-for `accept` / `finish` and the agent-run fallback. The predecessor launches the
-successor itself; no operator reset or pasted prompt is required.
+- **Paseo-hosted sessions (`$PASEO_AGENT_ID` set):** only resume a fresh session after the
+  owned Tier 1 checkpoint is durable and the supported lifecycle controller has acknowledged that successor.
+  After a whole-session handoff, the predecessor runs `ade-self-session handoff`
+  with its durable checkpoint; the new agent resumes from that checkpoint and its
+  exact Tier 1 pointer. See [self-session](../../docs/self-session.md#c-self-handoff-to-a-new-session)
+  for `accept` / `finish` and the agent-run fallback. The predecessor launches the
+  successor itself; no operator reset or pasted prompt is required.
+- **Non-Paseo / Herdr Claude Code sessions (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
+  no Paseo lifecycle controller or `ade-self-session` acknowledgement exists outside Paseo. After
+  the predecessor writes the durable Tier 1 + Tier 2 checkpoints locally (`/self-handoff` Steps 0–7,
+  skipping Steps 8 and 9) and the operator runs `/new`, resume via `/baton <exact Tier 1 pointer>`
+  (or bare `/baton` only when workspace resolution is unambiguous and ownership-checked). All
+  `session-handoff` live-owner and no-competing-owner checks still apply: never silently take over a
+  chain that has another live owner.
 
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed
@@ -61,7 +69,10 @@ nothing matches, the exemptions for your own chain, the named successor and your
 `/new`). It applies only before the first write or resume; a read-only `/baton` just reports the owner.
 Reconciled with the paragraph above: a directory-resolved pointer owned by another live session is not yours,
 look further; a chain that is yours by `/new` or the operator's naming but that a live other session also owns
-is asked about first. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
+is asked about first. For a non-Paseo / Herdr local handoff after `/new`, passing `/baton <exact Tier 1 pointer>`
+explicitly names the chain (Exemption C, while still running the live-owner and competing-owner checks of
+`session-handoff` Owner check steps 2–5); use bare `/baton` only when workspace resolution is unambiguous and
+ownership-checked. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,
