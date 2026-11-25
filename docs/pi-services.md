@@ -141,15 +141,19 @@ A new Pi session without `-e` unloads `rfab`. Pi resolves
 Any quota or payment refusal comes from the provider. Venice reported
 `canConsume: false` in the operator's 2026-11-25 balance check.
 
-On load, `pi-extensions/venice/index.mjs` dynamically loads Venice's online
-text catalog from `https://api.venice.ai/api/v1/models` (public,
-unauthenticated) with a 15-minute on-disk cache at
-`$PI_CODING_AGENT_DIR/cache/venice-models.json` (7-day stale fallback), a
-3-second fetch timeout, `refreshModels` support for Pi's model picker, and
-fallback to the bundled `pi-extensions/venice/models.json` shortlist when
-offline (2026-11-25). Pricing reflects base USD per million tokens; Venice can
-charge a higher rate for extended context. RFab publishes relative billing
-multipliers and tool capabilities.
+On extension load or `/reload`, `pi-extensions/venice/index.mjs` dynamically
+loads Venice's online text catalog from `https://api.venice.ai/api/v1/models`
+(public, unauthenticated; no `sudo-secretspec` call during discovery) with a
+15-minute fresh cache at `~/.pi/agent/cache/venice-models.json` (or
+`$PI_CODING_AGENT_DIR/cache/venice-models.json` with `~` expansion; assumes a
+user-owned cache directory) and a 3-second fetch timeout (2026-11-25). Fallback
+order is fresh cache, live fetch, stale cache up to 7 days old, then the
+bundled `pi-extensions/venice/models.json` shortlist. `PI_OFFLINE=1`
+(`pi --offline`) and `PI_VENICE_DISABLE_DISCOVERY=1` skip network discovery on
+startup. Picker `refreshModels` is intentionally omitted so opening `/model`
+never triggers `apiKey` broker resolution. Pricing reflects base USD per
+million tokens; Venice can charge a higher rate for extended context. RFab
+publishes relative billing multipliers and tool capabilities.
 Its Pi rows use a conservative 65,536-token window, 16,384-token output ceiling,
 text input, and zero cost fields as placeholders. The API also caps input at
 400,000 characters. Actual charges follow provider usage and the RFab rate

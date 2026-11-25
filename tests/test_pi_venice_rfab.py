@@ -49,7 +49,7 @@ await load({
     registration = json.loads(result.stdout)
     config = registration["config"]
     assert registration["provider"] == provider
-    assert registration["hasRefresh"] is (provider == "venice")
+    assert registration["hasRefresh"] is False
     assert "operator-gated" in config["name"]
     assert config["baseUrl"] == f"https://api.{domain}/api/v1"
     assert config["api"] == "openai-completions"
@@ -59,6 +59,55 @@ await load({
         assert model["contextWindow"] > model["maxTokens"] > 0
         assert set(model["cost"]) == {"input", "output", "cacheRead", "cacheWrite"}
         assert model["compat"]["maxTokensField"] == ("max_tokens" if provider == "venice" else "max_completion_tokens")
+
+
+def test_venice_offline_factory_skips_network_discovery(tmp_path):
+    extension = ROOT / "pi-extensions/venice/index.mjs"
+    script = """
+import assert from "node:assert/strict";
+let fetchCalls = 0;
+globalThis.fetch = async () => {
+  fetchCalls += 1;
+  throw new Error("network should not be called when PI_OFFLINE=1");
+};
+const { default: load } = await import(process.argv[1]);
+let registered = null;
+await load({ registerProvider: (provider, config) => { registered = { provider, config }; } });
+assert.equal(fetchCalls, 0);
+assert.equal(registered.provider, "venice");
+assert.equal(registered.config.models.length, 5);
+assert.equal("refreshModels" in registered.config, false);
+console.log("ok");
+"""
+    env = {**os.environ, "PI_CODING_AGENT_DIR": str(tmp_path), "PI_OFFLINE": "1"}
+    env.pop("PI_VENICE_DISABLE_DISCOVERY", None)
+    result = subprocess.run(["node", "--input-type=module", "-e", script, extension.as_uri()],
+                            cwd=ROOT, env=env, capture_output=True, check=True, text=True, timeout=20)
+    assert result.stdout.strip() == "ok"
+
+
+def test_venice_pi_list_models_never_invokes_broker(tmp_path, broker):
+    pi = shutil.which("pi")
+    if not pi:
+        pytest.skip("real Pi CLI is installed by the Pi provider CI job")
+    marker = tmp_path / "broker-called"
+    broker.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf '%s' '{FIXTURE_KEY}'\n")
+    extension = ROOT / "pi-extensions/venice/index.mjs"
+    wrapper = tmp_path / "venice-wrapper.mjs"
+    broker_command = json.dumps("!" + shlex.quote(str(broker)))
+    wrapper.write_text(
+        f"import load from {json.dumps(extension.as_uri())};\n"
+        "export default pi => load({ registerProvider(name, config) {\n"
+        f"  pi.registerProvider(name, {{ ...config, apiKey: {broker_command} + config.apiKey.slice('!sudo-secretspec'.length) }});\n"
+        "} });\n"
+    )
+    agent = tmp_path / "agent"
+    agent.mkdir()
+    env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent), "PI_OFFLINE": "1"}
+    result = subprocess.run([pi, "--no-extensions", "-e", str(wrapper), "--list-models"],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, check=True, timeout=30)
+    assert "openai-gpt-62-sol" in result.stdout
+    assert not marker.exists()
 
 
 def test_venice_dynamic_catalog_cache_and_fallback(tmp_path):
@@ -74,6 +123,16 @@ const fallback = JSON.parse(await readFile(process.argv[2], "utf8"));
 const tmpDir = process.argv[3];
 const cachePath = join(tmpDir, "cache", "venice-models.json");
 
+// Tilde expansion in PI_CODING_AGENT_DIR matches Pi's getAgentDir().
+assert.equal(
+  mod.resolveCachePath({ PI_CODING_AGENT_DIR: "~/custom-pi" }, "/Users/example"),
+  "/Users/example/custom-pi/cache/venice-models.json",
+);
+assert.equal(
+  mod.resolveCachePath({ PI_CODING_AGENT_DIR: "~" }, "/Users/example"),
+  "/Users/example/cache/venice-models.json",
+);
+
 const samplePayload = {
   data: [
     {
@@ -81,14 +140,14 @@ const samplePayload = {
       type: "text",
       context_length: 1000000,
       model_spec: {
-        name: "Abliterated Large V2\n",
+        name: "Abliterated \u202eLarge V2\n",
         offline: false,
         availableContextTokens: 1000000,
         maxCompletionTokens: 32768,
         capabilities: {
           supportsReasoning: true,
-          supportsReasoningEffort: false,
-          supportsVision: false,
+          supportsReasoningEffort: "false",
+          supportsVision: "true",
         },
         pricing: {
           input: { usd: 3 },
@@ -122,11 +181,14 @@ const samplePayload = {
     { id: "image-gen", type: "image", context_length: 8192 },
     { id: "bad id with space", type: "text", context_length: 8192 },
     { id: "zero-ctx", type: "text", context_length: 0 },
+    { id: "unsafe-ctx", type: "text", context_length: 1e30 },
+    { id: "x".repeat(129), type: "text", context_length: 8192 },
   ],
 };
 
-// 1. Live fetch normalizes, filters, clamps, sorts, sends no Authorization, and caches (0600).
-let calls = [];
+// 1. Live fetch normalizes, enforces exact booleans, strips bidi/controls, clamps, sorts,
+// sends no Authorization, and writes cache atomically (0600).
+const calls = [];
 const okFetch = async (url, init) => {
   calls.push({ url, headers: init?.headers ?? {} });
   return new Response(JSON.stringify(samplePayload), {
@@ -168,16 +230,19 @@ assert.equal(alpha.compat.supportsReasoningEffort, true);
 const st = await lstat(cachePath);
 assert.equal(st.mode & 0o777, 0o600);
 
-// 2. Fresh cache hit performs zero network calls.
+// 2. Fresh cache hit performs zero network calls (explicit counter, not swallowed throw).
+let freshFetchCount = 0;
 const fromFreshCache = await mod.loadVeniceModels({
   fallbackModels: fallback,
   cachePath,
   fetchImpl: async () => {
-    throw new Error("should not fetch while cache is fresh");
+    freshFetchCount += 1;
+    return new Response("{}", { status: 500 });
   },
   now: t0 + mod.CACHE_FRESH_TTL_MS - 1000,
   env: {},
 });
+assert.equal(freshFetchCount, 0);
 assert.deepEqual(fromFreshCache, loaded);
 
 // 3. forceRefresh bypasses fresh cache TTL when allowNetwork=true; respects allowNetwork=false.
@@ -200,30 +265,46 @@ const refreshed = await mod.loadVeniceModels({
 assert.equal(refreshCount, 1);
 assert.deepEqual(refreshed.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
 
+let offlineRefreshCount = 0;
 const offlineRefresh = await mod.loadVeniceModels({
   fallbackModels: fallback,
   cachePath,
   forceRefresh: true,
   allowNetwork: false,
   fetchImpl: async () => {
-    throw new Error("should not fetch when allowNetwork=false");
+    offlineRefreshCount += 1;
+    return new Response("{}", { status: 500 });
   },
   now: t0 + 2000,
   env: {},
 });
+assert.equal(offlineRefreshCount, 0);
 assert.deepEqual(offlineRefresh.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
 
-// 4. Stale cache (> TTL, <= max stale) falls back to stale cache on network error.
+// 4. Stale cache (> TTL, <= max stale) falls back to stale cache on HTTP error and cancels error body.
+let staleFetchCount = 0;
 const fromStaleFallback = await mod.loadVeniceModels({
   fallbackModels: fallback,
   cachePath,
-  fetchImpl: async () => new Response("err", { status: 503 }),
+  fetchImpl: async () => {
+    staleFetchCount += 1;
+    return new Response("err", { status: 503 });
+  },
   now: t0 + mod.CACHE_FRESH_TTL_MS + 60_000,
   env: {},
 });
+assert.equal(staleFetchCount, 1);
 assert.deepEqual(fromStaleFallback.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
 
-// 5. Expired cache (> 7 days) falls back to static fallback when offline.
+// 5. Future-dated cache (> 60 s ahead) is rejected, and slightly future (< 60 s) is not fresh.
+const futurePath = join(tmpDir, "cache", "future.json");
+await mod.writeCachedCatalog(futurePath, samplePayload, t0 + 120_000);
+assert.equal(await mod.readCachedCatalog(futurePath, { now: t0 }), null);
+await mod.writeCachedCatalog(futurePath, samplePayload, t0 + 5_000);
+const slightFuture = await mod.readCachedCatalog(futurePath, { now: t0 });
+assert.equal(slightFuture?.fresh, false);
+
+// 6. Expired cache (> 7 days) falls back to static fallback when offline.
 const fromStaticAfterExpiry = await mod.loadVeniceModels({
   fallbackModels: fallback,
   cachePath,
@@ -235,7 +316,7 @@ const fromStaticAfterExpiry = await mod.loadVeniceModels({
 });
 assert.deepEqual(fromStaticAfterExpiry, fallback);
 
-// 6. Oversized response is rejected and falls back cleanly.
+// 7. Oversized response is rejected and falls back cleanly without writing cache.
 const oversizedCache = join(tmpDir, "cache", "oversized.json");
 const fromOversized = await mod.loadVeniceModels({
   fallbackModels: fallback,
@@ -247,7 +328,7 @@ const fromOversized = await mod.loadVeniceModels({
 });
 assert.deepEqual(fromOversized, fallback);
 
-// 7. Symlink cache file is ignored (lstat refuses non-regular file).
+// 8. Symlink cache file is rejected via O_NOFOLLOW.
 const targetFile = join(tmpDir, "target.json");
 const linkPath = join(tmpDir, "link-cache.json");
 await writeFile(targetFile, JSON.stringify({ schemaVersion: 1, fetchedAt: t0, body: samplePayload }));

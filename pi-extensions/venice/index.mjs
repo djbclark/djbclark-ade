@@ -1,4 +1,8 @@
 // Venice.ai is a manual Pi provider. ADE automatic routes exclude it.
+// Catalog discovery runs on extension load/reload using Venice's public
+// /api/v1/models endpoint with an on-disk cache. Picker refreshModels is
+// intentionally omitted until Pi supports unauthenticated model refresh
+// without first invoking the provider's `!sudo-secretspec` apiKey broker.
 import { readFileSync } from "node:fs";
 import { loadVeniceModels } from "./catalog.mjs";
 
@@ -12,12 +16,5 @@ export default async function venice(pi) {
     api: "openai-completions",
     apiKey: "!sudo-secretspec get VENICE_API_KEY --reason pi-venice-request",
     models,
-    refreshModels: async (context = {}) =>
-      loadVeniceModels({
-        fallbackModels: FALLBACK_MODELS,
-        forceRefresh: true,
-        allowNetwork: context.allowNetwork !== false,
-        signal: context.signal,
-      }),
   });
 }
