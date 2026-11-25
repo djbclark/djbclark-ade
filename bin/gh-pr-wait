@@ -1,0 +1,2426 @@
+#!/usr/bin/env -S python3 -I
+"""gh-pr-wait: wait for GitHub PR checks, reviews, merges, or events via GitHub Event Streams with slow safety-net re-checks and >= 60 s polling fallback.
+
+  gh-pr-wait <PR_REF> [-R OWNER/REPO] [--for checks|review|merge|any] [--timeout DUR]
+             [--safety-interval SECS] [--fallback-interval SECS] [--attach-timeout SECS]
+             [--delete-on-exit | --keep-subscription] [--allow-empty-checks]
+             [--no-deadline] [--json] [--quiet]
+  gh-pr-wait cleanup [--dry-run] [--all] [--json]
+
+Uses GitHub Event Streams (`POST /event-subscriptions` + `gh event listen`, gh >= 2.105.0,
+github.com PRs only) for event-driven wakeup with slow safety-net re-checks (clamped
+>= 30 s, default 300 s) and automatic quota-safe polling fallback (>= 60 s interval) when
+Event Streams is unavailable (non-github.com host, 403/422, older gh, attach timeout).
+
+Operational invariants:
+  - Attach-then-read: waits strictly for exact `Listening for events.` on stderr before
+    the initial PR state read, and re-reads on reconnects.
+  - Mode-specific, field-limited PR queries (never fetches untrusted review bodies, and
+    always pins `--hostname=github.com` / `--repo=github.com/...` for public GitHub PRs):
+      --for checks : `gh pr view --repo=HOST/O/R --json=url,state,mergedAt,headRefOid,mergeable,statusCheckRollup`
+      --for merge  : `gh pr view --repo=HOST/O/R --json=url,state,mergedAt,headRefOid`
+      --for review : `gh api --hostname=HOST graphql` selecting only `url`, `state`, `mergedAt`,
+                     `headRefOid`, and `reviews(last: 100) { nodes { id databaseId state submittedAt author { login } } }`
+      --for any    : `gh api --hostname=HOST graphql` selecting only `url`, `state`, `mergedAt`,
+                     `headRefOid`, `mergeable`, `reviews(last: 100)` metadata (no `body`),
+                     and head `statusCheckRollup` check status/conclusion metadata (no descriptions)
+    Note: in `--for checks`, `gh pr view` `statusCheckRollup` entries may include check
+    descriptions from external apps; they are treated strictly as untrusted data and
+    never echoed or followed.
+  - Safe subscription lifecycle (matching upstream `gh event listen`):
+    GitHub's `201 Created` proves creation, NOT an exclusive lease: another host, state
+    dir, or raw `gh event listen` can reuse the same subscription (`200 OK`) after creation.
+    Therefore, **by default `gh-pr-wait` keeps subscriptions on exit** (`subscription_deleted:
+    false`), relying on the 24 h TTL + `gh-pr-wait cleanup` to prune merged/closed PRs.
+    Pass `--delete-on-exit` ONLY as an explicit single-consumer opt-in when no other host
+    or raw `gh` client shares the subscription; deletion then requires ALL of:
+      1. Authoritative HTTP `201 Created` from `POST /event-subscriptions` (never `200 OK`).
+      2. Local per-key `flock` state dir (`GH_PR_WAIT_STATE_DIR`, default
+         `~/.local/state/djbclark-ade/gh-pr-wait`, `0700` dir / `0600` file) tracking each
+         local waiter through `"phase": "starting"` (written before `Popen`) -> `"running"`
+         (updated with listener PID + start time after `Popen`). Any lock/write failure
+         falls back to polling (fail-closed).
+      3. Proven listener exit (`SIGTERM` 5 s, then `SIGKILL` 5 s; `proc.poll() is not None`).
+      4. Zero remaining live waiters, zero dead waiters stuck in `"starting"` or with live/
+         unverified listeners, and `keep_forever == False`. Any unproven reap or uncertain
+         dead waiter durably persists `keep_forever=True` so peers also skip deletion.
+  - Cleanup caveat: `gh-pr-wait cleanup` checks PR state (`MERGED`/`CLOSED`) before
+    deleting; that check-then-delete sequence is non-atomic (a closed PR could be reopened
+    in the brief window before delete).
+
+Exit codes:
+  0    condition met (checks passed, new submitted review, PR merged, or valid event;
+       or cleanup succeeded)
+  1    condition failed (check failed, PR closed/merged before checks or review finished,
+       PR closed without merge, or cleanup error)
+  2    usage error or invalid PR reference / duration / flag value
+  8    timeout reached before condition was met (matches `gh event listen`)
+  124  stopped by external deadline enforcer (`deadline run`)
+  128+N interrupted by signal N (e.g. 143 on SIGTERM, 130 on SIGINT)
+
+Environment overrides:
+  GH_BIN                         path to `gh` executable (default: `gh`)
+  DEADLINE_BIN                   path to `deadline` executable (default: sibling `bin/deadline`)
+  GH_PR_WAIT_STATE_DIR           directory for local subscription refcount/lock files
+  GH_PR_WAIT_TEST_MIN_INTERVAL   test-only seam lowering safety/fallback/cooldown floors
+  GH_PR_WAIT_TEST_STOP_TIMEOUT   test-only seam lowering listener stop wait (default 5 s)
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import math
+import os
+import re
+import select
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+_HERE = os.path.dirname(os.path.realpath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import deadline_wait  # noqa: E402
+
+EV_CHECK_SUITE = "com.github.pull_request.check_suite.status.changed.v1"
+EV_REVIEW = "com.github.pull_request.review.submitted.v1"
+EV_STATE = "com.github.pull_request.state.changed.v1"
+EV_HEAD = "com.github.pull_request.head.changed.v1"
+EV_MERGE_CONFLICT = "com.github.pull_request.merge_conflict.v1"
+
+EVENTS_FOR: dict[str, tuple[str, ...]] = {
+    "checks": (EV_CHECK_SUITE, EV_STATE, EV_HEAD, EV_MERGE_CONFLICT),
+    "review": (EV_REVIEW, EV_STATE),
+    "merge": (EV_STATE,),
+    "any": (EV_CHECK_SUITE, EV_REVIEW, EV_STATE, EV_HEAD, EV_MERGE_CONFLICT),
+}
+
+LISTEN_READY_MARKER = "Listening for events."
+PR_FIELDS_CHECKS = "url,state,mergedAt,headRefOid,mergeable,statusCheckRollup"
+PR_FIELDS_MERGE = "url,state,mergedAt,headRefOid"
+
+REVIEW_GRAPHQL_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){"
+    "url state mergedAt headRefOid "
+    "reviews(last:100){nodes{id databaseId state submittedAt author{login}}}"
+    "}}}"
+)
+
+ANY_GRAPHQL_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){"
+    "url state mergedAt headRefOid mergeable "
+    "reviews(last:100){nodes{id databaseId state submittedAt author{login}}} "
+    "commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{"
+    "__typename "
+    "... on CheckRun{name status conclusion} "
+    "... on StatusContext{context state}"
+    "}}}}}}"
+    "}}}"
+)
+
+VALID_PR_STATES = frozenset({"OPEN", "MERGED", "CLOSED"})
+SUBMITTED_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"})
+CHECK_PASS_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
+CHECK_FAIL_CONCLUSIONS = frozenset({
+    "FAILURE",
+    "TIMED_OUT",
+    "CANCELLED",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+    "ERROR",
+    "STALE",
+})
+STATUS_PENDING_STATES = frozenset({"PENDING", "EXPECTED"})
+STATUS_PASS_STATES = frozenset({"SUCCESS"})
+STATUS_FAIL_STATES = frozenset({"FAILURE", "ERROR"})
+
+PR_URL_RE = re.compile(
+    r"^https://([A-Za-z0-9.-]+)/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/pull/([1-9][0-9]*)/?$"
+)
+CANONICAL_GITHUB_PR_URL_RE = re.compile(
+    r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$"
+)
+OWNER_REPO_PR_RE = re.compile(
+    r"^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)#([1-9][0-9]*)$"
+)
+BARE_NUM_RE = re.compile(r"^([1-9][0-9]*)$")
+REPO_SPEC_RE = re.compile(
+    r"^(?:([A-Za-z0-9.-]+)/)?([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$"
+)
+SUB_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
+ISO8601_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
+)
+HTTP_STATUS_RE = re.compile(r"^HTTP/\d(?:\.\d)?\s+(\d{3})\b")
+REVIEW_API_ID_RE = re.compile(r"/reviews/([0-9]+)(?:[/?#]|$)")
+
+EXIT_OK = 0
+EXIT_FAIL = 1
+EXIT_USAGE = 2
+EXIT_TIMEOUT = 8
+
+DEFAULT_TIMEOUT = "35m"
+DEFAULT_SAFETY_INTERVAL = 300.0
+DEFAULT_FALLBACK_INTERVAL = 60.0
+DEFAULT_ATTACH_TIMEOUT = 20.0
+MIN_SAFETY_INTERVAL = 30.0
+MIN_POLL_INTERVAL = 60.0
+DEFAULT_EVENT_COOLDOWN = 2.0
+GH_CMD_CAP = 30.0
+TEARDOWN_DELETE_TIMEOUT = 10.0
+TEARDOWN_FLOCK_TIMEOUT = 5.0
+MAX_LIST_SUBSCRIPTIONS = 100
+MAX_LINE_BYTES = 1024 * 1024
+MAX_DIAG_BYTES = 64 * 1024
+MAX_PRE_ATTACH_LINES = 256
+MAX_PRE_ATTACH_BYTES = 1024 * 1024
+MAX_DRAIN_LINES = 256
+MAX_DRAIN_READS = 64
+MAX_DRAIN_BYTES = 1024 * 1024
+MAX_SEEN_EVENT_IDS = 2000
+BLOCKED_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+
+
+class _SignalInterrupt(BaseException):
+    """Raised when cancellation is requested during interruptible waits."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+
+
+class UsageError(Exception):
+    """Invalid CLI argument or PR reference (exit 2)."""
+
+
+class WaitTimeoutError(Exception):
+    """Overall wait timeout expired during startup/resolution (exit 8)."""
+
+
+@dataclass
+class CancelState:
+    """Cooperates between signal handlers and critical acquisition sections."""
+
+    signum: int | None = None
+    raise_immediately: bool = False
+
+    def handle_signal(self, signum: int, _frame: Any) -> None:
+        if self.signum is None:
+            self.signum = signum
+        if self.raise_immediately:
+            raise _SignalInterrupt(self.signum)
+
+    def check(self) -> None:
+        if self.signum is not None:
+            raise _SignalInterrupt(self.signum)
+
+
+def gh_bin() -> str:
+    return os.environ.get("GH_BIN") or "gh"
+
+
+def state_dir() -> Path:
+    raw = os.environ.get("GH_PR_WAIT_STATE_DIR")
+    if raw and raw.strip():
+        return Path(raw.strip())
+    return Path.home() / ".local" / "state" / "djbclark-ade" / "gh-pr-wait"
+
+
+def test_min_interval() -> float | None:
+    raw = os.environ.get("GH_PR_WAIT_TEST_MIN_INTERVAL")
+    if raw is not None and raw.strip() != "":
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val > 0:
+                return val
+        except ValueError:
+            pass
+    return None
+
+
+def min_poll_interval() -> float:
+    tmi = test_min_interval()
+    return tmi if tmi is not None else MIN_POLL_INTERVAL
+
+
+def min_safety_interval() -> float:
+    tmi = test_min_interval()
+    return tmi if tmi is not None else MIN_SAFETY_INTERVAL
+
+
+def event_cooldown_interval() -> float:
+    tmi = test_min_interval()
+    return min(DEFAULT_EVENT_COOLDOWN, tmi) if tmi is not None else DEFAULT_EVENT_COOLDOWN
+
+
+def stop_wait_timeout() -> float:
+    raw = os.environ.get("GH_PR_WAIT_TEST_STOP_TIMEOUT")
+    if raw is not None and raw.strip() != "":
+        try:
+            val = float(raw)
+            if math.isfinite(val) and val > 0:
+                return val
+        except ValueError:
+            pass
+    return 5.0
+
+
+def parse_dur(text: str | float | int) -> float:
+    """Parse seconds (90, 1.5) or unit duration (90s, 5m, 2h, 1h30m, 1d)."""
+    s = str(text).strip().lower()
+    if not s:
+        raise UsageError(f"bad duration {text!r} (use 90, 90s, 5m, 2h, 1h30m)")
+    if re.fullmatch(r"\d+(?:\.\d+)?", s):
+        val = float(s)
+    else:
+        parts = re.findall(r"(\d+(?:\.\d+)?)([smhd])", s)
+        if not parts or "".join(a + b for a, b in parts) != s.replace(" ", ""):
+            raise UsageError(f"bad duration {text!r} (use 90, 90s, 5m, 2h, 1h30m)")
+        mult = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+        val = sum(float(a) * mult[u] for a, u in parts)
+    if not math.isfinite(val) or val <= 0:
+        raise UsageError(f"duration must be positive: {text!r}")
+    return val
+
+
+def parse_positive_float(text: str, flag: str) -> float:
+    try:
+        val = float(text)
+    except ValueError as exc:
+        raise UsageError(f"{flag} must be a positive number: {text!r}") from exc
+    if not math.isfinite(val) or val <= 0:
+        raise UsageError(f"{flag} must be a positive number: {text!r}")
+    return val
+
+
+def parse_iso8601(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not ISO8601_RE.match(s):
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def valid_sub_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not SUB_ID_RE.match(s):
+        return None
+    return s
+
+
+def canonical_pr_tuple(url: Any) -> tuple[str, str, str, int] | None:
+    """Return (host.lower(), owner.lower(), repo.lower(), number) or None."""
+    if not isinstance(url, str):
+        return None
+    s = url.strip().rstrip("/")
+    m = PR_URL_RE.match(s)
+    if not m:
+        return None
+    host, owner, repo, num_s = m.groups()
+    if owner in (".", "..") or repo in (".", ".."):
+        return None
+    return host.lower(), owner.lower(), repo.lower(), int(num_s)
+
+
+def parse_canonical_github_pr_url(url: Any) -> tuple[str, str, int, str] | None:
+    """Strict validator for github.com PR web URLs (owner, repo, num, canonical_url)."""
+    if not isinstance(url, str):
+        return None
+    s = url.strip()
+    m = CANONICAL_GITHUB_PR_URL_RE.match(s)
+    if not m:
+        return None
+    owner, repo, num_s = m.groups()
+    if owner in (".", "..") or repo in (".", ".."):
+        return None
+    num = int(num_s)
+    return owner, repo, num, f"https://github.com/{owner}/{repo}/pull/{num}"
+
+
+def call_timeout(deadline_mono: float, cap: float = GH_CMD_CAP) -> float | None:
+    rem = deadline_mono - time.monotonic()
+    if rem <= 0:
+        return None
+    return min(cap, max(0.05, rem))
+
+
+def github_com_env() -> dict[str, str]:
+    """Subprocess environment pinning GH_HOST=github.com for Event Streams commands lacking --hostname."""
+    return {**os.environ, "GH_HOST": "github.com"}
+
+
+def run_gh(
+    args: list[str],
+    *,
+    timeout: float = GH_CMD_CAP,
+    env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run `gh` with argv list (never shell=True)."""
+    cmd = [gh_bin(), *args]
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {timeout:.2f}s"
+    except OSError as exc:
+        return 127, "", f"cannot execute {cmd[0]!r}: {exc}"
+
+
+def is_rate_limit_error(err_text: str) -> bool:
+    low = (err_text or "").lower()
+    if "rate limit" in low or "too many requests" in low:
+        return True
+    if ("429" in low or "403" in low) and ("limit" in low or "abuse" in low or "secondary" in low):
+        return True
+    return False
+
+
+def _boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def proc_start_token(pid: int) -> str | None:
+    """Portable live process identity (start time token), or None if absent/zombie."""
+    if pid <= 0:
+        return None
+    stat_path = Path(f"/proc/{pid}/stat")
+    if stat_path.exists():
+        try:
+            rest = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if rest[0] == "Z":
+                return None
+            return f"{_boot_id()}:{rest[19]}"
+        except (OSError, IndexError):
+            return None
+    try:
+        p = subprocess.run(
+            ["ps", "-o", "lstart=,stat=", "-p", str(pid)],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if p.returncode != 0:
+        return None
+    out = p.stdout.strip()
+    if not out:
+        return None
+    toks = out.split()
+    if len(toks) < 2 or toks[-1].startswith("Z"):
+        return None
+    return " ".join(toks[:-1])
+
+
+def pid_matches(pid: Any, token: Any) -> bool:
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(token, str) or not token:
+        return False
+    cur = proc_start_token(pid)
+    return cur is not None and cur == token
+
+
+def parse_http_status_and_body(raw: str) -> tuple[int | None, str]:
+    """Parse `gh api -i` HTTP header block(s) and body, returning (last_status_code, body)."""
+    text = raw or ""
+    status_code: int | None = None
+    rest = text
+    while True:
+        stripped = rest.lstrip("\r\n")
+        m = HTTP_STATUS_RE.match(stripped)
+        if not m:
+            return status_code, stripped
+        sep_idx = stripped.find("\r\n\r\n")
+        sep_len = 4
+        nl_idx = stripped.find("\n\n")
+        if nl_idx >= 0 and (sep_idx < 0 or nl_idx < sep_idx):
+            sep_idx = nl_idx
+            sep_len = 2
+        if sep_idx < 0:
+            return int(m.group(1)), ""
+        status_code = int(m.group(1))
+        rest = stripped[sep_idx + sep_len :]
+
+
+@dataclass
+class PRRef:
+    url: str
+    host: str
+    owner: str
+    repo: str
+    number: int
+
+    @property
+    def is_github_com(self) -> bool:
+        return self.host.lower() == "github.com"
+
+    @property
+    def canonical_tuple(self) -> tuple[str, str, str, int]:
+        return (self.host.lower(), self.owner.lower(), self.repo.lower(), self.number)
+
+    @property
+    def gh_repo_arg(self) -> str:
+        # Always include host (e.g. github.com/OWNER/REPO) so Enterprise GH_HOST never misroutes.
+        return f"{self.host}/{self.owner}/{self.repo}"
+
+
+def _parse_repo_flag(repo_flag: str) -> tuple[str, str, str]:
+    m = REPO_SPEC_RE.match(repo_flag.strip())
+    if not m:
+        raise UsageError(f"invalid -R/--repo value: {repo_flag!r} (expected [HOST/]OWNER/REPO)")
+    host, owner, repo = m.groups()
+    if owner in (".", "..") or repo in (".", ".."):
+        raise UsageError(f"invalid -R/--repo value: {repo_flag!r}")
+    return (host.lower() if host else "github.com"), owner, repo
+
+
+def resolve_pr_ref(
+    raw_ref: str,
+    repo_flag: str | None,
+    *,
+    deadline_mono: float | None = None,
+) -> PRRef:
+    """Validate and canonicalize <PR_REF> + optional -R OWNER/REPO."""
+    ref = (raw_ref or "").strip()
+    if not ref:
+        raise UsageError("PR reference cannot be empty")
+
+    parsed_repo: tuple[str, str, str] | None = None
+    if repo_flag is not None:
+        parsed_repo = _parse_repo_flag(repo_flag)
+
+    m_url = PR_URL_RE.match(ref)
+    if m_url:
+        host, owner, repo, num_s = m_url.groups()
+        if owner in (".", "..") or repo in (".", ".."):
+            raise UsageError(f"invalid PR URL: {raw_ref!r}")
+        host_l = host.lower()
+        if parsed_repo is not None:
+            r_host, r_owner, r_repo = parsed_repo
+            if (r_host, r_owner.lower(), r_repo.lower()) != (host_l, owner.lower(), repo.lower()):
+                raise UsageError(f"PR URL {raw_ref!r} conflicts with -R {repo_flag!r}")
+        url = f"https://{host_l}/{owner}/{repo}/pull/{int(num_s)}"
+        return PRRef(url=url, host=host_l, owner=owner, repo=repo, number=int(num_s))
+
+    m_short = OWNER_REPO_PR_RE.match(ref)
+    if m_short:
+        owner, repo, num_s = m_short.groups()
+        if owner in (".", "..") or repo in (".", ".."):
+            raise UsageError(f"invalid PR reference: {raw_ref!r}")
+        host_l = "github.com"
+        if parsed_repo is not None:
+            r_host, r_owner, r_repo = parsed_repo
+            if (r_owner.lower(), r_repo.lower()) != (owner.lower(), repo.lower()):
+                raise UsageError(f"PR reference {raw_ref!r} conflicts with -R {repo_flag!r}")
+            host_l = r_host
+        url = f"https://{host_l}/{owner}/{repo}/pull/{int(num_s)}"
+        return PRRef(url=url, host=host_l, owner=owner, repo=repo, number=int(num_s))
+
+    m_num = BARE_NUM_RE.match(ref)
+    if m_num:
+        num = int(m_num.group(1))
+        if parsed_repo is not None:
+            host_l, owner, repo = parsed_repo
+            url = f"https://{host_l}/{owner}/{repo}/pull/{num}"
+            return PRRef(url=url, host=host_l, owner=owner, repo=repo, number=num)
+        t_out = GH_CMD_CAP
+        if deadline_mono is not None:
+            t_out_opt = call_timeout(deadline_mono, GH_CMD_CAP)
+            if t_out_opt is None:
+                raise WaitTimeoutError("timeout expired while inferring PR URL")
+            t_out = t_out_opt
+        rc, out, err = run_gh(["pr", "view", "--json=url", "--", str(num)], timeout=t_out)
+        if rc == 124 or (deadline_mono is not None and time.monotonic() >= deadline_mono):
+            raise WaitTimeoutError(f"timed out inferring PR URL for #{num}")
+        if rc != 0:
+            detail = (err or out).strip().splitlines()[:1]
+            msg = detail[0] if detail else f"exit {rc}"
+            raise UsageError(f"cannot infer PR URL for #{num} via `gh pr view`: {msg}")
+        try:
+            data = json.loads(out)
+            inferred = str(data["url"]).strip()
+        except (ValueError, KeyError, TypeError) as exc:
+            raise UsageError(f"`gh pr view {num} --json=url` returned unreadable JSON") from exc
+        m_inf = PR_URL_RE.match(inferred)
+        if not m_inf:
+            raise UsageError(f"inferred PR URL is invalid: {inferred!r}")
+        host, owner, repo, num_s = m_inf.groups()
+        if owner in (".", "..") or repo in (".", ".."):
+            raise UsageError(f"inferred PR URL is invalid: {inferred!r}")
+        host_l = host.lower()
+        url = f"https://{host_l}/{owner}/{repo}/pull/{int(num_s)}"
+        return PRRef(url=url, host=host_l, owner=owner, repo=repo, number=int(num_s))
+
+    raise UsageError(
+        f"invalid PR reference {raw_ref!r} (expected https://HOST/OWNER/REPO/pull/N, OWNER/REPO#N, or N)"
+    )
+
+
+def _build_supervised_argv(
+    args: argparse.Namespace,
+    pr_ref: PRRef,
+    remaining_timeout_s: float,
+) -> list[str]:
+    """Build supervised inner argv directly from parsed values (immune to flag abbreviations)."""
+    out = [
+        pr_ref.url,
+        "--for",
+        args.for_mode,
+        "--timeout",
+        f"{max(0.1, remaining_timeout_s):.3f}s",
+        "--safety-interval",
+        str(args.safety_interval),
+        "--fallback-interval",
+        str(args.fallback_interval),
+        "--attach-timeout",
+        str(args.attach_timeout),
+    ]
+    if args.delete_on_exit:
+        out.append("--delete-on-exit")
+    if args.keep_subscription:
+        out.append("--keep-subscription")
+    if args.allow_empty_checks:
+        out.append("--allow-empty-checks")
+    if args.json:
+        out.append("--json")
+    if args.quiet:
+        out.append("--quiet")
+    return out
+
+
+def _extract_graphql_rollup(pr_node: dict[str, Any]) -> tuple[list[Any] | None, bool]:
+    """Unwrap commits(last:1).nodes[0].commit.statusCheckRollup.contexts.nodes cleanly."""
+    commits_obj = pr_node.get("commits")
+    if not isinstance(commits_obj, dict):
+        if "statusCheckRollup" in pr_node:
+            raw = pr_node["statusCheckRollup"]
+            return (raw, True) if isinstance(raw, list) else (None, False)
+        return None, False
+    nodes = commits_obj.get("nodes")
+    if not isinstance(nodes, list):
+        return None, False
+    if not nodes:
+        return [], True
+    first = nodes[0]
+    if not isinstance(first, dict) or not isinstance(first.get("commit"), dict):
+        return None, False
+    commit = first["commit"]
+    if "statusCheckRollup" not in commit:
+        return None, False
+    scr = commit["statusCheckRollup"]
+    if scr is None:
+        return [], True
+    if not isinstance(scr, dict):
+        return None, False
+    ctx = scr.get("contexts")
+    if not isinstance(ctx, dict) or not isinstance(ctx.get("nodes"), list):
+        return None, False
+    return ctx["nodes"], True
+
+
+def fetch_pr_state(
+    pr_ref: PRRef,
+    for_mode: str,
+    *,
+    timeout: float = GH_CMD_CAP,
+) -> tuple[dict[str, Any] | None, str | None, bool]:
+    """Fetch mode-specific, field-limited PR metadata (never review bodies).
+
+    Always pins `--hostname=<host>` on GraphQL and `--repo=<host>/<owner>/<repo>` on `pr view`.
+    Returns (data_dict, error_message, is_rate_limited).
+    """
+    if for_mode in ("review", "any"):
+        query = REVIEW_GRAPHQL_QUERY if for_mode == "review" else ANY_GRAPHQL_QUERY
+        cmd = [
+            "api",
+            f"--hostname={pr_ref.host}",
+            "graphql",
+            "-f", f"owner={pr_ref.owner}",
+            "-f", f"name={pr_ref.repo}",
+            "-F", f"number={pr_ref.number}",
+            "-f", f"query={query}",
+        ]
+        rc, out, err = run_gh(cmd, timeout=timeout)
+        if rc != 0:
+            detail = (err or out).strip().splitlines()[:1]
+            msg = f"gh api graphql failed (exit {rc}): {detail[0] if detail else 'unknown error'}"
+            return None, msg, is_rate_limit_error(err or out)
+        try:
+            raw = json.loads(out)
+        except ValueError as exc:
+            return None, f"gh api graphql returned invalid JSON: {exc}", False
+        if not isinstance(raw, dict):
+            return None, "gh api graphql returned non-object JSON", False
+        if raw.get("errors"):
+            err_s = str(raw["errors"])[:200]
+            return None, f"gh api graphql returned errors: {err_s}", is_rate_limit_error(err_s)
+        pr_node = (((raw.get("data") or {}).get("repository") or {}).get("pullRequest"))
+        if not isinstance(pr_node, dict):
+            return None, "gh api graphql missing pullRequest node", False
+        revs_obj = pr_node.get("reviews")
+        if isinstance(revs_obj, dict) and isinstance(revs_obj.get("nodes"), list):
+            nodes = revs_obj["nodes"]
+        elif isinstance(revs_obj, list):
+            nodes = revs_obj
+        else:
+            return None, "gh api graphql returned malformed reviews field", False
+        data: dict[str, Any] = {
+            "url": pr_node.get("url"),
+            "state": pr_node.get("state"),
+            "mergedAt": pr_node.get("mergedAt"),
+            "headRefOid": pr_node.get("headRefOid"),
+            "reviews": nodes,
+        }
+        if for_mode == "any":
+            data["mergeable"] = pr_node.get("mergeable")
+            rollup, ok_r = _extract_graphql_rollup(pr_node)
+            if ok_r and rollup is not None:
+                data["statusCheckRollup"] = rollup
+    else:
+        fields = PR_FIELDS_CHECKS if for_mode == "checks" else PR_FIELDS_MERGE
+        rc, out, err = run_gh(
+            ["pr", "view", f"--repo={pr_ref.gh_repo_arg}", f"--json={fields}", "--", str(pr_ref.number)],
+            timeout=timeout,
+        )
+        if rc != 0:
+            detail = (err or out).strip().splitlines()[:1]
+            msg = f"gh pr view failed (exit {rc}): {detail[0] if detail else 'unknown error'}"
+            return None, msg, is_rate_limit_error(err or out)
+        try:
+            data = json.loads(out)
+        except ValueError as exc:
+            return None, f"gh pr view returned invalid JSON: {exc}", False
+        if not isinstance(data, dict):
+            return None, "gh pr view returned non-object JSON", False
+
+    resp_tuple = canonical_pr_tuple(data.get("url"))
+    if resp_tuple != pr_ref.canonical_tuple:
+        return None, f"PR response url {data.get('url')!r} did not match requested {pr_ref.url!r}", False
+    state = pr_state_name(data)
+    if state not in VALID_PR_STATES:
+        return None, f"PR response had invalid state {data.get('state')!r}", False
+    if data.get("mergedAt") is not None and parse_iso8601(data.get("mergedAt")) is None:
+        return None, f"PR response had malformed mergedAt {data.get('mergedAt')!r}", False
+    return data, None, False
+
+
+def pr_state_name(pr: dict[str, Any]) -> str:
+    val = pr.get("state")
+    return val.strip().upper() if isinstance(val, str) else ""
+
+
+def pr_is_merged(pr: dict[str, Any]) -> bool:
+    """Authoritative merged check: requires explicit state == 'MERGED'."""
+    return pr_state_name(pr) == "MERGED"
+
+
+def summarize_checks(pr: dict[str, Any]) -> tuple[dict[str, int], bool, list[tuple[str, str, str, str]]]:
+    """Validate and summarize statusCheckRollup.
+
+    Returns (summary_dict, rollup_valid, sorted_check_tuples).
+    Missing, non-list, or malformed entries set rollup_valid=False so callers fail closed.
+    """
+    empty = {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    if "statusCheckRollup" not in pr:
+        return empty, False, []
+    rollup = pr.get("statusCheckRollup")
+    if not isinstance(rollup, list):
+        return empty, False, []
+
+    total = 0
+    passed = 0
+    failed = 0
+    pending = 0
+    tuples: list[tuple[str, str, str, str]] = []
+
+    for entry in rollup:
+        if not isinstance(entry, dict):
+            return empty, False, []
+        typename = entry.get("__typename")
+        if typename is not None and not isinstance(typename, str):
+            return empty, False, []
+        tname = typename or ""
+        is_status_ctx = tname == "StatusContext" or (
+            "context" in entry and "status" not in entry
+        )
+        if is_status_ctx:
+            st_raw = entry.get("state")
+            if not isinstance(st_raw, str) or not st_raw.strip():
+                return empty, False, []
+            st = st_raw.strip().upper()
+            ctx_name = str(entry.get("context") or "")
+            total += 1
+            if st in STATUS_PENDING_STATES:
+                pending += 1
+            elif st in STATUS_PASS_STATES:
+                passed += 1
+            elif st in STATUS_FAIL_STATES:
+                failed += 1
+            else:
+                failed += 1
+            tuples.append(("StatusContext", ctx_name, st, ""))
+        else:
+            status_raw = entry.get("status")
+            if not isinstance(status_raw, str) or not status_raw.strip():
+                return empty, False, []
+            status = status_raw.strip().upper()
+            conc_raw = entry.get("conclusion")
+            if conc_raw is not None and not isinstance(conc_raw, str):
+                return empty, False, []
+            conclusion = (conc_raw or "").strip().upper()
+            cname = str(entry.get("name") or "")
+            total += 1
+            if status != "COMPLETED":
+                pending += 1
+            elif conclusion in CHECK_PASS_CONCLUSIONS:
+                passed += 1
+            elif conclusion in CHECK_FAIL_CONCLUSIONS:
+                failed += 1
+            else:
+                failed += 1
+            tuples.append(("CheckRun", cname, status, conclusion))
+
+    tuples.sort()
+    return {"total": total, "passed": passed, "failed": failed, "pending": pending}, True, tuples
+
+
+def submitted_review_records(pr: dict[str, Any]) -> list[tuple[str, str | None, str]]:
+    """Extract strictly submitted reviews as immutable (node_id, database_id_str, submittedAt_iso)."""
+    reviews = pr.get("reviews")
+    if not isinstance(reviews, list):
+        return []
+    out: list[tuple[str, str | None, str]] = []
+    for rev in reviews:
+        if not isinstance(rev, dict):
+            continue
+        rid = rev.get("id")
+        state_raw = rev.get("state")
+        sub_raw = rev.get("submittedAt")
+        if not isinstance(rid, str) or not rid.strip():
+            continue
+        if not isinstance(state_raw, str):
+            continue
+        state = state_raw.strip().upper()
+        if state not in SUBMITTED_REVIEW_STATES:
+            continue
+        if parse_iso8601(sub_raw) is None:
+            continue
+        db_raw = rev.get("databaseId")
+        db_id: str | None = None
+        if isinstance(db_raw, int) and not isinstance(db_raw, bool) and db_raw > 0:
+            db_id = str(db_raw)
+        elif isinstance(db_raw, str) and db_raw.strip().isdigit():
+            db_id = db_raw.strip()
+        out.append((rid.strip(), db_id, str(sub_raw).strip()))
+    return out
+
+
+def extract_event_review_id(ev: dict[str, Any]) -> str | None:
+    """Extract exact numeric review ID from a `review.submitted.v1` CloudEvent's `data.api_url`."""
+    data = ev.get("data")
+    if not isinstance(data, dict):
+        return None
+    api_url = data.get("api_url")
+    if isinstance(api_url, str):
+        m = REVIEW_API_ID_RE.search(api_url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def snapshot_signature(pr: dict[str, Any]) -> str:
+    """Deterministic signature for `--for any` poll fallback covering state, head, mergeable, checks, and reviews."""
+    _, _, check_tuples = summarize_checks(pr)
+    rev_keys = sorted({(rid, sub_iso) for rid, _, sub_iso in submitted_review_records(pr)})
+    payload = {
+        "state": pr_state_name(pr),
+        "merged": pr_is_merged(pr),
+        "head": str(pr.get("headRefOid") or ""),
+        "mergeable": str(pr.get("mergeable") or ""),
+        "checks": check_tuples,
+        "reviews": rev_keys,
+    }
+    return json.dumps(payload, sort_keys=True)
+
+
+@dataclass
+class EvalState:
+    for_mode: str
+    allow_empty_checks: bool = False
+    baseline_submitted_reviews: set[tuple[str, str]] | None = None
+    initial_review_db_ids: set[str] = field(default_factory=set)
+    reconciled_event_review_ids: set[str] = field(default_factory=set)
+    baseline_sig: str | None = None
+    noted_empty_head: str | None = None
+
+
+@dataclass
+class EvalDecision:
+    done: bool
+    ok: bool = False
+    exit_code: int = EXIT_OK
+    reason: str = ""
+    checks_summary: dict[str, int] = field(
+        default_factory=lambda: {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    )
+
+
+def evaluate_pr(
+    pr: dict[str, Any],
+    ev_state: EvalState,
+    *,
+    event_review_ids: set[str] | None = None,
+    log_fn=None,
+) -> EvalDecision:
+    state = pr_state_name(pr)
+    if state not in VALID_PR_STATES:
+        return EvalDecision(done=False, reason="invalid_pr_state")
+    merged = pr_is_merged(pr)
+    head = str(pr.get("headRefOid") or "")
+
+    if ev_state.for_mode == "checks":
+        checks, rollup_valid, _ = summarize_checks(pr)
+        if merged:
+            return EvalDecision(
+                done=True, ok=False, exit_code=EXIT_FAIL,
+                reason="pr_merged", checks_summary=checks,
+            )
+        if state != "OPEN":
+            return EvalDecision(
+                done=True, ok=False, exit_code=EXIT_FAIL,
+                reason=f"pr_{state.lower()}", checks_summary=checks,
+            )
+        if not rollup_valid:
+            if log_fn:
+                log_fn("warning: malformed or missing statusCheckRollup; continuing wait (fail-closed)")
+            return EvalDecision(done=False, reason="checks_rollup_malformed", checks_summary=checks)
+        if checks["total"] == 0:
+            if ev_state.allow_empty_checks:
+                return EvalDecision(
+                    done=True, ok=True, exit_code=EXIT_OK,
+                    reason="checks_empty_allowed", checks_summary=checks,
+                )
+            if log_fn and ev_state.noted_empty_head != head:
+                ev_state.noted_empty_head = head
+                log_fn(
+                    f"checks_pending_empty: statusCheckRollup is empty on head {head[:12] or 'unknown'}; "
+                    "waiting for checks (pass --allow-empty-checks to treat 0 checks as passing)"
+                )
+            return EvalDecision(done=False, reason="checks_pending_empty", checks_summary=checks)
+        if checks["pending"] > 0:
+            return EvalDecision(done=False, reason="checks_pending", checks_summary=checks)
+        if checks["failed"] > 0:
+            return EvalDecision(
+                done=True, ok=False, exit_code=EXIT_FAIL,
+                reason="checks_failed", checks_summary=checks,
+            )
+        return EvalDecision(
+            done=True, ok=True, exit_code=EXIT_OK,
+            reason="checks_passed", checks_summary=checks,
+        )
+
+    if ev_state.for_mode == "review":
+        recs = submitted_review_records(pr)
+        cur_keys = {(rid, sub_iso) for rid, _, sub_iso in recs}
+        if ev_state.baseline_submitted_reviews is None:
+            if merged:
+                return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason="pr_merged")
+            if state != "OPEN":
+                return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason=f"pr_{state.lower()}")
+            ev_state.baseline_submitted_reviews = set(cur_keys)
+            ev_state.initial_review_db_ids = {db_id for _, db_id, _ in recs if db_id}
+            return EvalDecision(done=False, reason="waiting_for_review")
+
+        if cur_keys - ev_state.baseline_submitted_reviews:
+            return EvalDecision(done=True, ok=True, exit_code=EXIT_OK, reason="review_submitted")
+
+        if event_review_ids:
+            fresh_ids = event_review_ids - ev_state.reconciled_event_review_ids
+            matched = fresh_ids & ev_state.initial_review_db_ids
+            if matched:
+                ev_state.reconciled_event_review_ids.update(matched)
+                return EvalDecision(done=True, ok=True, exit_code=EXIT_OK, reason="review_submitted")
+
+        if merged:
+            return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason="pr_merged")
+        if state != "OPEN":
+            return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason=f"pr_{state.lower()}")
+        return EvalDecision(done=False, reason="waiting_for_review")
+
+    if ev_state.for_mode == "merge":
+        if merged:
+            return EvalDecision(done=True, ok=True, exit_code=EXIT_OK, reason="pr_merged")
+        if state == "CLOSED":
+            return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason="pr_closed")
+        return EvalDecision(done=False, reason="waiting_for_merge")
+
+    if ev_state.for_mode == "any":
+        checks, rollup_valid, _ = summarize_checks(pr)
+        if not rollup_valid:
+            return EvalDecision(done=False, reason="checks_rollup_malformed", checks_summary=checks)
+        sig = snapshot_signature(pr)
+        if ev_state.baseline_sig is None:
+            ev_state.baseline_sig = sig
+            return EvalDecision(done=False, reason="waiting_for_event", checks_summary=checks)
+        if sig != ev_state.baseline_sig:
+            return EvalDecision(
+                done=True, ok=True, exit_code=EXIT_OK,
+                reason="state_changed", checks_summary=checks,
+            )
+        return EvalDecision(done=False, reason="waiting_for_event", checks_summary=checks)
+
+    raise UsageError(f"unknown --for mode: {ev_state.for_mode!r}")
+
+
+class SubscriptionCoord:
+    """Flock-serialized per-key local refcount and phase state for shared subscriptions."""
+
+    def __init__(self, pr_ref: PRRef, events: tuple[str, ...]) -> None:
+        key_obj = [
+            pr_ref.owner.lower(),
+            pr_ref.repo.lower(),
+            pr_ref.number,
+            sorted(events),
+        ]
+        digest = hashlib.sha256(json.dumps(key_obj).encode("utf-8")).hexdigest()[:32]
+        self.base_dir = state_dir()
+        self.lock_path = self.base_dir / f"{digest}.lock"
+        self.state_path = self.base_dir / f"{digest}.json"
+        self.pid = os.getpid()
+        self.start_token = proc_start_token(self.pid)
+
+    def _ensure_dir(self) -> bool:
+        try:
+            self.base_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.base_dir, 0o700)
+            return True
+        except OSError:
+            return False
+
+    def _acquire_flock(self, deadline_mono: float) -> int | None:
+        if not self._ensure_dir():
+            return None
+        try:
+            fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            return None
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError:
+                if time.monotonic() >= deadline_mono:
+                    os.close(fd)
+                    return None
+                time.sleep(min(0.05, max(0.005, deadline_mono - time.monotonic())))
+            except OSError:
+                os.close(fd)
+                return None
+
+    def _read_state(self) -> dict[str, Any]:
+        try:
+            raw = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _write_state(self, data: dict[str, Any]) -> bool:
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=self.state_path.name + ".", dir=str(self.base_dir))
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, sort_keys=True)
+                    f.flush()
+                os.replace(tmp, self.state_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            return True
+        except OSError:
+            return False
+
+    def _clear_state(self) -> None:
+        try:
+            self.state_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _prune_waiters(self, state: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+        """Return (live_waiters, uncertain_or_orphan_detected).
+
+        Fail-closed on dead parent waiters:
+        - If phase != "running" (e.g. "starting" — parent died in spawn-to-record gap): uncertain!
+        - If listener_pid/listener_start missing or listener still alive: orphan/uncertain!
+        Only a dead parent in phase == "running" whose recorded listener is proven dead is pruned cleanly.
+        """
+        raw = state.get("waiters")
+        if not isinstance(raw, list):
+            return [], False
+        live: list[dict[str, Any]] = []
+        uncertain = False
+        for w in raw:
+            if not isinstance(w, dict):
+                uncertain = True
+                continue
+            if pid_matches(w.get("pid"), w.get("start_time")):
+                live.append(w)
+                continue
+            # Dead parent waiter: prove listener exited cleanly or fail closed!
+            phase = w.get("phase")
+            lpid = w.get("listener_pid")
+            lstart = w.get("listener_start")
+            if phase != "running":
+                uncertain = True
+            elif not isinstance(lpid, int) or lpid <= 0 or not isinstance(lstart, str) or not lstart:
+                uncertain = True
+            elif pid_matches(lpid, lstart):
+                uncertain = True
+        return live, uncertain
+
+    def _me_entry(
+        self,
+        *,
+        phase: str = "starting",
+        listener_pid: int | None = None,
+        listener_start: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not self.start_token:
+            return None
+        return {
+            "pid": self.pid,
+            "start_time": self.start_token,
+            "phase": phase,
+            "listener_pid": listener_pid,
+            "listener_start": listener_start,
+        }
+
+
+def _delete_subscription_api(sub_id: str, *, timeout: float = TEARDOWN_DELETE_TIMEOUT) -> tuple[int, str, str]:
+    sid = valid_sub_id(sub_id)
+    if not sid:
+        return 2, "", f"invalid subscription id: {sub_id!r}"
+    return run_gh(
+        ["api", "--hostname=github.com", "-X", "DELETE", f"/event-subscriptions/{sid}"],
+        timeout=timeout,
+    )
+
+
+class StreamSession:
+    """Manages subscription ownership + `gh event listen` child with strict stop-before-delete."""
+
+    def __init__(
+        self,
+        coord: SubscriptionCoord,
+        *,
+        delete_on_exit: bool,
+        cancel: CancelState,
+        log_fn,
+    ) -> None:
+        self.coord = coord
+        self.delete_on_exit = delete_on_exit
+        self.cancel = cancel
+        self.log = log_fn
+        self.sub_id: str | None = None
+        self.ownership_confirmed: bool = False
+        self.shared_external: bool = True
+        self.registered_in_coord: bool = False
+        self.subscription_deleted: bool = False
+        self._closed: bool = False
+        self.proc: subprocess.Popen[bytes] | None = None
+        self.listener_reaped: bool = True
+        self.listener_pid: int | None = None
+        self.listener_start: str | None = None
+
+    def attach_proc(self, proc: subprocess.Popen[bytes]) -> bool:
+        """Record spawned listener handle and transition shared waiter entry `starting -> running`.
+
+        Returns True when listener identity was durably recorded in shared state (or coord not used).
+        Returns False when state update failed (marking keep_forever if possible; callers in
+        --delete-on-exit mode should stop listener and fall back).
+        """
+        self.proc = proc
+        self.listener_reaped = False
+        self.listener_pid = proc.pid
+        self.listener_start = proc_start_token(proc.pid)
+        if not self.registered_in_coord or not self.sub_id:
+            return True
+
+        lock_fd = self.coord._acquire_flock(time.monotonic() + TEARDOWN_FLOCK_TIMEOUT)
+        if lock_fd is None:
+            self.shared_external = True
+            self.ownership_confirmed = False
+            self.log(
+                f"warning: could not lock state after spawning listener pid {proc.pid}; "
+                "disabling auto-delete"
+            )
+            return False
+
+        try:
+            st = self.coord._read_state()
+            if valid_sub_id(st.get("sub_id")) != self.sub_id:
+                self.shared_external = True
+                self.ownership_confirmed = False
+                return False
+            live, uncertain = self.coord._prune_waiters(st)
+            unverified_child = not (isinstance(self.listener_start, str) and bool(self.listener_start))
+            keep_forever = bool(st.get("keep_forever", False)) or uncertain or unverified_child
+            shared_ext = bool(st.get("shared_external", False)) or keep_forever
+            new_phase = "starting" if unverified_child else "running"
+            updated: list[dict[str, Any]] = []
+            found_me = False
+            for w in live:
+                if w.get("pid") == self.coord.pid and w.get("start_time") == self.coord.start_token:
+                    found_me = True
+                    updated.append({
+                        **w,
+                        "phase": new_phase,
+                        "listener_pid": self.listener_pid,
+                        "listener_start": self.listener_start,
+                    })
+                else:
+                    updated.append(w)
+            if not found_me:
+                me = self.coord._me_entry(
+                    phase=new_phase,
+                    listener_pid=self.listener_pid,
+                    listener_start=self.listener_start,
+                )
+                if me is not None:
+                    updated.append(me)
+            wrote = self.coord._write_state({
+                "sub_id": self.sub_id,
+                "shared_external": shared_ext,
+                "keep_forever": keep_forever,
+                "waiters": updated,
+            })
+            if not wrote or unverified_child:
+                self.shared_external = True
+                self.ownership_confirmed = False
+                return False
+            return True
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+
+    def stop_listener(self) -> bool:
+        """Terminate `gh event listen` and prove exit. Returns True iff listener is reaped."""
+        proc = self.proc
+        if proc is None:
+            self.listener_reaped = True
+            return True
+
+        wait_s = stop_wait_timeout()
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=wait_s)
+            except subprocess.TimeoutExpired:
+                pass
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=wait_s)
+            except subprocess.TimeoutExpired:
+                pass
+
+        reaped = proc.poll() is not None
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        if reaped:
+            self.proc = None
+            self.listener_reaped = True
+            return True
+
+        self.listener_reaped = False
+        self.log(
+            f"warning: listener pid {proc.pid} did not exit after SIGTERM+SIGKILL; "
+            "skipping subscription deletion and marking subscription keep_forever"
+        )
+        return False
+
+    def close(self) -> bool:
+        """Atomically block signals, prove listener exit, update shared state, and delete ONLY if --delete-on-exit & safe."""
+        if self._closed:
+            return self.subscription_deleted
+        self._closed = True
+        old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, BLOCKED_SIGNALS)
+        try:
+            reaped = self.stop_listener()
+            if not self.sub_id:
+                return False
+
+            lock_fd = self.coord._acquire_flock(time.monotonic() + TEARDOWN_FLOCK_TIMEOUT)
+            if lock_fd is None:
+                if self.delete_on_exit:
+                    self.log(
+                        f"warning: could not acquire state lock for {self.sub_id}; "
+                        "keeping subscription (rely on 24h TTL or `gh-pr-wait cleanup`)"
+                    )
+                return False
+
+            try:
+                st = self.coord._read_state()
+                state_sub = valid_sub_id(st.get("sub_id"))
+                live, uncertain_detected = self.coord._prune_waiters(st)
+                # Remove our exiting parent entry; if reap is unproven, `keep_forever=True`
+                # is persisted durably below so no peer can ever delete the subscription.
+                remaining = [
+                    w for w in live
+                    if not (w.get("pid") == self.coord.pid and w.get("start_time") == self.coord.start_token)
+                ]
+
+                keep_forever = (
+                    bool(st.get("keep_forever", False))
+                    or (not reaped)
+                    or uncertain_detected
+                    or (not self.delete_on_exit)
+                )
+                shared_ext = bool(st.get("shared_external", True)) or self.shared_external or keep_forever
+
+                can_delete = (
+                    self.delete_on_exit
+                    and reaped
+                    and self.ownership_confirmed
+                    and not shared_ext
+                    and not keep_forever
+                    and state_sub == self.sub_id
+                    and len(remaining) == 0
+                )
+
+                if can_delete:
+                    rc, out, err = _delete_subscription_api(self.sub_id, timeout=TEARDOWN_DELETE_TIMEOUT)
+                    if rc == 0:
+                        self.subscription_deleted = True
+                        self.coord._clear_state()
+                    else:
+                        detail = (err or out).strip().splitlines()[:1]
+                        self.log(
+                            f"warning: failed to delete subscription {self.sub_id} (exit {rc}): "
+                            f"{detail[0] if detail else 'unknown error'}"
+                        )
+                        self.coord._write_state({
+                            "sub_id": self.sub_id,
+                            "shared_external": False,
+                            "keep_forever": False,
+                            "waiters": remaining,
+                        })
+                elif state_sub == self.sub_id or (not reaped):
+                    if remaining or keep_forever:
+                        self.coord._write_state({
+                            "sub_id": self.sub_id,
+                            "shared_external": shared_ext,
+                            "keep_forever": keep_forever,
+                            "waiters": remaining,
+                        })
+                    else:
+                        self.coord._clear_state()
+            finally:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            return self.subscription_deleted
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+class LineReader:
+    """Non-blocking, size-bounded, per-tick-capped line accumulator over a raw file descriptor."""
+
+    def __init__(self, fd: int, *, max_line_bytes: int = MAX_LINE_BYTES) -> None:
+        self.fd = fd
+        self.max_line_bytes = max_line_bytes
+        self.buf = bytearray()
+        self.dropping_oversize = False
+        self.eof = False
+        try:
+            os.set_blocking(fd, False)
+        except OSError:
+            pass
+
+    def has_buffered_line(self) -> bool:
+        return b"\n" in self.buf
+
+    def drain_lines(
+        self,
+        *,
+        max_lines: int = MAX_DRAIN_LINES,
+        max_reads: int = MAX_DRAIN_READS,
+        max_bytes: int = MAX_DRAIN_BYTES,
+    ) -> list[str]:
+        """Drain at most `max_lines` lines within a per-tick read/byte budget so continuous output without newlines cannot spin."""
+        lines: list[str] = []
+        self._flush_buf_lines(lines, max_lines)
+        if len(lines) >= max_lines or self.eof:
+            return lines
+        reads = 0
+        bytes_read = 0
+        while len(lines) < max_lines and reads < max_reads and bytes_read < max_bytes:
+            try:
+                chunk = os.read(self.fd, 8192)
+            except BlockingIOError:
+                break
+            except OSError:
+                self.eof = True
+                chunk = b""
+            reads += 1
+            if not chunk:
+                self.eof = True
+                if self.buf and not self.dropping_oversize and len(lines) < max_lines:
+                    lines.append(self.buf.decode("utf-8", errors="replace").rstrip("\r\n"))
+                    self.buf.clear()
+                self.dropping_oversize = False
+                break
+            bytes_read += len(chunk)
+            self._consume_chunk(chunk, lines, max_lines)
+            if len(chunk) < 8192:
+                break
+        return lines
+
+    def _flush_buf_lines(self, out_lines: list[str], max_lines: int) -> None:
+        while len(out_lines) < max_lines:
+            nl = self.buf.find(b"\n")
+            if nl < 0:
+                return
+            piece = bytes(self.buf[:nl])
+            del self.buf[: nl + 1]
+            if not self.dropping_oversize:
+                out_lines.append(piece.decode("utf-8", errors="replace").rstrip("\r"))
+            else:
+                self.dropping_oversize = False
+
+    def _consume_chunk(self, chunk: bytes, out_lines: list[str], max_lines: int) -> None:
+        start = 0
+        n = len(chunk)
+        while start < n:
+            if len(out_lines) >= max_lines:
+                # Stash remaining bytes in self.buf (bounded) for the next tick.
+                rem = chunk[start:]
+                if not self.dropping_oversize:
+                    if len(self.buf) + len(rem) <= self.max_line_bytes * 2:
+                        self.buf.extend(rem)
+                    else:
+                        self.buf.clear()
+                        self.dropping_oversize = True
+                return
+            nl = chunk.find(b"\n", start)
+            if self.dropping_oversize:
+                if nl < 0:
+                    return
+                self.dropping_oversize = False
+                start = nl + 1
+                continue
+            if nl >= 0:
+                piece = chunk[start:nl]
+                if len(self.buf) + len(piece) <= self.max_line_bytes:
+                    self.buf.extend(piece)
+                    out_lines.append(self.buf.decode("utf-8", errors="replace").rstrip("\r"))
+                self.buf.clear()
+                start = nl + 1
+            else:
+                piece = chunk[start:]
+                if len(self.buf) + len(piece) > self.max_line_bytes:
+                    self.buf.clear()
+                    self.dropping_oversize = True
+                else:
+                    self.buf.extend(piece)
+                return
+
+
+def _create_subscription_api(
+    pr_url: str,
+    events: tuple[str, ...],
+    timeout: float,
+) -> tuple[str | None, int | None, str | None]:
+    """Create or reuse subscription via REST API pinning `--hostname=github.com` so HTTP 201 vs 200 is authoritative.
+
+    Returns (sub_id, http_status_code, error_message).
+    """
+    cmd = [
+        "api",
+        "-i",
+        "--hostname=github.com",
+        "-X",
+        "POST",
+        "/event-subscriptions",
+        "-f",
+        f"resource_url={pr_url}",
+    ]
+    for ev in events:
+        cmd.extend(["-f", f"event_types[]={ev}"])
+    rc, out, err = run_gh(cmd, timeout=timeout)
+    if rc != 0:
+        combined = (err or out).strip()
+        detail = combined.splitlines()[:1]
+        msg = detail[0] if detail else "unknown"
+        if "422" in combined and "limit" in combined.lower():
+            return (
+                None,
+                422,
+                f"POST /event-subscriptions hit 100-subscription cap ({msg}); "
+                "run `gh-pr-wait cleanup` to prune merged/closed PR subscriptions",
+            )
+        return None, None, f"POST /event-subscriptions failed (exit {rc}): {msg}"
+    status_code, body = parse_http_status_and_body(out)
+    try:
+        data = json.loads(body)
+    except ValueError as exc:
+        return None, status_code, f"POST /event-subscriptions returned invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, status_code, "POST /event-subscriptions returned non-object JSON"
+    sub_id = valid_sub_id(data.get("id"))
+    if not sub_id:
+        return None, status_code, "POST /event-subscriptions returned invalid or empty id"
+    return sub_id, status_code, None
+
+
+def _acquire_subscription(
+    pr_ref: PRRef,
+    want_events: tuple[str, ...],
+    session: StreamSession,
+    deadline_mono: float,
+    cancel: CancelState,
+    log_fn,
+) -> tuple[bool, str | None]:
+    """Acquire or share subscription under per-key flock with phase="starting" recorded BEFORE Popen.
+
+    Fail-closed on lock or state-write failure (falls back to polling so no local waiter ever
+    attaches unregistered while a peer could hold --delete-on-exit).
+    Returns (ok, fallback_reason). If ok=False and fallback_reason is None, timeout expired.
+    """
+    coord = session.coord
+    cancel.raise_immediately = False
+    lock_fd = coord._acquire_flock(deadline_mono)
+    if lock_fd is None:
+        cancel.check()
+        if time.monotonic() >= deadline_mono:
+            return False, None
+        return False, "local state lock unavailable; falling back to polling"
+
+    # Lock fd enters try/finally IMMEDIATELY before cancel.check() or proc_info!
+    try:
+        cancel.check()
+        st = coord._read_state()
+        live, uncertain_detected = coord._prune_waiters(st)
+        state_sub = valid_sub_id(st.get("sub_id"))
+        me = coord._me_entry(phase="starting")
+
+        if me is None:
+            return False, "cannot verify local process identity; falling back to polling"
+
+        if live and state_sub:
+            if not any(w.get("pid") == me["pid"] and w.get("start_time") == me["start_time"] for w in live):
+                live.append(me)
+            keep_forever = (
+                bool(st.get("keep_forever", False))
+                or uncertain_detected
+                or (not session.delete_on_exit)
+            )
+            shared_ext = bool(st.get("shared_external", False)) or keep_forever
+            wrote = coord._write_state({
+                "sub_id": state_sub,
+                "shared_external": shared_ext,
+                "keep_forever": keep_forever,
+                "waiters": live,
+            })
+            if not wrote:
+                return False, "failed to record waiter in shared subscription state; falling back to polling"
+            session.sub_id = state_sub
+            session.shared_external = shared_ext
+            session.ownership_confirmed = True
+            session.registered_in_coord = True
+            cancel.check()
+            return True, None
+
+        t_create = call_timeout(deadline_mono)
+        if t_create is None:
+            return False, None
+        sub_id, status_code, err = _create_subscription_api(pr_ref.url, want_events, t_create)
+        if err is not None or not sub_id:
+            cancel.check()
+            return False, err or "could not create event subscription"
+
+        created_by_us = status_code == 201
+        same_as_old = sub_id == state_sub
+        prev_keep = bool(st.get("keep_forever", False)) if same_as_old else False
+        keep_forever = prev_keep or (uncertain_detected and same_as_old) or (not session.delete_on_exit)
+        shared_ext = (not created_by_us) or keep_forever
+
+        wrote = coord._write_state({
+            "sub_id": sub_id,
+            "shared_external": shared_ext,
+            "keep_forever": keep_forever,
+            "waiters": [me],
+        })
+        if not wrote:
+            # Fail-closed: never proceed unregistered; keep remote subscription (24h TTL / cleanup).
+            return False, f"could not write local state for {sub_id}; falling back to polling"
+
+        session.sub_id = sub_id
+        session.shared_external = shared_ext
+        session.ownership_confirmed = True
+        session.registered_in_coord = True
+        cancel.check()
+        return True, None
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def _parse_event_line(line: str, *, allowed_types: frozenset[str]) -> dict[str, Any] | None:
+    """Parse a valid subscribed GitHub CloudEvent JSON dict (requires non-empty `id` and subscribed `type`)."""
+    s = line.strip()
+    if not s or s.startswith(":"):
+        return None
+    try:
+        obj = json.loads(s)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    ev_id = obj.get("id")
+    if not isinstance(ev_id, str) or not ev_id.strip():
+        return None
+    ev_type = obj.get("type")
+    if not isinstance(ev_type, str) or ev_type not in allowed_types:
+        return None
+    return obj
+
+
+def _run_event_stream(
+    pr_ref: PRRef,
+    *,
+    for_mode: str,
+    ev_state: EvalState,
+    deadline_mono: float,
+    safety_interval: float,
+    attach_timeout: float,
+    delete_on_exit: bool,
+    cancel: CancelState,
+    log_fn,
+) -> tuple[dict[str, Any] | None, int | None, str | None]:
+    """Attempt Event Streams wait, preserving `ev_state` if falling back to polling."""
+    want_events = EVENTS_FOR[for_mode]
+    want_set = frozenset(want_events)
+    coord = SubscriptionCoord(pr_ref, want_events)
+    session = StreamSession(
+        coord=coord,
+        delete_on_exit=delete_on_exit,
+        cancel=cancel,
+        log_fn=log_fn,
+    )
+
+    events_received = 0
+    last_pr: dict[str, Any] = {}
+    last_event: dict[str, Any] | None = None
+    last_checks: dict[str, int] = {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    seen_event_ids: list[str] = []
+    seen_event_id_set: set[str] = set()
+    cooldown_s = event_cooldown_interval()
+    last_read_mono = 0.0
+    rate_backoff_s = 0.0
+
+    def _finish(ok: bool, exit_code: int, reason: str) -> tuple[dict[str, Any], int, None]:
+        deleted = session.close()
+        res: dict[str, Any] = {
+            "ok": ok,
+            "mode": "event-stream",
+            "pr_url": pr_ref.url,
+            "for": for_mode,
+            "head": str(last_pr.get("headRefOid") or ""),
+            "state": pr_state_name(last_pr),
+            "merged": pr_is_merged(last_pr),
+            "reason": reason,
+            "checks_summary": last_checks,
+            "events_received": events_received,
+            "subscription_id": session.sub_id,
+            "subscription_deleted": deleted,
+        }
+        if for_mode == "any":
+            res["event"] = last_event
+        return res, exit_code, None
+
+    def _bounded_wait_eof(proc: subprocess.Popen[bytes]) -> int:
+        rem_w = min(stop_wait_timeout(), max(0.1, deadline_mono - time.monotonic()))
+        try:
+            return proc.wait(timeout=rem_w)
+        except subprocess.TimeoutExpired:
+            session.stop_listener()
+            return proc.poll() if proc.poll() is not None else -1
+
+    try:
+        ok_acq, fb_reason = _acquire_subscription(
+            pr_ref, want_events, session, deadline_mono, cancel, log_fn,
+        )
+        if not ok_acq:
+            if fb_reason is None:
+                return _finish(False, EXIT_TIMEOUT, "timeout")
+            session.close()
+            return None, None, fb_reason
+
+        assert session.sub_id is not None
+        rem = deadline_mono - time.monotonic()
+        if rem <= 0:
+            return _finish(False, EXIT_TIMEOUT, "timeout")
+
+        listen_cmd = [
+            gh_bin(),
+            "event",
+            "listen",
+            f"--subscription={session.sub_id}",
+            "--follow",
+            f"--timeout={max(1, math.ceil(rem))}s",
+        ]
+        cancel.raise_immediately = False
+        try:
+            proc = subprocess.Popen(
+                listen_cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+                env=github_com_env(),
+            )
+        except OSError as exc:
+            session.close()
+            cancel.check()
+            return None, None, f"cannot start `gh event listen`: {exc}"
+
+        recorded_ok = session.attach_proc(proc)
+        cancel.check()
+        if not recorded_ok and delete_on_exit:
+            session.close()
+            return None, None, "failed to record listener identity for --delete-on-exit; falling back to polling"
+
+        assert proc.stdout is not None and proc.stderr is not None
+        out_reader = LineReader(proc.stdout.fileno())
+        err_reader = LineReader(proc.stderr.fileno())
+
+        # Phase 1: Strictly wait for exact `Listening for events.` line on stderr.
+        attach_deadline = min(deadline_mono, time.monotonic() + attach_timeout)
+        attached = False
+        buffered_stdout_lines: list[str] = []
+        buffered_stdout_bytes = 0
+        pre_attach_overflow_warned = False
+        stderr_diag: list[str] = []
+        stderr_diag_bytes = 0
+
+        while not attached:
+            now = time.monotonic()
+            if now >= deadline_mono:
+                return _finish(False, EXIT_TIMEOUT, "timeout")
+            if now >= attach_deadline:
+                session.close()
+                return None, None, f"timed out after {attach_timeout:g}s waiting for `{LISTEN_READY_MARKER}`"
+            deadline_wait.beat()
+
+            fds: list[int] = []
+            if not err_reader.eof:
+                fds.append(err_reader.fd)
+            if not out_reader.eof:
+                fds.append(out_reader.fd)
+            if not fds:
+                rc = _bounded_wait_eof(proc)
+                session.close()
+                detail = stderr_diag[-1] if stderr_diag else f"exit {rc}"
+                return None, None, f"`gh event listen` exited before attach (exit {rc}): {detail}"
+
+            wait_s = 0.0 if (err_reader.has_buffered_line() or out_reader.has_buffered_line()) else min(
+                0.5, attach_deadline - now, deadline_mono - now
+            )
+            cancel.raise_immediately = True
+            cancel.check()
+            try:
+                ready, _, _ = select.select(fds, [], [], max(0.0, wait_s))
+            finally:
+                cancel.raise_immediately = False
+
+            if err_reader.fd in ready or err_reader.has_buffered_line():
+                for line in err_reader.drain_lines(max_lines=MAX_DRAIN_LINES):
+                    if line and stderr_diag_bytes < MAX_DIAG_BYTES:
+                        take = line[: MAX_DIAG_BYTES - stderr_diag_bytes]
+                        stderr_diag.append(take)
+                        stderr_diag_bytes += len(take)
+                    if line.strip() == LISTEN_READY_MARKER:
+                        attached = True
+            if out_reader.fd in ready or out_reader.has_buffered_line():
+                for line in out_reader.drain_lines(max_lines=MAX_DRAIN_LINES):
+                    if (
+                        len(buffered_stdout_lines) < MAX_PRE_ATTACH_LINES
+                        and buffered_stdout_bytes + len(line) <= MAX_PRE_ATTACH_BYTES
+                    ):
+                        buffered_stdout_lines.append(line)
+                        buffered_stdout_bytes += len(line)
+                    elif not pre_attach_overflow_warned:
+                        pre_attach_overflow_warned = True
+                        log_fn("warning: pre-attach stdout buffer cap reached; dropping excess lines")
+
+            if not attached and err_reader.eof and out_reader.eof and not err_reader.has_buffered_line():
+                rc = _bounded_wait_eof(proc)
+                session.close()
+                detail = stderr_diag[-1] if stderr_diag else f"exit {rc}"
+                return None, None, f"`gh event listen` exited before attach (exit {rc}): {detail}"
+
+        # Phase 2: Post-attach initial PR state read (attach-then-read invariant).
+        t_init = call_timeout(deadline_mono)
+        if t_init is None:
+            return _finish(False, EXIT_TIMEOUT, "timeout")
+        deadline_wait.beat()
+        pr_data, fetch_err, rl = fetch_pr_state(pr_ref, for_mode, timeout=t_init)
+        last_read_mono = time.monotonic()
+        if fetch_err is not None:
+            log_fn(f"warning: initial {fetch_err}")
+            if rl:
+                rate_backoff_s = min(300.0, max(min_poll_interval(), rate_backoff_s * 2 or min_poll_interval()))
+                log_fn(f"rate limit hit; backing off {rate_backoff_s:g}s")
+        elif pr_data is not None:
+            rate_backoff_s = 0.0
+            last_pr = pr_data
+            dec = evaluate_pr(pr_data, ev_state, log_fn=log_fn)
+            last_checks = dec.checks_summary
+            if dec.done:
+                return _finish(dec.ok, dec.exit_code, dec.reason)
+
+        # Phase 3: Event loop with bounded per-tick drain, coalescing, cooldown, rate backoff, and safety-net timer.
+        next_safety = time.monotonic() + safety_interval
+        pending_lines = buffered_stdout_lines
+        buffered_stdout_lines = []
+        need_reread = False
+        pending_event_review_ids: set[str] = set()
+
+        while True:
+            if pending_lines:
+                for line in pending_lines:
+                    ev = _parse_event_line(line, allowed_types=want_set)
+                    if ev is None:
+                        continue
+                    eid = str(ev["id"]).strip()
+                    if eid in seen_event_id_set:
+                        continue
+                    seen_event_id_set.add(eid)
+                    seen_event_ids.append(eid)
+                    if len(seen_event_ids) > MAX_SEEN_EVENT_IDS:
+                        old_id = seen_event_ids.pop(0)
+                        seen_event_id_set.discard(old_id)
+                    events_received += 1
+                    last_event = ev
+                    if for_mode == "any":
+                        t_snap = call_timeout(deadline_mono)
+                        if t_snap is None:
+                            return _finish(False, EXIT_TIMEOUT, "timeout")
+                        snap, snap_err, _ = fetch_pr_state(pr_ref, for_mode, timeout=t_snap)
+                        if snap is not None:
+                            last_pr = snap
+                            last_checks, _, _ = summarize_checks(snap)
+                        elif snap_err:
+                            log_fn(f"warning: post-event snapshot {snap_err}")
+                        return _finish(True, EXIT_OK, "event_received")
+                    if ev.get("type") == EV_REVIEW:
+                        rev_id = extract_event_review_id(ev)
+                        if rev_id is not None:
+                            pending_event_review_ids.add(rev_id)
+                    need_reread = True
+                pending_lines = []
+
+            now = time.monotonic()
+            rem = deadline_mono - now
+            if rem <= 0:
+                return _finish(False, EXIT_TIMEOUT, "timeout")
+
+            min_gap = max(cooldown_s, rate_backoff_s)
+            earliest_read = last_read_mono + min_gap
+
+            if need_reread and now >= earliest_read:
+                t_read = call_timeout(deadline_mono)
+                if t_read is None:
+                    return _finish(False, EXIT_TIMEOUT, "timeout")
+                need_reread = False
+                rev_ids_batch = set(pending_event_review_ids)
+                pending_event_review_ids.clear()
+                deadline_wait.beat()
+                pr_data, fetch_err, rl = fetch_pr_state(pr_ref, for_mode, timeout=t_read)
+                last_read_mono = time.monotonic()
+                next_safety = last_read_mono + safety_interval
+                if fetch_err is not None:
+                    log_fn(f"warning: {fetch_err}")
+                    if rl:
+                        base_b = min_poll_interval()
+                        rate_backoff_s = min(300.0, max(base_b, rate_backoff_s * 2 if rate_backoff_s else base_b))
+                        log_fn(f"rate limit hit; backing off {rate_backoff_s:g}s")
+                elif pr_data is not None:
+                    rate_backoff_s = 0.0
+                    last_pr = pr_data
+                    dec = evaluate_pr(
+                        pr_data,
+                        ev_state,
+                        event_review_ids=rev_ids_batch,
+                        log_fn=log_fn,
+                    )
+                    last_checks = dec.checks_summary
+                    if dec.done:
+                        return _finish(dec.ok, dec.exit_code, dec.reason)
+
+            now = time.monotonic()
+            rem = deadline_mono - now
+            if rem <= 0:
+                return _finish(False, EXIT_TIMEOUT, "timeout")
+            deadline_wait.beat()
+
+            fds = []
+            if not out_reader.eof:
+                fds.append(out_reader.fd)
+            if not err_reader.eof:
+                fds.append(err_reader.fd)
+
+            if not fds and not out_reader.has_buffered_line() and not err_reader.has_buffered_line():
+                rc = _bounded_wait_eof(proc)
+                t_end = call_timeout(deadline_mono)
+                if t_end is not None:
+                    pr_data, _, _ = fetch_pr_state(pr_ref, for_mode, timeout=t_end)
+                    if pr_data is not None:
+                        last_pr = pr_data
+                        dec = evaluate_pr(
+                            pr_data,
+                            ev_state,
+                            event_review_ids=set(pending_event_review_ids),
+                            log_fn=log_fn,
+                        )
+                        last_checks = dec.checks_summary
+                        if dec.done:
+                            return _finish(dec.ok, dec.exit_code, dec.reason)
+                if rc == EXIT_TIMEOUT or time.monotonic() >= deadline_mono:
+                    return _finish(False, EXIT_TIMEOUT, "timeout")
+                session.close()
+                return None, None, f"`gh event listen` ended unexpectedly (exit {rc}); switching to polling fallback"
+
+            if out_reader.has_buffered_line() or err_reader.has_buffered_line():
+                wait_s = 0.0
+            else:
+                next_wake = next_safety
+                if need_reread:
+                    next_wake = min(next_wake, last_read_mono + max(cooldown_s, rate_backoff_s))
+                wait_s = min(rem, max(0.0, next_wake - now), 10.0)
+
+            ready: list[int] = []
+            if fds:
+                cancel.raise_immediately = True
+                cancel.check()
+                try:
+                    ready, _, _ = select.select(fds, [], [], max(0.0, wait_s))
+                finally:
+                    cancel.raise_immediately = False
+
+            if out_reader.fd in ready or out_reader.has_buffered_line():
+                pending_lines.extend(out_reader.drain_lines(max_lines=MAX_DRAIN_LINES))
+
+            if err_reader.fd in ready or err_reader.has_buffered_line():
+                for line in err_reader.drain_lines(max_lines=MAX_DRAIN_LINES):
+                    if line.strip() == LISTEN_READY_MARKER:
+                        log_fn("reconnected to event stream; re-reading PR state")
+                        need_reread = True
+
+            if time.monotonic() >= next_safety:
+                need_reread = True
+    finally:
+        session.close()
+
+
+def _run_poll_fallback(
+    pr_ref: PRRef,
+    *,
+    for_mode: str,
+    ev_state: EvalState,
+    deadline_mono: float,
+    fallback_interval: float,
+    cancel: CancelState,
+    log_fn,
+) -> tuple[dict[str, Any], int]:
+    floor = min_poll_interval()
+    interval = max(fallback_interval, floor)
+    if fallback_interval < floor:
+        log_fn(
+            f"clamping --fallback-interval from {fallback_interval:g}s to {floor:g}s (quota-safe floor)"
+        )
+
+    last_pr: dict[str, Any] = {}
+    last_checks: dict[str, int] = {"total": 0, "passed": 0, "failed": 0, "pending": 0}
+    rate_backoff_s = 0.0
+
+    def _poll_result(ok: bool, exit_code: int, reason: str) -> tuple[dict[str, Any], int]:
+        res: dict[str, Any] = {
+            "ok": ok,
+            "mode": "poll-fallback",
+            "pr_url": pr_ref.url,
+            "for": for_mode,
+            "head": str(last_pr.get("headRefOid") or ""),
+            "state": pr_state_name(last_pr),
+            "merged": pr_is_merged(last_pr),
+            "reason": reason,
+            "checks_summary": last_checks,
+            "events_received": 0,
+            "subscription_id": None,
+            "subscription_deleted": False,
+        }
+        if for_mode == "any":
+            res["event"] = None
+        return res, exit_code
+
+    while True:
+        t_poll = call_timeout(deadline_mono)
+        if t_poll is None:
+            return _poll_result(False, EXIT_TIMEOUT, "timeout")
+
+        deadline_wait.beat()
+        cancel.check()
+        pr_data, fetch_err, rl = fetch_pr_state(pr_ref, for_mode, timeout=t_poll)
+        if fetch_err is not None:
+            log_fn(f"warning: {fetch_err}")
+            if rl:
+                rate_backoff_s = min(300.0, max(interval, rate_backoff_s * 2 if rate_backoff_s else interval * 2))
+                log_fn(f"rate limit hit; backing off {rate_backoff_s:g}s")
+        elif pr_data is not None:
+            rate_backoff_s = 0.0
+            last_pr = pr_data
+            dec = evaluate_pr(pr_data, ev_state, log_fn=log_fn)
+            last_checks = dec.checks_summary
+            if dec.done:
+                return _poll_result(dec.ok, dec.exit_code, dec.reason)
+
+        now = time.monotonic()
+        if now >= deadline_mono:
+            return _poll_result(False, EXIT_TIMEOUT, "timeout")
+
+        sleep_for = max(interval, rate_backoff_s)
+        sleep_until = min(deadline_mono, now + sleep_for)
+        while True:
+            rem = sleep_until - time.monotonic()
+            if rem <= 0:
+                break
+            deadline_wait.beat()
+            cancel.raise_immediately = True
+            cancel.check()
+            try:
+                time.sleep(min(rem, 10.0))
+            finally:
+                cancel.raise_immediately = False
+
+
+def _format_human(res: dict[str, Any]) -> str:
+    status = "ok" if res["ok"] else "fail"
+    head = (res.get("head") or "")[:12] or "-"
+    cs = res.get("checks_summary") or {}
+    checks_s = f"{cs.get('passed', 0)}/{cs.get('total', 0)}(fail={cs.get('failed', 0)},pend={cs.get('pending', 0)})"
+    return (
+        f"gh-pr-wait: {status} mode={res['mode']} for={res['for']} reason={res['reason']} "
+        f"state={res.get('state') or '-'} head={head} checks={checks_s} "
+        f"events={res.get('events_received', 0)} elapsed={res.get('elapsed_s', 0.0):.1f}s "
+        f"{res['pr_url']}"
+    )
+
+
+def cmd_cleanup(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="gh-pr-wait cleanup",
+        description=(
+            "List and delete stale GitHub Event Streams subscriptions (closed/merged PRs by default). "
+            "Note: PR state check followed by delete is non-atomic."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report subscriptions that would be deleted without deleting."
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Destructive: delete ALL active subscriptions including open PRs and other waiters.",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit one structured JSON object on stdout.")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress stderr diagnostics.")
+    args = parser.parse_args(argv)
+
+    def log(msg: str) -> None:
+        if not args.quiet:
+            print(f"gh-pr-wait cleanup: {msg}", file=sys.stderr, flush=True)
+
+    rc, out, err = run_gh(
+        [
+            "event",
+            "subscription",
+            "list",
+            f"--limit={MAX_LIST_SUBSCRIPTIONS}",
+            "--json=id,resourceUrl,eventTypes,expiresAt",
+        ],
+        timeout=GH_CMD_CAP,
+        env=github_com_env(),
+    )
+    if rc != 0:
+        detail = (err or out).strip().splitlines()[:1]
+        print(
+            f"gh-pr-wait cleanup: failed to list subscriptions (exit {rc}): {detail[0] if detail else 'unknown'}",
+            file=sys.stderr,
+        )
+        return EXIT_FAIL
+    try:
+        raw_subs = json.loads(out)
+    except ValueError as exc:
+        print(f"gh-pr-wait cleanup: invalid JSON from subscription list: {exc}", file=sys.stderr)
+        return EXIT_FAIL
+    if not isinstance(raw_subs, list):
+        print("gh-pr-wait cleanup: subscription list did not return a JSON array", file=sys.stderr)
+        return EXIT_FAIL
+
+    if len(raw_subs) > MAX_LIST_SUBSCRIPTIONS:
+        log(f"capping listed subscriptions from {len(raw_subs)} to {MAX_LIST_SUBSCRIPTIONS}")
+    subs = raw_subs[:MAX_LIST_SUBSCRIPTIONS]
+
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    deleted: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    pr_cache: dict[tuple[str, str, int], tuple[str | None, str | None]] = {}
+
+    for sub in subs:
+        if not isinstance(sub, dict):
+            continue
+        raw_id = sub.get("id")
+        sub_id = valid_sub_id(raw_id)
+        rurl = str(sub.get("resourceUrl") or "").strip()
+        entry = {
+            "id": sub_id or str(raw_id or ""),
+            "resourceUrl": rurl,
+            "eventTypes": sub.get("eventTypes") or [],
+            "expiresAt": sub.get("expiresAt"),
+        }
+        if not sub_id:
+            log(f"skipping subscription with invalid id {raw_id!r}")
+            skipped.append({**entry, "reason": "invalid_subscription_id"})
+            continue
+        if args.all:
+            selected.append({**entry, "reason": "all"})
+            continue
+
+        parsed = parse_canonical_github_pr_url(rurl)
+        if parsed is None:
+            log(f"skipping {sub_id}: invalid or non-github PR url {rurl!r}")
+            skipped.append({**entry, "reason": "invalid_resource_url"})
+            continue
+
+        owner, repo, number, canon_url = parsed
+        cache_key = (owner.lower(), repo.lower(), number)
+        if cache_key in pr_cache:
+            st, skip_reason = pr_cache[cache_key]
+        else:
+            p_rc, p_out, p_err = run_gh(
+                ["pr", "view", f"--repo=github.com/{owner}/{repo}", "--json=url,state", "--", str(number)],
+                timeout=GH_CMD_CAP,
+            )
+            if p_rc != 0:
+                detail = (p_err or p_out).strip().splitlines()[:1]
+                log(f"skipping {sub_id} ({canon_url}): unreadable PR ({detail[0] if detail else f'exit {p_rc}'})")
+                st, skip_reason = None, "unreadable_pr"
+            else:
+                try:
+                    pdata = json.loads(p_out)
+                except ValueError:
+                    pdata = None
+                if not isinstance(pdata, dict):
+                    log(f"skipping {sub_id} ({canon_url}): unreadable PR JSON")
+                    st, skip_reason = None, "unreadable_pr"
+                else:
+                    resp_tuple = canonical_pr_tuple(pdata.get("url"))
+                    want_tuple = ("github.com", owner.lower(), repo.lower(), number)
+                    state_val = pr_state_name(pdata)
+                    if resp_tuple != want_tuple:
+                        log(f"skipping {sub_id}: response url {pdata.get('url')!r} != {canon_url!r}")
+                        st, skip_reason = None, "url_mismatch"
+                    elif state_val not in VALID_PR_STATES:
+                        log(f"skipping {sub_id}: invalid PR state {pdata.get('state')!r}")
+                        st, skip_reason = None, "invalid_pr_state"
+                    else:
+                        st, skip_reason = state_val, None
+            pr_cache[cache_key] = (st, skip_reason)
+
+        if skip_reason is not None:
+            skipped.append({**entry, "reason": skip_reason})
+        elif st in ("MERGED", "CLOSED"):
+            selected.append({**entry, "reason": st.lower()})
+        else:
+            skipped.append({**entry, "reason": f"pr_{(st or 'unknown').lower()}"})
+
+    if not args.dry_run:
+        for item in selected:
+            d_rc, d_out, d_err = _delete_subscription_api(item["id"], timeout=TEARDOWN_DELETE_TIMEOUT)
+            if d_rc == 0:
+                deleted.append(item)
+            else:
+                detail = (d_err or d_out).strip().splitlines()[:1]
+                errors.append({
+                    **item,
+                    "error": detail[0] if detail else f"exit {d_rc}",
+                })
+
+    ok = len(errors) == 0
+    payload = {
+        "ok": ok,
+        "dry_run": args.dry_run,
+        "all": args.all,
+        "total": len(subs),
+        "selected": selected,
+        "deleted": deleted,
+        "skipped": skipped,
+        "errors": errors,
+    }
+    if args.json:
+        print(json.dumps(payload, sort_keys=True))
+    else:
+        verb = "would delete" if args.dry_run else "deleted"
+        count = len(selected) if args.dry_run else len(deleted)
+        print(
+            f"gh-pr-wait cleanup: {verb} {count}/{len(subs)} subscriptions "
+            f"(skipped={len(skipped)}, errors={len(errors)})"
+        )
+        for item in selected:
+            tag = (
+                "would-delete"
+                if args.dry_run
+                else ("deleted" if any(d["id"] == item["id"] for d in deleted) else "error")
+            )
+            print(f"  {tag} {item['id']} ({item['reason']}) {item['resourceUrl']}")
+    return EXIT_OK if ok else EXIT_FAIL
+
+
+def _build_wait_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="gh-pr-wait",
+        description=(
+            "Wait for GitHub PR checks, reviews, merges, or events using GitHub Event Streams "
+            "(event-driven with slow safety-net re-checks and >= 60 s polling fallback). "
+            "Keeps subscriptions on exit by default (24 h TTL + `gh-pr-wait cleanup`); pass "
+            "`--delete-on-exit` only as an explicit single-consumer opt-in."
+        ),
+    )
+    parser.add_argument(
+        "pr_ref",
+        help="PR reference: https://github.com/OWNER/REPO/pull/N, OWNER/REPO#N, or bare PR number N",
+    )
+    parser.add_argument("-R", "--repo", default=None, help="Repository as [HOST/]OWNER/REPO")
+    parser.add_argument(
+        "--for",
+        dest="for_mode",
+        choices=("checks", "review", "merge", "any"),
+        default="checks",
+        help="Condition to wait for (default: checks)",
+    )
+    parser.add_argument(
+        "--timeout",
+        default=DEFAULT_TIMEOUT,
+        help=f"Maximum wait duration, e.g. 35m, 120s (default: {DEFAULT_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--safety-interval",
+        default=str(int(DEFAULT_SAFETY_INTERVAL)),
+        help=f"Safety-net PR re-check interval in seconds, clamped >= 30 (default: {int(DEFAULT_SAFETY_INTERVAL)})",
+    )
+    parser.add_argument(
+        "--fallback-interval",
+        default=str(int(DEFAULT_FALLBACK_INTERVAL)),
+        help=f"Polling fallback interval in seconds, clamped >= 60 (default: {int(DEFAULT_FALLBACK_INTERVAL)})",
+    )
+    parser.add_argument(
+        "--attach-timeout",
+        default=str(int(DEFAULT_ATTACH_TIMEOUT)),
+        help=f"Seconds to wait for `{LISTEN_READY_MARKER}` before polling fallback (default: {int(DEFAULT_ATTACH_TIMEOUT)})",
+    )
+    parser.add_argument(
+        "--delete-on-exit",
+        action="store_true",
+        help=(
+            "Explicit single-consumer opt-in: delete a newly created (HTTP 201) subscription on exit "
+            "after proving listener reap and confirming no other local waiter holds it"
+        ),
+    )
+    parser.add_argument(
+        "--keep-subscription",
+        action="store_true",
+        help="Keep the subscription on exit (default behavior; mutually exclusive with --delete-on-exit)",
+    )
+    parser.add_argument(
+        "--allow-empty-checks",
+        action="store_true",
+        help="In `--for checks`, treat a genuine empty statusCheckRollup ([]) as passing instead of waiting",
+    )
+    parser.add_argument(
+        "--no-deadline",
+        action="store_true",
+        help="Do not self-supervise via `bin/deadline`",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit one structured JSON object on stdout")
+    parser.add_argument("-q", "--quiet", action="store_true", help="Suppress stderr diagnostics")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw = list(argv if argv is not None else sys.argv[1:])
+    if raw and raw[0] == "cleanup":
+        return cmd_cleanup(raw[1:])
+
+    parser = _build_wait_parser()
+    args = parser.parse_args(raw)
+
+    start_mono = time.monotonic()
+    try:
+        if args.delete_on_exit and args.keep_subscription:
+            raise UsageError("--delete-on-exit and --keep-subscription are mutually exclusive")
+        timeout_s = parse_dur(args.timeout)
+        deadline_mono = start_mono + timeout_s
+        safety_req = parse_positive_float(args.safety_interval, "--safety-interval")
+        fallback_interval = parse_positive_float(args.fallback_interval, "--fallback-interval")
+        attach_timeout = parse_positive_float(args.attach_timeout, "--attach-timeout")
+        pr_ref = resolve_pr_ref(args.pr_ref, args.repo, deadline_mono=deadline_mono)
+    except WaitTimeoutError as exc:
+        print(f"gh-pr-wait: {exc}", file=sys.stderr)
+        return EXIT_TIMEOUT
+    except UsageError as exc:
+        print(f"gh-pr-wait: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    def log(msg: str) -> None:
+        if not args.quiet:
+            print(f"gh-pr-wait: {msg}", file=sys.stderr, flush=True)
+
+    safety_floor = min_safety_interval()
+    safety_interval = max(safety_req, safety_floor)
+    if safety_req < safety_floor:
+        log(f"clamping --safety-interval from {safety_req:g}s to {safety_floor:g}s")
+
+    rem_after_resolve = deadline_mono - time.monotonic()
+    if rem_after_resolve <= 0:
+        log("timeout expired before wait began")
+        return EXIT_TIMEOUT
+
+    inner_argv = _build_supervised_argv(args, pr_ref, rem_after_resolve)
+
+    budget_s = rem_after_resolve + 60.0
+    heartbeat_s = max(300.0, safety_interval + 60.0)
+    sup_rc = deadline_wait.supervised(
+        "gh-pr-wait",
+        deadline_wait.safe_name("gh-pr-wait", os.getpid()),
+        budget_s,
+        heartbeat_s,
+        os.path.realpath(__file__),
+        inner_argv,
+        opt_out=args.no_deadline,
+    )
+    if sup_rc is not None:
+        return sup_rc
+
+    cancel = CancelState()
+    old_handlers = {
+        s: signal.signal(s, cancel.handle_signal) for s in BLOCKED_SIGNALS
+    }
+
+    try:
+        ev_state = EvalState(for_mode=args.for_mode, allow_empty_checks=args.allow_empty_checks)
+        result: dict[str, Any] | None = None
+        exit_code: int | None = None
+        fallback_reason: str | None = None
+
+        if pr_ref.is_github_com:
+            result, exit_code, fallback_reason = _run_event_stream(
+                pr_ref,
+                for_mode=args.for_mode,
+                ev_state=ev_state,
+                deadline_mono=deadline_mono,
+                safety_interval=safety_interval,
+                attach_timeout=attach_timeout,
+                delete_on_exit=args.delete_on_exit,
+                cancel=cancel,
+                log_fn=log,
+            )
+        else:
+            fallback_reason = f"non-github.com host ({pr_ref.host})"
+
+        if result is None or exit_code is None:
+            log(f"falling back to polling ({fallback_reason or 'event stream unavailable'})")
+            result, exit_code = _run_poll_fallback(
+                pr_ref,
+                for_mode=args.for_mode,
+                ev_state=ev_state,
+                deadline_mono=deadline_mono,
+                fallback_interval=fallback_interval,
+                cancel=cancel,
+                log_fn=log,
+            )
+
+        result["elapsed_s"] = round(max(0.0, time.monotonic() - start_mono), 3)
+        if args.json:
+            print(json.dumps(result, sort_keys=True), flush=True)
+        else:
+            print(_format_human(result), flush=True)
+        return exit_code
+    except _SignalInterrupt as exc:
+        log(f"interrupted by signal {exc.signum}; cleaned up")
+        return 128 + exc.signum
+    finally:
+        for s, h in old_handlers.items():
+            signal.signal(s, h)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
