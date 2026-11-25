@@ -20,13 +20,25 @@ clear a parent session to make a child resume. See [context hygiene](../../docs/
   exact Tier 1 pointer. See [self-session](../../docs/self-session.md#c-self-handoff-to-a-new-session)
   for `accept` / `finish` and the agent-run fallback. The predecessor launches the
   successor itself; no operator reset or pasted prompt is required.
-- **Non-Paseo / Herdr Claude Code sessions (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
-  no Paseo lifecycle controller or `ade-self-session` acknowledgement exists outside Paseo. After
-  the predecessor writes the durable Tier 1 + Tier 2 checkpoints locally (`/self-handoff` Steps 0–7,
-  skipping Steps 8 and 9) and the operator runs `/new`, resume via `/baton <exact Tier 1 pointer>`
-  (or bare `/baton` only when workspace resolution is unambiguous and ownership-checked). All
-  `session-handoff` live-owner and no-competing-owner checks still apply: never silently take over a
-  chain that has another live owner.
+- **Herdr-hosted sessions (no `$PASEO_AGENT_ID`, genuine Herdr pane with `HERDR_ENV=1` +
+  `HERDR_PANE_ID`, Carried #122 Phase 2, 2026-11-25):** after writing durable Tier 1 + Tier 2
+  checkpoints locally (`/self-handoff` Steps 0–7), the predecessor may either launch an automated
+  Herdr successor tab via `bin/ade-herdr-handoff` (which opens a new tab in the same workspace,
+  starts a real `claude` or `codex` TUI, submits `/baton <exact Tier 1 pointer>` or
+  `$baton <exact Tier 1 pointer>` once, and leaves the predecessor pane intact; see
+  [self-session Section H](../../docs/self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25))
+  or let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or bare `/baton` when
+  workspace resolution is unambiguous) manually. Because no Paseo `accept`/`finish` transaction
+  exists in Herdr mode, do not run `ade-self-session accept|finish` and do not close the
+  predecessor pane automatically.
+- **Standalone non-Paseo / non-Herdr sessions (no `$PASEO_AGENT_ID` and not in Herdr, operator
+  ruling 2026-11-25):** no Paseo lifecycle controller or `ade-self-session` acknowledgement exists
+  outside Paseo. After the predecessor writes the durable Tier 1 + Tier 2 checkpoints locally
+  (`/self-handoff` Steps 0–7, skipping Steps 8 and 9) and the operator runs `/new`, resume via
+  `/baton <exact Tier 1 pointer>` (or bare `/baton` only when workspace resolution is unambiguous
+  and ownership-checked). In both Herdr and standalone modes, all `session-handoff` live-owner and
+  no-competing-owner checks still apply: never silently take over a chain that has another live
+  owner.
 
 **Syntax is per client (2026-10-25).** In Claude Code the skill is typed `/baton`. In Codex a skill is invoked with
 `$` (`$baton`, `$baton PATH`) and `/` is reserved for Codex's built-ins (`/new`, `/compact`, `/quit`): a `/baton` typed

@@ -34,11 +34,15 @@ Continuous protection against unplanned interruption is the separate, planned
    skill; Step 9 defaults to `ade-self-session handoff` with a durable checkpoint.
    The agent launches and verifies its own successor via [self-session](self-session.md),
    including the agent-run fallback when supported; for Paseo-hosted sessions,
-   operator typing is never the fallback. Outside Paseo (a Herdr pane or standalone
-   Claude Code terminal with `PASEO_AGENT_ID` unset/blank, operator ruling 2026-11-25),
-   complete `/self-handoff` Steps 0–7 locally, skip Steps 8 and 9, and let the operator
-   run `/new` then `/baton <exact Tier 1 pointer>` (or bare `/baton` when workspace
-   resolution is unambiguous), keeping all `session-handoff` live-owner checks intact.
+   operator typing is never the fallback. Outside Paseo (`PASEO_AGENT_ID` unset/blank,
+   operator ruling 2026-11-25, Carried #122), there are two modes: in a genuine Herdr pane
+   (`HERDR_ENV=1` + `HERDR_PANE_ID`), complete `/self-handoff` Steps 0–7 locally and either
+   launch an automated Herdr successor tab via `bin/ade-herdr-handoff` ([self-session Section H](self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25))
+   or let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually;
+   in a standalone non-Paseo / non-Herdr terminal, complete `/self-handoff` Steps 0–7 locally,
+   skip Steps 8 and 9, and let the operator run `/new` then `/baton <exact Tier 1 pointer>`
+   (or bare `/baton` when workspace resolution is unambiguous), keeping all `session-handoff`
+   live-owner checks intact.
    A dispatched slice may hand off its own task with a durable checkpoint and
    scope/ownership coordination, but must never clear or archive its parent. The native
    self-session helper takes its predecessor only from its own Paseo identity.
@@ -86,9 +90,12 @@ about ten tool rounds ahead of the hard tier's own 50k; there a handoff (a fresh
 left behind), and earlier than that a handoff only throws away a cache that still has room to pay
 back. The 120k floor stays because compacting at 200k or less simulated a net loss. The boundary and hard texts print the computed wall and the tokens left, keep the 2026-11-14
 ruling in Paseo mode (`PASEO_AGENT_ID` set: when handing off, do it yourself; never hand the
-operator a `/new`), switch to local-handoff guidance when `PASEO_AGENT_ID` is unset/blank
-(non-Paseo / Herdr Claude Code mode, operator ruling 2026-11-25: run `/self-handoff` Steps 0-7
-locally, skip Step 9, let the operator run `/new` then `/baton <exact Tier 1 pointer>` or `/baton`),
+operator a `/new`), switch to Herdr mode when `PASEO_AGENT_ID` is unset/blank and both
+`HERDR_ENV=1` and `HERDR_PANE_ID` are set (Carried #122 Phase 2, 2026-11-25: run `/self-handoff`
+Steps 0–7 locally, then either `bin/ade-herdr-handoff` for an automated Herdr successor tab or
+manual `/new` + `/baton <exact Tier 1 pointer>`), and switch to standalone local-handoff guidance
+otherwise (`PASEO_AGENT_ID` unset/blank and not in Herdr: run `/self-handoff` Steps 0–7 locally,
+skip Step 9, let the operator run `/new` then `/baton <exact Tier 1 pointer>` or `/baton`),
 and say that a finished task alone
 is no reason to hand off or compact below the boundary tier. The total-based hard tier also covers
 regrowth after a compaction (floor ~104k). The hook runs under `UserPromptSubmit` and, where the settings
