@@ -605,6 +605,7 @@ def test_gh_watchers_are_denied(command):
     reason = out["permissionDecisionReason"]
     assert "item 20" in reason and "5000/h" in reason and "2026-11-14" in reason
     assert "gh run view RUN --json status,conclusion" in reason and "60 s" in reason
+    assert "gh-pr-wait" in reason and "gh event listen" in reason
 
 
 @pytest.mark.parametrize("command", [
@@ -635,6 +636,10 @@ def test_gh_watchers_are_denied(command):
     "ghr run watch 9",                                  # another tool
     "bash -c 'gh run view 9 --json status'",
     "until gh run view 9 --json conclusion --jq .conclusion | rg -q .; do sleep 60; done",
+    "gh event listen --resource https://github.com/o/r/pull/5 --event com.github.pull_request.check_suite.status.changed.v1",
+    "gh event subscription list --limit 100",
+    "gh-pr-wait https://github.com/o/r/pull/5 --for checks --json",
+    "~/src/djbclark-ade/bin/gh-pr-wait o/r#5 --for review --timeout 35m",
 ])
 def test_gh_one_shots_and_mentions_pass(command):
     assert not denied(command), command

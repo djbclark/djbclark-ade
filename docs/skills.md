@@ -53,6 +53,7 @@ For the migration choices, compatibility names and Linux/macOS handoffs, read
 | Skill | What it does | How to use |
 |---|---|---|
 | `ade-update` | Keeps this machine's checkout current: fast-forward pull, relink skills, check links, print the changelog delta (`bin/ade-update`). | `/ade-update`, "update the ADE". |
+| `gh-event-streams` | Waits for GitHub PR CI checks, reviews, merges, or head updates via GitHub Event Streams (`bin/gh-pr-wait` / `gh event listen`, SSE with zero polling, attach-then-read, stop-before-delete cleanup, automatic `>= 60 s` polling fallback, 2026-11-25). | `/gh-event-streams`; lead waiting on a `github.com` PR or pruning stale subscriptions (`gh-pr-wait cleanup`). |
 | `graft` | Tells an agent to use the graft code graph before grepping or reading source. | Loads on its own in a graft-indexed repo. |
 | `create-hook` | Writes, merges and removes native OpenAI Codex hooks (`~/.codex/hooks.json`, `<repo>/.codex/hooks.json`). Codex only. | "add a Codex hook". |
 | `oc-go-key` | **Retired OpenCode path (Pi sole-TUI 2026-11-09).** Historically recovered a session stopped by "Go usage limit exceeded": read which OpenCode Go account served this Mac, swapped the credential (`oc-go-key use <label>`), resumed the turn. Keep for archive/history only; not a live Pi or Paseo recovery path. | Legacy OpenCode Go-limit recovery only. |

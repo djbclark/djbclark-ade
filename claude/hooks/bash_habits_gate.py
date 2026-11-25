@@ -520,10 +520,12 @@ GH_WATCH_REASON = (
     "agent shares one GitHub token with a 5000/h API quota (REST and GraphQL are counted "
     "separately); on 2026-11-14 four `gh run watch` "
     "at gh's default 3 s interval emptied it from 10:22Z to 11:22Z and blocked every agent's gh "
-    "work, and a watcher also keeps you busy and deaf to the lead's messages. Instead: report "
-    "\"CI running\" with the run URL and end the turn; or one-shot `gh run view RUN --json "
-    "status,conclusion`; or a background loop that sleeps 60 s or more between one-shot checks. "
-    "The lead's single watcher passes with `--interval 60` (or more)."
+    "work, and a watcher also keeps you busy and deaf to the lead's messages. Instead: for "
+    "github.com PRs, use `gh-pr-wait` or `gh event listen` (Event Streams SSE, zero polling) "
+    "in the lead's background; workers still report \"CI running\" with the run URL and end the "
+    "turn. Otherwise use one-shot `gh run view RUN --json status,conclusion`, or a background "
+    "loop that sleeps 60 s or more between one-shot checks. The lead's single polling watcher "
+    "passes with `--interval 60` (or more)."
 )
 GH_FANOUT_WARNING = (
     "Parallel `gh` calls (`xargs -P` / `parallel`) draw on the one 5000/h API quota every agent "
