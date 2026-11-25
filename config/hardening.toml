@@ -119,16 +119,22 @@ profile = "active"
 owner = "frdminc"
 name = "peer-link"
 profile = "active"
+# Private repo: GitHub's public fork-PR contributor approval endpoint rejects private repos (operator 2026-11-25).
+fork_pr_workflows_approval = "ignore"
 
 [[hardening.repo]]
 owner = "frdminc"
 name = "site-private-dann"
 profile = "active"
+# Private repo: GitHub's public fork-PR contributor approval endpoint rejects private repos (operator 2026-11-25).
+fork_pr_workflows_approval = "ignore"
 
 [[hardening.repo]]
 owner = "frdminc"
 name = "techno-euphora"
 profile = "active"
+# Private repo: GitHub's public fork-PR contributor approval endpoint rejects private repos (operator 2026-11-25).
+fork_pr_workflows_approval = "ignore"
 
 [[hardening.repo]]
 owner = "frdminc"
