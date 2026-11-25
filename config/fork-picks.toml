@@ -225,10 +225,23 @@ pr = 10605
 expected_head = "a36ff010f7006e6b6614bb1a7cbeb8818cb59791"
 intent = "batch Unistyles web stylesheet writes (358->32 writes)"
 targets = ["desktop-build-3", "android-build-3"]
-status = "queued"
+status = "dropped"
 upstream = "https://github.com/getpaseo/paseo/pull/10605"
 order = 62
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | dropped 2026-11-25 per djbclark /steps ruling (update-fork-picks-build3-afd98ddc via Paseo fork build 3 lead afd98ddc-8604-4b0e-ac1b-13f7b58e6c62): PR #10605 closed 2026-11-25, superseded by paseo-unistyles-cssom-portal-perf (PR #10778)"
+
+[[pick]]
+id = "paseo-unistyles-cssom-portal-perf"
+component = "paseo"
+repo = "getpaseo/paseo"
+pr = 10778
+expected_head = "efd819959ef0113a1dc23af7bfe2db889725e703"
+intent = "Unistyles CSSOM incremental rules + @gorhom/portal host store isolation + React 19.2 dev measure cleanup; supersedes closed #10605"
+targets = ["desktop-build-3", "android-build-3"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/pull/10778"
+order = 62
+notes = "operator-approved 2026-11-25 in /steps for Paseo Fork Build 3 on v0.17.4 (update-fork-picks-build3-afd98ddc via Paseo fork build 3 lead afd98ddc-8604-4b0e-ac1b-13f7b58e6c62); merge commit b4af7599d5b770a41e8af899272c307f7fc7f9ad merged 2026-11-25T10:39Z after v0.17.4; supersedes closed #10605"
 
 [[pick]]
 id = "paseo-release-inactive-decks"
@@ -268,7 +281,7 @@ status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10622"
 trial_required = true
 order = 65
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): closed upstream in favor of #10651, retained queued for Build 3 per djbclark on top of #10651 for orthogonal 58.9s->3.7s slow-link compression"
 
 [[pick]]
 id = "paseo-ws-chunked-transfers"
@@ -282,7 +295,7 @@ status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10651"
 trial_required = true
 order = 66
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): merged to upstream/main 2026-11-25T04:02Z (cfcf0dc7d11957199730d6722653e729cfa571b2), post-v0.17.4 so still needed for v0.17.4 Build 3"
 
 [[pick]]
 id = "paseo-defer-archived-snapshots"

@@ -108,11 +108,13 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 25
+    assert len(by_id) == 26
+    assert by_id["paseo-batch-unistyles-web"]["pr"] == 10605
+    assert by_id["paseo-batch-unistyles-web"]["status"] == "dropped"
     for pid, pr_num in (
         ("paseo-defer-mermaid-runtime", 10494),
         ("paseo-defer-web-terminal", 10497),
-        ("paseo-batch-unistyles-web", 10605),
+        ("paseo-unistyles-cssom-portal-perf", 10778),
         ("paseo-release-inactive-decks", 10234),
         ("paseo-cached-chat-timeline-sync", 10653),
     ):
@@ -126,6 +128,9 @@ def test_shipped_registry_is_valid():
     ):
         assert by_id[pid]["pr"] == pr_num and by_id[pid]["targets"] == ["desktop-build-3"]
         assert by_id[pid]["status"] == "queued" and by_id[pid]["trial_required"] is True
+    assert by_id["paseo-unistyles-cssom-portal-perf"]["expected_head"] == "efd819959ef0113a1dc23af7bfe2db889725e703"
+    assert "58.9s->3.7s" in by_id["paseo-ws-permessage-deflate"]["notes"]
+    assert "cfcf0dc7d11957199730d6722653e729cfa571b2" in by_id["paseo-ws-chunked-transfers"]["notes"]
     assert by_id["paseo-android-idle-repaints"]["pr"] == 7556
     assert by_id["paseo-android-idle-repaints"]["targets"] == ["desktop-build-3", "android-build-3"]
     assert by_id["paseo-android-idle-repaints"]["trial_required"] is True
