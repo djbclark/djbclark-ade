@@ -141,9 +141,15 @@ A new Pi session without `-e` unloads `rfab`. Pi resolves
 Any quota or payment refusal comes from the provider. Venice reported
 `canConsume: false` in the operator's 2026-11-25 balance check.
 
-The Venice shortlist uses the provider's live text/tool model catalog and base
-USD prices per million tokens. Venice can charge a higher rate for extended
-context. RFab publishes relative billing multipliers and tool capabilities.
+On load, `pi-extensions/venice/index.mjs` dynamically loads Venice's online
+text catalog from `https://api.venice.ai/api/v1/models` (public,
+unauthenticated) with a 15-minute on-disk cache at
+`$PI_CODING_AGENT_DIR/cache/venice-models.json` (7-day stale fallback), a
+3-second fetch timeout, `refreshModels` support for Pi's model picker, and
+fallback to the bundled `pi-extensions/venice/models.json` shortlist when
+offline (2026-11-25). Pricing reflects base USD per million tokens; Venice can
+charge a higher rate for extended context. RFab publishes relative billing
+multipliers and tool capabilities.
 Its Pi rows use a conservative 65,536-token window, 16,384-token output ceiling,
 text input, and zero cost fields as placeholders. The API also caps input at
 400,000 characters. Actual charges follow provider usage and the RFab rate

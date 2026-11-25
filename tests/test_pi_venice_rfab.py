@@ -25,7 +25,7 @@ BRIDGE = ROOT / "bin/ade-mcp-rfab"
 
 
 @pytest.mark.parametrize(("provider", "domain"), [("venice", "venice.ai"), ("rfab", "rfab.ai")])
-def test_provider_registration(provider, domain):
+def test_provider_registration(tmp_path, provider, domain):
     script = """
 import { registerHooks } from "node:module";
 registerHooks({
@@ -37,14 +37,19 @@ registerHooks({
   },
 });
 const { default: load } = await import(process.argv[1]);
-load({ registerProvider: (provider, config) => console.log(JSON.stringify({ provider, config })) });
+await load({
+  registerProvider: (provider, config) =>
+    console.log(JSON.stringify({ provider, config, hasRefresh: typeof config.refreshModels === "function" })),
+});
 """
     extension = ROOT / "pi-extensions" / provider / "index.mjs"
+    env = {**os.environ, "PI_CODING_AGENT_DIR": str(tmp_path), "PI_VENICE_DISABLE_DISCOVERY": "1"}
     result = subprocess.run(["node", "--input-type=module", "-e", script, extension.as_uri()],
-                            cwd=ROOT, capture_output=True, check=True, text=True, timeout=20)
+                            cwd=ROOT, env=env, capture_output=True, check=True, text=True, timeout=20)
     registration = json.loads(result.stdout)
     config = registration["config"]
     assert registration["provider"] == provider
+    assert registration["hasRefresh"] is (provider == "venice")
     assert "operator-gated" in config["name"]
     assert config["baseUrl"] == f"https://api.{domain}/api/v1"
     assert config["api"] == "openai-completions"
@@ -54,6 +59,208 @@ load({ registerProvider: (provider, config) => console.log(JSON.stringify({ prov
         assert model["contextWindow"] > model["maxTokens"] > 0
         assert set(model["cost"]) == {"input", "output", "cacheRead", "cacheWrite"}
         assert model["compat"]["maxTokensField"] == ("max_tokens" if provider == "venice" else "max_completion_tokens")
+
+
+def test_venice_dynamic_catalog_cache_and_fallback(tmp_path):
+    catalog_mod = ROOT / "pi-extensions/venice/catalog.mjs"
+    fallback_path = ROOT / "pi-extensions/venice/models.json"
+    script = r"""
+import assert from "node:assert/strict";
+import { lstat, readFile, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const mod = await import(process.argv[1]);
+const fallback = JSON.parse(await readFile(process.argv[2], "utf8"));
+const tmpDir = process.argv[3];
+const cachePath = join(tmpDir, "cache", "venice-models.json");
+
+const samplePayload = {
+  data: [
+    {
+      id: "abliteration-abliterated-model-large-v2",
+      type: "text",
+      context_length: 1000000,
+      model_spec: {
+        name: "Abliterated Large V2\n",
+        offline: false,
+        availableContextTokens: 1000000,
+        maxCompletionTokens: 32768,
+        capabilities: {
+          supportsReasoning: true,
+          supportsReasoningEffort: false,
+          supportsVision: false,
+        },
+        pricing: {
+          input: { usd: 3 },
+          output: { usd: 5 },
+          cache_input: { usd: 0.3 },
+        },
+      },
+    },
+    {
+      id: "alpha-vision",
+      type: "text",
+      model_spec: {
+        name: "Alpha Vision",
+        availableContextTokens: 65536,
+        maxCompletionTokens: 999999,
+        capabilities: {
+          supportsReasoning: false,
+          supportsReasoningEffort: true,
+          supportsVision: true,
+        },
+        pricing: {
+          input: { usd: 1.5 },
+          output: { usd: 4.5 },
+          cache_input: { usd: 0.1 },
+          cache_write: { usd: 0.2 },
+        },
+      },
+    },
+    { id: "alpha-vision", type: "text", context_length: 8192 },
+    { id: "offline-model", type: "text", context_length: 8192, model_spec: { offline: true } },
+    { id: "image-gen", type: "image", context_length: 8192 },
+    { id: "bad id with space", type: "text", context_length: 8192 },
+    { id: "zero-ctx", type: "text", context_length: 0 },
+  ],
+};
+
+// 1. Live fetch normalizes, filters, clamps, sorts, sends no Authorization, and caches (0600).
+let calls = [];
+const okFetch = async (url, init) => {
+  calls.push({ url, headers: init?.headers ?? {} });
+  return new Response(JSON.stringify(samplePayload), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+};
+const t0 = 1_700_000_000_000;
+const loaded = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  fetchImpl: okFetch,
+  now: t0,
+  env: {},
+});
+assert.equal(calls.length, 1);
+assert.equal(calls[0].url, mod.VENICE_MODELS_URL);
+assert.equal("Authorization" in calls[0].headers, false);
+assert.deepEqual(
+  loaded.map((m) => m.id),
+  ["abliteration-abliterated-model-large-v2", "alpha-vision"],
+);
+const ablit = loaded[0];
+assert.equal(ablit.name, "Abliterated Large V2");
+assert.equal(ablit.reasoning, true);
+assert.deepEqual(ablit.input, ["text"]);
+assert.equal(ablit.contextWindow, 1000000);
+assert.equal(ablit.maxTokens, 32768);
+assert.deepEqual(ablit.cost, { input: 3, output: 5, cacheRead: 0.3, cacheWrite: 0 });
+assert.deepEqual(ablit.compat, {
+  maxTokensField: "max_tokens",
+  supportsDeveloperRole: false,
+  supportsReasoningEffort: false,
+});
+const alpha = loaded[1];
+assert.equal(alpha.maxTokens, 65535);
+assert.deepEqual(alpha.input, ["text", "image"]);
+assert.equal(alpha.compat.supportsReasoningEffort, true);
+const st = await lstat(cachePath);
+assert.equal(st.mode & 0o777, 0o600);
+
+// 2. Fresh cache hit performs zero network calls.
+const fromFreshCache = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  fetchImpl: async () => {
+    throw new Error("should not fetch while cache is fresh");
+  },
+  now: t0 + mod.CACHE_FRESH_TTL_MS - 1000,
+  env: {},
+});
+assert.deepEqual(fromFreshCache, loaded);
+
+// 3. forceRefresh bypasses fresh cache TTL when allowNetwork=true; respects allowNetwork=false.
+let refreshCount = 0;
+const refreshed = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  forceRefresh: true,
+  allowNetwork: true,
+  fetchImpl: async () => {
+    refreshCount += 1;
+    return new Response(
+      JSON.stringify({ data: [samplePayload.data[0]] }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  },
+  now: t0 + 1000,
+  env: {},
+});
+assert.equal(refreshCount, 1);
+assert.deepEqual(refreshed.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
+
+const offlineRefresh = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  forceRefresh: true,
+  allowNetwork: false,
+  fetchImpl: async () => {
+    throw new Error("should not fetch when allowNetwork=false");
+  },
+  now: t0 + 2000,
+  env: {},
+});
+assert.deepEqual(offlineRefresh.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
+
+// 4. Stale cache (> TTL, <= max stale) falls back to stale cache on network error.
+const fromStaleFallback = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  fetchImpl: async () => new Response("err", { status: 503 }),
+  now: t0 + mod.CACHE_FRESH_TTL_MS + 60_000,
+  env: {},
+});
+assert.deepEqual(fromStaleFallback.map((m) => m.id), ["abliteration-abliterated-model-large-v2"]);
+
+// 5. Expired cache (> 7 days) falls back to static fallback when offline.
+const fromStaticAfterExpiry = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath,
+  fetchImpl: async () => {
+    throw new Error("offline");
+  },
+  now: t0 + mod.CACHE_MAX_STALE_MS + 60_000,
+  env: {},
+});
+assert.deepEqual(fromStaticAfterExpiry, fallback);
+
+// 6. Oversized response is rejected and falls back cleanly.
+const oversizedCache = join(tmpDir, "cache", "oversized.json");
+const fromOversized = await mod.loadVeniceModels({
+  fallbackModels: fallback,
+  cachePath: oversizedCache,
+  maxBytes: 128,
+  fetchImpl: async () => new Response(JSON.stringify(samplePayload), { status: 200 }),
+  now: t0,
+  env: {},
+});
+assert.deepEqual(fromOversized, fallback);
+
+// 7. Symlink cache file is ignored (lstat refuses non-regular file).
+const targetFile = join(tmpDir, "target.json");
+const linkPath = join(tmpDir, "link-cache.json");
+await writeFile(targetFile, JSON.stringify({ schemaVersion: 1, fetchedAt: t0, body: samplePayload }));
+await symlink(targetFile, linkPath);
+assert.equal(await mod.readCachedCatalog(linkPath, { now: t0 }), null);
+
+console.log("ok");
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, catalog_mod.as_uri(), str(fallback_path), str(tmp_path)],
+        cwd=ROOT, capture_output=True, check=True, text=True, timeout=20,
+    )
+    assert result.stdout.strip() == "ok"
 
 
 @pytest.fixture
@@ -160,7 +367,7 @@ def run_pi(tmp_path, broker, provider, model, status, *, use_tool=False):
     settings = agent / "settings.json"
     before = '{"extensions":[],"customSetting":"retain"}\n'
     settings.write_text(before)
-    env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent)}
+    env = {**os.environ, "PI_CODING_AGENT_DIR": str(agent), "PI_VENICE_DISABLE_DISCOVERY": "1"}
     with tempfile.TemporaryDirectory(dir="/tmp", prefix="pi-http-") as directory:
         if sys.platform == "darwin":
             # HTTP over an owned Unix socket keeps the Mac's TCP registry untouched.
