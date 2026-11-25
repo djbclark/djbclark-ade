@@ -6,7 +6,7 @@
              [--keep-subscription] [--allow-empty-checks] [--no-deadline] [--json] [--quiet]
   gh-pr-wait cleanup [--dry-run] [--all] [--json]
 
-Uses GitHub Event Streams (`gh event subscription` + `gh event listen`, gh >= 2.105.0,
+Uses GitHub Event Streams (`POST /event-subscriptions` + `gh event listen`, gh >= 2.105.0,
 github.com PRs only) for event-driven wakeup with slow safety-net re-checks (clamped
 >= 30 s, default 300 s) and automatic quota-safe polling fallback (>= 60 s interval) when
 Event Streams is unavailable (non-github.com host, 403/422, older gh, attach timeout).
@@ -17,19 +17,26 @@ Operational invariants:
   - Mode-specific, field-limited PR queries (never fetches untrusted review bodies):
       --for checks : `gh pr view --json=url,state,mergedAt,headRefOid,mergeable,statusCheckRollup`
       --for merge  : `gh pr view --json=url,state,mergedAt,headRefOid`
-      --for any    : `gh pr view --json=url,state,mergedAt,headRefOid,statusCheckRollup`
       --for review : `gh api graphql` selecting only `url`, `state`, `mergedAt`,
-                     `headRefOid`, and `reviews(last: 100) { nodes { id state submittedAt author { login } } }`
-    Note: `statusCheckRollup` entries may include check descriptions from external apps;
-    they are treated strictly as untrusted data and never echoed or followed.
-  - Shared subscription coordination & best-effort stop-before-delete cleanup:
-    Per canonical `(owner.lower(), repo.lower(), pr_number, sorted(events))` key, local
-    waiters coordinate via an `flock`-locked refcount state file under
-    `~/.local/state/djbclark-ade/gh-pr-wait` (`0700` dir, `0600` file, `GH_PR_WAIT_STATE_DIR`
-    override) tracking `(pid, start_time)`. A listener is terminated (`SIGTERM` 5 s, then
-    `SIGKILL` 5 s) and its reap MUST be proven before subscription deletion; if reap is
-    unproven, ownership is shared/external/uncertain, or `--keep-subscription` is set,
-    deletion is skipped (relying on the 24 h TTL + `gh-pr-wait cleanup`).
+                     `headRefOid`, and `reviews(last: 100) { nodes { id databaseId state submittedAt author { login } } }`
+      --for any    : `gh api graphql` selecting only `url`, `state`, `mergedAt`,
+                     `headRefOid`, `mergeable`, `reviews(last: 100)` metadata (no `body`),
+                     and head `statusCheckRollup` check status/conclusion metadata (no descriptions)
+    Note: in `--for checks`, `gh pr view` `statusCheckRollup` entries may include check
+    descriptions from external apps; they are treated strictly as untrusted data and
+    never echoed or followed.
+  - Authoritative ownership (`201 Created` vs `200 OK`) & shared coordination:
+    Subscriptions are created via `gh api -i -X POST /event-subscriptions`. Only an
+    authoritative HTTP `201 Created` marks the subscription locally owned; HTTP `200 OK`
+    (reused across machines, state dirs, or raw `gh` calls) or any ambiguous status sets
+    `shared_external=True` and never deletes on exit. Local cooperating waiters coordinate
+    via an `flock`-locked refcount state file under `~/.local/state/djbclark-ade/gh-pr-wait`
+    (`0700` dir, `0600` file, `GH_PR_WAIT_STATE_DIR` override) tracking both parent and
+    listener `(pid, start_time)`. Failing to register on an existing tracked subscription
+    falls back to polling rather than attaching unregistered. A listener is terminated
+    (`SIGTERM` 5 s, then `SIGKILL` 5 s) and its reap MUST be proven before deletion; any
+    unproven reap or orphaned live listener writes a durable `keep_forever=True` flag so
+    later waiters also skip deletion (relying on the 24 h TTL + `gh-pr-wait cleanup`).
   - Cleanup caveat: `gh-pr-wait cleanup` checks PR state (`MERGED`/`CLOSED`) before
     deleting; that check-then-delete sequence is non-atomic (a closed PR could be reopened
     in the brief window before delete).
@@ -93,13 +100,27 @@ EVENTS_FOR: dict[str, tuple[str, ...]] = {
 LISTEN_READY_MARKER = "Listening for events."
 PR_FIELDS_CHECKS = "url,state,mergedAt,headRefOid,mergeable,statusCheckRollup"
 PR_FIELDS_MERGE = "url,state,mergedAt,headRefOid"
-PR_FIELDS_ANY = "url,state,mergedAt,headRefOid,statusCheckRollup"
+
 REVIEW_GRAPHQL_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){"
     "pullRequest(number:$number){"
     "url state mergedAt headRefOid "
-    "reviews(last:100){nodes{id state submittedAt author{login}}}"
+    "reviews(last:100){nodes{id databaseId state submittedAt author{login}}}"
+    "}}}"
+)
+
+ANY_GRAPHQL_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequest(number:$number){"
+    "url state mergedAt headRefOid mergeable "
+    "reviews(last:100){nodes{id databaseId state submittedAt author{login}}} "
+    "commits(last:1){nodes{commit{statusCheckRollup{contexts(last:100){nodes{"
+    "__typename "
+    "... on CheckRun{name status conclusion} "
+    "... on StatusContext{context state}"
+    "}}}}}}"
     "}}}"
 )
 
@@ -136,6 +157,7 @@ SUB_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$")
 ISO8601_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$"
 )
+HTTP_STATUS_RE = re.compile(r"^HTTP/\d(?:\.\d)?\s+(\d{3})\b")
 REVIEW_API_ID_RE = re.compile(r"/reviews/([0-9]+)(?:[/?#]|$)")
 
 EXIT_OK = 0
@@ -156,6 +178,8 @@ TEARDOWN_FLOCK_TIMEOUT = 5.0
 MAX_LIST_SUBSCRIPTIONS = 100
 MAX_LINE_BYTES = 1024 * 1024
 MAX_DIAG_BYTES = 64 * 1024
+MAX_PRE_ATTACH_LINES = 256
+MAX_PRE_ATTACH_BYTES = 1024 * 1024
 MAX_SEEN_EVENT_IDS = 2000
 BLOCKED_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
 
@@ -170,6 +194,10 @@ class _SignalInterrupt(BaseException):
 
 class UsageError(Exception):
     """Invalid CLI argument or PR reference (exit 2)."""
+
+
+class WaitTimeoutError(Exception):
+    """Overall wait timeout expired during startup/resolution (exit 8)."""
 
 
 @dataclass
@@ -404,13 +432,34 @@ def proc_start_token(pid: int) -> str | None:
     return " ".join(toks[:-1])
 
 
-def waiter_alive(entry: dict[str, Any]) -> bool:
-    pid = entry.get("pid")
-    token = entry.get("start_time")
+def pid_matches(pid: Any, token: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0 or not isinstance(token, str) or not token:
         return False
     cur = proc_start_token(pid)
     return cur is not None and cur == token
+
+
+def parse_http_status_and_body(raw: str) -> tuple[int | None, str]:
+    """Parse `gh api -i` HTTP header block(s) and body, returning (last_status_code, body)."""
+    text = raw or ""
+    status_code: int | None = None
+    rest = text
+    while True:
+        stripped = rest.lstrip("\r\n")
+        m = HTTP_STATUS_RE.match(stripped)
+        if not m:
+            return status_code, stripped
+        # Find header/body separator (\r\n\r\n or \n\n)
+        sep_idx = stripped.find("\r\n\r\n")
+        sep_len = 4
+        nl_idx = stripped.find("\n\n")
+        if nl_idx >= 0 and (sep_idx < 0 or nl_idx < sep_idx):
+            sep_idx = nl_idx
+            sep_len = 2
+        if sep_idx < 0:
+            return int(m.group(1)), ""
+        status_code = int(m.group(1))
+        rest = stripped[sep_idx + sep_len :]
 
 
 @dataclass
@@ -499,9 +548,11 @@ def resolve_pr_ref(
         if deadline_mono is not None:
             t_out_opt = call_timeout(deadline_mono, GH_CMD_CAP)
             if t_out_opt is None:
-                raise UsageError("timeout expired while inferring PR URL")
+                raise WaitTimeoutError("timeout expired while inferring PR URL")
             t_out = t_out_opt
         rc, out, err = run_gh(["pr", "view", "--json=url", "--", str(num)], timeout=t_out)
+        if rc == 124 or (deadline_mono is not None and time.monotonic() >= deadline_mono):
+            raise WaitTimeoutError(f"timed out inferring PR URL for #{num}")
         if rc != 0:
             detail = (err or out).strip().splitlines()[:1]
             msg = detail[0] if detail else f"exit {rc}"
@@ -526,46 +577,65 @@ def resolve_pr_ref(
     )
 
 
-_VALUE_FLAGS = frozenset({
-    "-R",
-    "--repo",
-    "--for",
-    "--timeout",
-    "--safety-interval",
-    "--fallback-interval",
-    "--attach-timeout",
-})
-
-
-def _rewrite_argv_with_resolved_url(raw_argv: list[str], raw_ref: str, resolved_url: str) -> list[str]:
-    """Replace positional PR ref with canonical URL so supervised inner copy skips repeat inference."""
-    out: list[str] = []
-    replaced = False
-    skip_next = False
-    after_dd = False
-    for tok in raw_argv:
-        if skip_next:
-            out.append(tok)
-            skip_next = False
-            continue
-        if not after_dd:
-            if tok == "--":
-                after_dd = True
-                out.append(tok)
-                continue
-            if tok in _VALUE_FLAGS:
-                out.append(tok)
-                skip_next = True
-                continue
-            if tok.startswith("-"):
-                out.append(tok)
-                continue
-        if not replaced and tok == raw_ref:
-            out.append(resolved_url)
-            replaced = True
-        else:
-            out.append(tok)
+def _build_supervised_argv(
+    args: argparse.Namespace,
+    pr_ref: PRRef,
+    remaining_timeout_s: float,
+) -> list[str]:
+    """Build supervised inner argv directly from parsed values (immune to flag abbreviations)."""
+    out = [
+        pr_ref.url,
+        "--for",
+        args.for_mode,
+        "--timeout",
+        f"{max(0.1, remaining_timeout_s):.3f}s",
+        "--safety-interval",
+        str(args.safety_interval),
+        "--fallback-interval",
+        str(args.fallback_interval),
+        "--attach-timeout",
+        str(args.attach_timeout),
+    ]
+    if args.keep_subscription:
+        out.append("--keep-subscription")
+    if args.allow_empty_checks:
+        out.append("--allow-empty-checks")
+    if args.json:
+        out.append("--json")
+    if args.quiet:
+        out.append("--quiet")
     return out
+
+
+def _extract_graphql_rollup(pr_node: dict[str, Any]) -> tuple[list[Any] | None, bool]:
+    """Unwrap commits(last:1).nodes[0].commit.statusCheckRollup.contexts.nodes cleanly."""
+    commits_obj = pr_node.get("commits")
+    if not isinstance(commits_obj, dict):
+        # Fallback if a mock/response supplied top-level statusCheckRollup directly.
+        if "statusCheckRollup" in pr_node:
+            raw = pr_node["statusCheckRollup"]
+            return (raw, True) if isinstance(raw, list) else (None, False)
+        return None, False
+    nodes = commits_obj.get("nodes")
+    if not isinstance(nodes, list):
+        return None, False
+    if not nodes:
+        return [], True
+    first = nodes[0]
+    if not isinstance(first, dict) or not isinstance(first.get("commit"), dict):
+        return None, False
+    commit = first["commit"]
+    if "statusCheckRollup" not in commit:
+        return None, False
+    scr = commit["statusCheckRollup"]
+    if scr is None:
+        return [], True
+    if not isinstance(scr, dict):
+        return None, False
+    ctx = scr.get("contexts")
+    if not isinstance(ctx, dict) or not isinstance(ctx.get("nodes"), list):
+        return None, False
+    return ctx["nodes"], True
 
 
 def fetch_pr_state(
@@ -578,7 +648,8 @@ def fetch_pr_state(
 
     Returns (data_dict, error_message, is_rate_limited).
     """
-    if for_mode == "review":
+    if for_mode in ("review", "any"):
+        query = REVIEW_GRAPHQL_QUERY if for_mode == "review" else ANY_GRAPHQL_QUERY
         cmd = ["api", "graphql"]
         if not pr_ref.is_github_com:
             cmd.append(f"--hostname={pr_ref.host}")
@@ -586,7 +657,7 @@ def fetch_pr_state(
             "-f", f"owner={pr_ref.owner}",
             "-f", f"name={pr_ref.repo}",
             "-F", f"number={pr_ref.number}",
-            "-f", f"query={REVIEW_GRAPHQL_QUERY}",
+            "-f", f"query={query}",
         ])
         rc, out, err = run_gh(cmd, timeout=timeout)
         if rc != 0:
@@ -619,14 +690,13 @@ def fetch_pr_state(
             "headRefOid": pr_node.get("headRefOid"),
             "reviews": nodes,
         }
+        if for_mode == "any":
+            data["mergeable"] = pr_node.get("mergeable")
+            rollup, ok_r = _extract_graphql_rollup(pr_node)
+            if ok_r and rollup is not None:
+                data["statusCheckRollup"] = rollup
     else:
-        fields = (
-            PR_FIELDS_CHECKS
-            if for_mode == "checks"
-            else PR_FIELDS_MERGE
-            if for_mode == "merge"
-            else PR_FIELDS_ANY
-        )
+        fields = PR_FIELDS_CHECKS if for_mode == "checks" else PR_FIELDS_MERGE
         rc, out, err = run_gh(
             ["pr", "view", f"--repo={pr_ref.gh_repo_arg}", f"--json={fields}", "--", str(pr_ref.number)],
             timeout=timeout,
@@ -660,7 +730,7 @@ def pr_state_name(pr: dict[str, Any]) -> str:
 
 
 def pr_is_merged(pr: dict[str, Any]) -> bool:
-    """Authoritative merged check: requires explicit state == 'MERGED' (never truthy malformed mergedAt)."""
+    """Authoritative merged check: requires explicit state == 'MERGED'."""
     return pr_state_name(pr) == "MERGED"
 
 
@@ -734,15 +804,17 @@ def summarize_checks(pr: dict[str, Any]) -> tuple[dict[str, int], bool, list[tup
     return {"total": total, "passed": passed, "failed": failed, "pending": pending}, True, tuples
 
 
-def submitted_review_records(pr: dict[str, Any]) -> list[tuple[str, str, str, datetime]]:
-    """Extract strictly submitted reviews as (id, state, submittedAt_iso, submitted_dt).
+def submitted_review_records(pr: dict[str, Any]) -> list[tuple[str, str | None, str]]:
+    """Extract strictly submitted reviews as immutable (node_id, database_id_str, submittedAt_iso).
 
     Excludes PENDING/draft reviews and entries missing stable id or valid ISO-8601 submittedAt.
+    Mutable review `state` is intentionally omitted from the identity so e.g. APPROVED->DISMISSED
+    on an existing review does NOT falsely appear as a new submission.
     """
     reviews = pr.get("reviews")
     if not isinstance(reviews, list):
         return []
-    out: list[tuple[str, str, str, datetime]] = []
+    out: list[tuple[str, str | None, str]] = []
     for rev in reviews:
         if not isinstance(rev, dict):
             continue
@@ -756,25 +828,42 @@ def submitted_review_records(pr: dict[str, Any]) -> list[tuple[str, str, str, da
         state = state_raw.strip().upper()
         if state not in SUBMITTED_REVIEW_STATES:
             continue
-        sub_dt = parse_iso8601(sub_raw)
-        if sub_dt is None:
+        if parse_iso8601(sub_raw) is None:
             continue
-        out.append((rid.strip(), state, str(sub_raw).strip(), sub_dt))
+        db_raw = rev.get("databaseId")
+        db_id: str | None = None
+        if isinstance(db_raw, int) and not isinstance(db_raw, bool) and db_raw > 0:
+            db_id = str(db_raw)
+        elif isinstance(db_raw, str) and db_raw.strip().isdigit():
+            db_id = db_raw.strip()
+        out.append((rid.strip(), db_id, str(sub_raw).strip()))
     return out
 
 
-def submitted_review_keys(pr: dict[str, Any]) -> set[tuple[str, str, str]]:
-    return {(rid, st, sub_iso) for rid, st, sub_iso, _ in submitted_review_records(pr)}
+def extract_event_review_id(ev: dict[str, Any]) -> str | None:
+    """Extract exact numeric review ID from a `review.submitted.v1` CloudEvent's `data.api_url`."""
+    data = ev.get("data")
+    if not isinstance(data, dict):
+        return None
+    api_url = data.get("api_url")
+    if isinstance(api_url, str):
+        m = REVIEW_API_ID_RE.search(api_url)
+        if m:
+            return m.group(1)
+    return None
 
 
 def snapshot_signature(pr: dict[str, Any]) -> str:
-    """Deterministic signature for `--for any` poll fallback using per-check tuples."""
+    """Deterministic signature for `--for any` poll fallback covering state, head, mergeable, checks, and reviews."""
     _, _, check_tuples = summarize_checks(pr)
+    rev_keys = sorted({(rid, sub_iso) for rid, _, sub_iso in submitted_review_records(pr)})
     payload = {
         "state": pr_state_name(pr),
         "merged": pr_is_merged(pr),
         "head": str(pr.get("headRefOid") or ""),
+        "mergeable": str(pr.get("mergeable") or ""),
         "checks": check_tuples,
+        "reviews": rev_keys,
     }
     return json.dumps(payload, sort_keys=True)
 
@@ -783,10 +872,9 @@ def snapshot_signature(pr: dict[str, Any]) -> str:
 class EvalState:
     for_mode: str
     allow_empty_checks: bool = False
-    baseline_submitted_reviews: set[tuple[str, str, str]] | None = None
-    post_attach_initial_reviews: set[tuple[str, str, str]] = field(default_factory=set)
-    reconciled_initial_reviews: set[tuple[str, str, str]] = field(default_factory=set)
-    attach_wall_dt: datetime | None = None
+    baseline_submitted_reviews: set[tuple[str, str]] | None = None
+    initial_review_db_ids: set[str] = field(default_factory=set)
+    reconciled_event_review_ids: set[str] = field(default_factory=set)
     baseline_sig: str | None = None
     noted_empty_head: str | None = None
 
@@ -806,7 +894,7 @@ def evaluate_pr(
     pr: dict[str, Any],
     ev_state: EvalState,
     *,
-    triggered_by_review_event: bool = False,
+    event_review_ids: set[str] | None = None,
     log_fn=None,
 ) -> EvalDecision:
     state = pr_state_name(pr)
@@ -858,29 +946,27 @@ def evaluate_pr(
 
     if ev_state.for_mode == "review":
         recs = submitted_review_records(pr)
-        cur_keys = {(rid, st, sub_iso) for rid, st, sub_iso, _ in recs}
+        cur_keys = {(rid, sub_iso) for rid, _, sub_iso in recs}
         if ev_state.baseline_submitted_reviews is None:
             if merged:
                 return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason="pr_merged")
             if state != "OPEN":
                 return EvalDecision(done=True, ok=False, exit_code=EXIT_FAIL, reason=f"pr_{state.lower()}")
             ev_state.baseline_submitted_reviews = set(cur_keys)
-            if ev_state.attach_wall_dt is not None:
-                ev_state.post_attach_initial_reviews = {
-                    (rid, st, sub_iso)
-                    for rid, st, sub_iso, sub_dt in recs
-                    if sub_dt >= ev_state.attach_wall_dt
-                }
+            ev_state.initial_review_db_ids = {db_id for _, db_id, _ in recs if db_id}
             return EvalDecision(done=False, reason="waiting_for_review")
 
         if cur_keys - ev_state.baseline_submitted_reviews:
             return EvalDecision(done=True, ok=True, exit_code=EXIT_OK, reason="review_submitted")
 
-        # Reconcile a review submitted in the narrow attach->initial-read window once its live event arrives.
-        if triggered_by_review_event:
-            unreconciled = ev_state.post_attach_initial_reviews - ev_state.reconciled_initial_reviews
-            if unreconciled:
-                ev_state.reconciled_initial_reviews.update(unreconciled)
+        # Exact correlation for a review submitted in the narrow attach->initial-read window:
+        # match ONLY when the live CloudEvent's exact review databaseId appears in the initial
+        # post-attach snapshot and has not already been reconciled.
+        if event_review_ids:
+            fresh_ids = event_review_ids - ev_state.reconciled_event_review_ids
+            matched = fresh_ids & ev_state.initial_review_db_ids
+            if matched:
+                ev_state.reconciled_event_review_ids.update(matched)
                 return EvalDecision(done=True, ok=True, exit_code=EXIT_OK, reason="review_submitted")
 
         if merged:
@@ -993,16 +1079,45 @@ class SubscriptionCoord:
         except OSError:
             pass
 
-    def _live_waiters(self, state: dict[str, Any]) -> list[dict[str, Any]]:
+    def _prune_waiters(self, state: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
+        """Return (live_waiters, orphan_listener_detected).
+
+        When a recorded parent waiter has died, inspect its recorded listener `(listener_pid, listener_start)`.
+        If the listener is still alive or its exit cannot be proven, mark `orphan_listener_detected=True`
+        so the subscription is durably kept rather than deleted under an orphaned stream.
+        """
         raw = state.get("waiters")
         if not isinstance(raw, list):
-            return []
-        return [w for w in raw if isinstance(w, dict) and waiter_alive(w)]
+            return [], False
+        live: list[dict[str, Any]] = []
+        orphan_detected = False
+        for w in raw:
+            if not isinstance(w, dict):
+                continue
+            if pid_matches(w.get("pid"), w.get("start_time")):
+                live.append(w)
+            else:
+                lpid = w.get("listener_pid")
+                lstart = w.get("listener_start")
+                if isinstance(lpid, int) and lpid > 0:
+                    if not isinstance(lstart, str) or not lstart or pid_matches(lpid, lstart):
+                        orphan_detected = True
+        return live, orphan_detected
 
-    def _me_entry(self) -> dict[str, Any] | None:
+    def _me_entry(
+        self,
+        *,
+        listener_pid: int | None = None,
+        listener_start: str | None = None,
+    ) -> dict[str, Any] | None:
         if not self.start_token:
             return None
-        return {"pid": self.pid, "start_time": self.start_token}
+        return {
+            "pid": self.pid,
+            "start_time": self.start_token,
+            "listener_pid": listener_pid,
+            "listener_start": listener_start,
+        }
 
 
 class StreamSession:
@@ -1027,10 +1142,49 @@ class StreamSession:
         self._closed: bool = False
         self.proc: subprocess.Popen[bytes] | None = None
         self.listener_reaped: bool = True
+        self.listener_pid: int | None = None
+        self.listener_start: str | None = None
 
     def attach_proc(self, proc: subprocess.Popen[bytes]) -> None:
         self.proc = proc
         self.listener_reaped = False
+        self.listener_pid = proc.pid
+        self.listener_start = proc_start_token(proc.pid)
+        if not self.registered_in_coord or not self.sub_id:
+            return
+        # Best-effort update of our shared waiter entry with listener PID + start time
+        # so another waiter pruning a SIGKILLed parent can still verify listener exit.
+        lock_fd = self.coord._acquire_flock(time.monotonic() + 2.0)
+        if lock_fd is None:
+            return
+        try:
+            st = self.coord._read_state()
+            if valid_sub_id(st.get("sub_id")) != self.sub_id:
+                return
+            live, orphan = self.coord._prune_waiters(st)
+            updated: list[dict[str, Any]] = []
+            for w in live:
+                if w.get("pid") == self.coord.pid and w.get("start_time") == self.coord.start_token:
+                    updated.append({
+                        **w,
+                        "listener_pid": self.listener_pid,
+                        "listener_start": self.listener_start,
+                    })
+                else:
+                    updated.append(w)
+            keep_forever = bool(st.get("keep_forever", False)) or orphan
+            shared_ext = bool(st.get("shared_external", False)) or keep_forever
+            self.coord._write_state({
+                "sub_id": self.sub_id,
+                "shared_external": shared_ext,
+                "keep_forever": keep_forever,
+                "waiters": updated,
+            })
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
 
     def stop_listener(self) -> bool:
         """Terminate `gh event listen` and prove exit. Returns True iff listener is reaped."""
@@ -1075,7 +1229,7 @@ class StreamSession:
         self.listener_reaped = False
         self.log(
             f"warning: listener pid {proc.pid} did not exit after SIGTERM+SIGKILL; "
-            "skipping subscription deletion"
+            "skipping subscription deletion and marking subscription keep_forever"
         )
         return False
 
@@ -1090,7 +1244,6 @@ class StreamSession:
             if not self.sub_id:
                 return False
 
-            # Update shared local refcount under flock (even if not deleting, remove our PID).
             lock_fd = self.coord._acquire_flock(time.monotonic() + TEARDOWN_FLOCK_TIMEOUT)
             if lock_fd is None:
                 if self.registered_in_coord:
@@ -1103,20 +1256,25 @@ class StreamSession:
             try:
                 st = self.coord._read_state()
                 state_sub = valid_sub_id(st.get("sub_id"))
-                waiters = self.coord._live_waiters(st)
+                live, orphan_detected = self.coord._prune_waiters(st)
                 remaining = [
-                    w for w in waiters
+                    w for w in live
                     if not (w.get("pid") == self.coord.pid and w.get("start_time") == self.coord.start_token)
                 ]
-                shared_ext = bool(st.get("shared_external", True)) or self.shared_external
-                if self.keep_subscription:
-                    shared_ext = True
+                keep_forever = (
+                    bool(st.get("keep_forever", False))
+                    or (not reaped)
+                    or orphan_detected
+                    or self.keep_subscription
+                )
+                shared_ext = bool(st.get("shared_external", True)) or self.shared_external or keep_forever
 
                 can_delete = (
                     reaped
                     and self.ownership_confirmed
                     and not self.keep_subscription
                     and not shared_ext
+                    and not keep_forever
                     and state_sub == self.sub_id
                     and len(remaining) == 0
                 )
@@ -1138,17 +1296,20 @@ class StreamSession:
                         self.coord._write_state({
                             "sub_id": self.sub_id,
                             "shared_external": False,
+                            "keep_forever": False,
                             "waiters": remaining,
                         })
-                elif state_sub == self.sub_id:
-                    if remaining:
+                elif state_sub == self.sub_id or (not reaped):
+                    # Durably persist `keep_forever` on unproven reap (or while other waiters hold it)
+                    # so subsequent waiters closing cleanly NEVER delete while this listener may live!
+                    if remaining or keep_forever:
                         self.coord._write_state({
                             "sub_id": self.sub_id,
                             "shared_external": shared_ext,
+                            "keep_forever": keep_forever,
                             "waiters": remaining,
                         })
                     else:
-                        # No live local waiters remain; clear local state (remote sub kept intentionally).
                         self.coord._clear_state()
             finally:
                 try:
@@ -1227,56 +1388,41 @@ class LineReader:
                 return
 
 
-def _list_subscriptions(timeout: float) -> tuple[list[dict[str, Any]] | None, str | None]:
-    rc, out, err = run_gh(
-        [
-            "event",
-            "subscription",
-            "list",
-            f"--limit={MAX_LIST_SUBSCRIPTIONS}",
-            "--json=id,resourceUrl,eventTypes",
-        ],
-        timeout=timeout,
-    )
-    if rc != 0:
-        detail = (err or out).strip().splitlines()[:1]
-        return None, f"gh event subscription list failed (exit {rc}): {detail[0] if detail else 'unknown'}"
-    try:
-        data = json.loads(out)
-    except ValueError as exc:
-        return None, f"gh event subscription list returned invalid JSON: {exc}"
-    if not isinstance(data, list):
-        return None, "gh event subscription list returned non-list JSON"
-    return data[:MAX_LIST_SUBSCRIPTIONS], None
-
-
-def _create_subscription(
+def _create_subscription_api(
     pr_url: str,
     events: tuple[str, ...],
     timeout: float,
-) -> tuple[str | None, str | None]:
-    rc, out, err = run_gh(
-        [
-            "event",
-            "subscription",
-            "create",
-            f"--resource={pr_url}",
-            f"--event={','.join(events)}",
-            "--json=id",
-        ],
-        timeout=timeout,
-    )
+) -> tuple[str | None, int | None, str | None]:
+    """Create or reuse subscription via REST API with `-i` so HTTP 201 vs 200 is authoritative.
+
+    Returns (sub_id, http_status_code, error_message).
+    """
+    cmd = [
+        "api",
+        "-i",
+        "-X",
+        "POST",
+        "/event-subscriptions",
+        "-f",
+        f"resource_url={pr_url}",
+    ]
+    for ev in events:
+        cmd.extend(["-f", f"event_types[]={ev}"])
+    rc, out, err = run_gh(cmd, timeout=timeout)
     if rc != 0:
         detail = (err or out).strip().splitlines()[:1]
-        return None, f"gh event subscription create failed (exit {rc}): {detail[0] if detail else 'unknown'}"
+        return None, None, f"POST /event-subscriptions failed (exit {rc}): {detail[0] if detail else 'unknown'}"
+    status_code, body = parse_http_status_and_body(out)
     try:
-        data = json.loads(out)
-        sub_id = valid_sub_id(data.get("id") if isinstance(data, dict) else None)
+        data = json.loads(body)
     except ValueError as exc:
-        return None, f"gh event subscription create returned invalid JSON: {exc}"
+        return None, status_code, f"POST /event-subscriptions returned invalid JSON: {exc}"
+    if not isinstance(data, dict):
+        return None, status_code, "POST /event-subscriptions returned non-object JSON"
+    sub_id = valid_sub_id(data.get("id"))
     if not sub_id:
-        return None, "gh event subscription create returned invalid or empty id"
-    return sub_id, None
+        return None, status_code, "POST /event-subscriptions returned invalid or empty id"
+    return sub_id, status_code, None
 
 
 def _acquire_subscription(
@@ -1287,21 +1433,22 @@ def _acquire_subscription(
     cancel: CancelState,
     log_fn,
 ) -> tuple[bool, str | None]:
-    """Acquire or share subscription under per-key flock. Returns (ok, fallback_reason)."""
-    want_set = set(want_events)
-    coord = session.coord
-    me = coord._me_entry()
+    """Acquire or share subscription using authoritative HTTP 201 vs 200 and per-key flock.
 
+    Returns (ok, fallback_reason). If ok=False and fallback_reason is None, timeout expired.
+    """
+    coord = session.coord
     cancel.raise_immediately = False
     lock_fd = coord._acquire_flock(deadline_mono)
-    cancel.check()
-
-    if lock_fd is None or me is None:
-        # Lock or process identity unavailable: fail-safe (still allow stream, NEVER delete!).
+    if lock_fd is None:
+        cancel.check()
+        if time.monotonic() >= deadline_mono:
+            return False, None
+        # Lock unavailable: fail-safe (still allow stream via API, NEVER delete on exit!).
         t_out = call_timeout(deadline_mono)
         if t_out is None:
             return False, None
-        sub_id, err = _create_subscription(pr_ref.url, want_events, t_out)
+        sub_id, _status, err = _create_subscription_api(pr_ref.url, want_events, t_out)
         if err is not None or not sub_id:
             cancel.check()
             return False, err or "could not create event subscription"
@@ -1312,83 +1459,74 @@ def _acquire_subscription(
         log_fn(f"warning: local state lock unavailable; keeping subscription {sub_id} on exit")
         return True, None
 
+    # Lock fd enters try/finally IMMEDIATELY before cancel.check() or proc_info!
     try:
+        cancel.check()
         st = coord._read_state()
-        live = coord._live_waiters(st)
+        live, orphan_detected = coord._prune_waiters(st)
         state_sub = valid_sub_id(st.get("sub_id"))
+        me = coord._me_entry()
+
         if live and state_sub:
+            # Joining an existing locally tracked subscription: MUST register or fall back!
+            if me is None:
+                return False, "cannot verify local process identity to safely share tracked subscription"
             if not any(w.get("pid") == me["pid"] and w.get("start_time") == me["start_time"] for w in live):
                 live.append(me)
-            shared_ext = bool(st.get("shared_external", False)) or session.keep_subscription
+            keep_forever = bool(st.get("keep_forever", False)) or orphan_detected or session.keep_subscription
+            shared_ext = bool(st.get("shared_external", False)) or keep_forever
             wrote = coord._write_state({
                 "sub_id": state_sub,
                 "shared_external": shared_ext,
+                "keep_forever": keep_forever,
                 "waiters": live,
             })
+            if not wrote:
+                # Fail-closed: never attach unregistered while another waiter owns delete rights!
+                return False, "failed to record waiter in shared subscription state; falling back to polling"
             session.sub_id = state_sub
             session.shared_external = shared_ext
-            session.ownership_confirmed = wrote
-            session.registered_in_coord = wrote
+            session.ownership_confirmed = True
+            session.registered_in_coord = True
             cancel.check()
             return True, None
 
-        # No live local waiters: inspect remote list under the lock, then create if absent.
-        t_list = call_timeout(deadline_mono)
-        if t_list is None:
-            return False, None
-        subs, err = _list_subscriptions(t_list)
-        if err is not None or subs is None:
-            cancel.check()
-            return False, err or "event subscriptions unavailable"
-
-        matched_id: str | None = None
-        for item in subs:
-            if not isinstance(item, dict):
-                continue
-            r_tuple = canonical_pr_tuple(item.get("resourceUrl"))
-            etypes = item.get("eventTypes")
-            sid = valid_sub_id(item.get("id"))
-            if (
-                r_tuple == pr_ref.canonical_tuple
-                and isinstance(etypes, list)
-                and set(etypes) == want_set
-                and sid is not None
-            ):
-                matched_id = sid
-                break
-
-        if matched_id is not None:
-            wrote = coord._write_state({
-                "sub_id": matched_id,
-                "shared_external": True,
-                "waiters": [me],
-            })
-            session.sub_id = matched_id
-            session.shared_external = True
-            session.ownership_confirmed = wrote
-            session.registered_in_coord = wrote
-            cancel.check()
-            return True, None
-
-        cancel.check()
+        # No live local waiters: call POST /event-subscriptions for authoritative 201 vs 200!
         t_create = call_timeout(deadline_mono)
         if t_create is None:
             return False, None
-        sub_id, err = _create_subscription(pr_ref.url, want_events, t_create)
+        sub_id, status_code, err = _create_subscription_api(pr_ref.url, want_events, t_create)
         if err is not None or not sub_id:
             cancel.check()
             return False, err or "could not create event subscription"
 
-        shared_ext = session.keep_subscription
-        wrote = coord._write_state({
-            "sub_id": sub_id,
-            "shared_external": shared_ext,
-            "waiters": [me],
-        })
+        created_by_us = status_code == 201
+        same_as_old = sub_id == state_sub
+        prev_keep = bool(st.get("keep_forever", False)) if same_as_old else False
+        keep_forever = prev_keep or (orphan_detected and same_as_old) or session.keep_subscription
+        shared_ext = (not created_by_us) or keep_forever
+
+        if me is not None:
+            wrote = coord._write_state({
+                "sub_id": sub_id,
+                "shared_external": shared_ext,
+                "keep_forever": keep_forever,
+                "waiters": [me],
+            })
+        else:
+            wrote = False
+
         session.sub_id = sub_id
-        session.shared_external = shared_ext
-        session.ownership_confirmed = wrote
-        session.registered_in_coord = wrote
+        if wrote:
+            session.shared_external = shared_ext
+            session.ownership_confirmed = True
+            session.registered_in_coord = True
+        else:
+            # Fail-safe: could not persist local refcount -> keep subscription (24h TTL / cleanup).
+            session.shared_external = True
+            session.ownership_confirmed = False
+            session.registered_in_coord = False
+            log_fn(f"warning: could not write local state for {sub_id}; keeping subscription on exit")
         cancel.check()
         return True, None
     finally:
@@ -1398,8 +1536,8 @@ def _acquire_subscription(
             os.close(lock_fd)
 
 
-def _parse_event_line(line: str) -> dict[str, Any] | None:
-    """Parse a valid GitHub CloudEvent JSON dict (requires string `type` starting `com.github.`)."""
+def _parse_event_line(line: str, *, allowed_types: frozenset[str]) -> dict[str, Any] | None:
+    """Parse a valid subscribed GitHub CloudEvent JSON dict (requires non-empty `id` and subscribed `type`)."""
     s = line.strip()
     if not s or s.startswith(":"):
         return None
@@ -1409,8 +1547,11 @@ def _parse_event_line(line: str) -> dict[str, Any] | None:
         return None
     if not isinstance(obj, dict):
         return None
+    ev_id = obj.get("id")
+    if not isinstance(ev_id, str) or not ev_id.strip():
+        return None
     ev_type = obj.get("type")
-    if not isinstance(ev_type, str) or not ev_type.startswith("com.github."):
+    if not isinstance(ev_type, str) or ev_type not in allowed_types:
         return None
     return obj
 
@@ -1429,6 +1570,7 @@ def _run_event_stream(
 ) -> tuple[dict[str, Any] | None, int | None, str | None]:
     """Attempt Event Streams wait, preserving `ev_state` if falling back to polling."""
     want_events = EVENTS_FOR[for_mode]
+    want_set = frozenset(want_events)
     coord = SubscriptionCoord(pr_ref, want_events)
     session = StreamSession(
         coord=coord,
@@ -1522,6 +1664,8 @@ def _run_event_stream(
         attach_deadline = min(deadline_mono, time.monotonic() + attach_timeout)
         attached = False
         buffered_stdout_lines: list[str] = []
+        buffered_stdout_bytes = 0
+        pre_attach_overflow_warned = False
         stderr_diag: list[str] = []
         stderr_diag_bytes = 0
 
@@ -1560,11 +1704,18 @@ def _run_event_stream(
                         stderr_diag.append(take)
                         stderr_diag_bytes += len(take)
                     if line.strip() == LISTEN_READY_MARKER:
-                        if ev_state.attach_wall_dt is None:
-                            ev_state.attach_wall_dt = datetime.now(timezone.utc).replace(microsecond=0)
                         attached = True
             if out_reader.fd in ready:
-                buffered_stdout_lines.extend(out_reader.drain_lines())
+                for line in out_reader.drain_lines():
+                    if (
+                        len(buffered_stdout_lines) < MAX_PRE_ATTACH_LINES
+                        and buffered_stdout_bytes + len(line) <= MAX_PRE_ATTACH_BYTES
+                    ):
+                        buffered_stdout_lines.append(line)
+                        buffered_stdout_bytes += len(line)
+                    elif not pre_attach_overflow_warned:
+                        pre_attach_overflow_warned = True
+                        log_fn("warning: pre-attach stdout buffer cap reached; dropping excess lines")
 
             if not attached and err_reader.eof and out_reader.eof:
                 rc = _bounded_wait_eof(proc)
@@ -1597,38 +1748,39 @@ def _run_event_stream(
         pending_lines = buffered_stdout_lines
         buffered_stdout_lines = []
         need_reread = False
-        pending_review_event = False
+        pending_event_review_ids: set[str] = set()
 
         while True:
             if pending_lines:
                 for line in pending_lines:
-                    ev = _parse_event_line(line)
+                    ev = _parse_event_line(line, allowed_types=want_set)
                     if ev is None:
                         continue
-                    ev_id = ev.get("id")
-                    if isinstance(ev_id, str) and ev_id.strip():
-                        eid = ev_id.strip()
-                        if eid in seen_event_id_set:
-                            continue
-                        seen_event_id_set.add(eid)
-                        seen_event_ids.append(eid)
-                        if len(seen_event_ids) > MAX_SEEN_EVENT_IDS:
-                            old_id = seen_event_ids.pop(0)
-                            seen_event_id_set.discard(old_id)
+                    eid = str(ev["id"]).strip()
+                    if eid in seen_event_id_set:
+                        continue
+                    seen_event_id_set.add(eid)
+                    seen_event_ids.append(eid)
+                    if len(seen_event_ids) > MAX_SEEN_EVENT_IDS:
+                        old_id = seen_event_ids.pop(0)
+                        seen_event_id_set.discard(old_id)
                     events_received += 1
                     last_event = ev
                     if for_mode == "any":
                         t_snap = call_timeout(deadline_mono)
-                        if t_snap is not None:
-                            snap, snap_err, _ = fetch_pr_state(pr_ref, for_mode, timeout=t_snap)
-                            if snap is not None:
-                                last_pr = snap
-                                last_checks, _, _ = summarize_checks(snap)
-                            elif snap_err:
-                                log_fn(f"warning: post-event snapshot {snap_err}")
+                        if t_snap is None:
+                            return _finish(False, EXIT_TIMEOUT, "timeout")
+                        snap, snap_err, _ = fetch_pr_state(pr_ref, for_mode, timeout=t_snap)
+                        if snap is not None:
+                            last_pr = snap
+                            last_checks, _, _ = summarize_checks(snap)
+                        elif snap_err:
+                            log_fn(f"warning: post-event snapshot {snap_err}")
                         return _finish(True, EXIT_OK, "event_received")
                     if ev.get("type") == EV_REVIEW:
-                        pending_review_event = True
+                        rev_id = extract_event_review_id(ev)
+                        if rev_id is not None:
+                            pending_event_review_ids.add(rev_id)
                     need_reread = True
                 pending_lines = []
 
@@ -1645,8 +1797,8 @@ def _run_event_stream(
                 if t_read is None:
                     return _finish(False, EXIT_TIMEOUT, "timeout")
                 need_reread = False
-                rev_trig = pending_review_event
-                pending_review_event = False
+                rev_ids_batch = set(pending_event_review_ids)
+                pending_event_review_ids.clear()
                 deadline_wait.beat()
                 pr_data, fetch_err, rl = fetch_pr_state(pr_ref, for_mode, timeout=t_read)
                 last_read_mono = time.monotonic()
@@ -1663,7 +1815,7 @@ def _run_event_stream(
                     dec = evaluate_pr(
                         pr_data,
                         ev_state,
-                        triggered_by_review_event=rev_trig,
+                        event_review_ids=rev_ids_batch,
                         log_fn=log_fn,
                     )
                     last_checks = dec.checks_summary
@@ -1692,7 +1844,7 @@ def _run_event_stream(
                         dec = evaluate_pr(
                             pr_data,
                             ev_state,
-                            triggered_by_review_event=pending_review_event,
+                            event_review_ids=set(pending_event_review_ids),
                             log_fn=log_fn,
                         )
                         last_checks = dec.checks_summary
@@ -2073,6 +2225,9 @@ def main(argv: list[str] | None = None) -> int:
         fallback_interval = parse_positive_float(args.fallback_interval, "--fallback-interval")
         attach_timeout = parse_positive_float(args.attach_timeout, "--attach-timeout")
         pr_ref = resolve_pr_ref(args.pr_ref, args.repo, deadline_mono=deadline_mono)
+    except WaitTimeoutError as exc:
+        print(f"gh-pr-wait: {exc}", file=sys.stderr)
+        return EXIT_TIMEOUT
     except UsageError as exc:
         print(f"gh-pr-wait: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -2086,10 +2241,15 @@ def main(argv: list[str] | None = None) -> int:
     if safety_req < safety_floor:
         log(f"clamping --safety-interval from {safety_req:g}s to {safety_floor:g}s")
 
-    # Resolve bare PR numbers once before supervision so the inner copy skips repeat URL inference.
-    inner_argv = _rewrite_argv_with_resolved_url(raw, args.pr_ref, pr_ref.url)
+    rem_after_resolve = deadline_mono - time.monotonic()
+    if rem_after_resolve <= 0:
+        log("timeout expired before wait began")
+        return EXIT_TIMEOUT
 
-    budget_s = timeout_s + 60.0
+    # Build inner argv directly from parsed values carrying the remaining monotonic budget.
+    inner_argv = _build_supervised_argv(args, pr_ref, rem_after_resolve)
+
+    budget_s = rem_after_resolve + 60.0
     heartbeat_s = max(300.0, safety_interval + 60.0)
     sup_rc = deadline_wait.supervised(
         "gh-pr-wait",
