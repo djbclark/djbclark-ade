@@ -80,8 +80,8 @@ FAKE_GH_SCRIPT = textwrap.dedent(
 
     argv = sys.argv[1:]
 
-    # Authoritative REST subscription create: `gh api -i -X POST /event-subscriptions ...`
-    if argv[:4] == ["api", "-i", "-X", "POST"] and "/event-subscriptions" in argv:
+    # REST POST /event-subscriptions
+    if argv[:1] == ["api"] and "POST" in argv and "/event-subscriptions" in argv:
         call_no = next_count("sub_post")
         log({"op": "sub_create", "call": call_no, "argv": argv})
         if cfg.get("create_delay_s"):
@@ -101,21 +101,10 @@ FAKE_GH_SCRIPT = textwrap.dedent(
         sys.stdout.flush()
         raise SystemExit(0)
 
-    if argv[:3] == ["event", "subscription", "list"]:
-        log({"op": "sub_list", "argv": argv})
-        err = cfg.get("list_error")
-        if err:
-            print(err["stderr"], file=sys.stderr)
-            raise SystemExit(err.get("rc", 1))
-        print(json.dumps(cfg.get("existing_subs", [])))
-        raise SystemExit(0)
-
-    if argv[:3] == ["event", "subscription", "delete"]:
-        if "--" in argv[3:]:
-            idx = argv.index("--", 3)
-            sub_id = argv[idx + 1] if idx + 1 < len(argv) else ""
-        else:
-            sub_id = argv[3] if len(argv) > 3 else ""
+    # REST DELETE /event-subscriptions/<id>
+    if argv[:1] == ["api"] and "DELETE" in argv and any(a.startswith("/event-subscriptions/") for a in argv):
+        ep = next(a for a in argv if a.startswith("/event-subscriptions/"))
+        sub_id = ep.split("/event-subscriptions/", 1)[1]
         alive = False
         if pid_path.exists():
             try:
@@ -128,6 +117,15 @@ FAKE_GH_SCRIPT = textwrap.dedent(
         if sub_id in fail_ids:
             print(f"HTTP 500 deleting {sub_id}", file=sys.stderr)
             raise SystemExit(1)
+        raise SystemExit(0)
+
+    if argv[:3] == ["event", "subscription", "list"]:
+        log({"op": "sub_list", "argv": argv})
+        err = cfg.get("list_error")
+        if err:
+            print(err["stderr"], file=sys.stderr)
+            raise SystemExit(err.get("rc", 1))
+        print(json.dumps(cfg.get("existing_subs", [])))
         raise SystemExit(0)
 
     if argv[:2] == ["event", "listen"]:
@@ -206,7 +204,7 @@ FAKE_GH_SCRIPT = textwrap.dedent(
         log({"op": "listen_exited", "rc": 8})
         raise SystemExit(8)
 
-    if argv[:2] == ["api", "graphql"]:
+    if argv[:1] == ["api"] and "graphql" in argv:
         call_no = next_count("pr_view")
         log({"op": "pr_view", "kind": "graphql", "call": call_no, "argv": argv})
         views = cfg.get("pr_views", [])
@@ -224,7 +222,7 @@ FAKE_GH_SCRIPT = textwrap.dedent(
         elif isinstance(checks, list):
             scr_obj = {"contexts": {"nodes": checks}}
         else:
-            scr_obj = checks  # allow malformed rollup testing
+            scr_obj = checks
         node = {
             "url": resp.get("url"),
             "state": resp.get("state"),
@@ -263,7 +261,9 @@ FAKE_GH_SCRIPT = textwrap.dedent(
 
         by_url = cfg.get("pr_views_by_url")
         if by_url is not None:
-            key = f"https://github.com/{repo_arg}/pull/{target}" if repo_arg else target
+            key = f"https://{repo_arg}/pull/{target}" if repo_arg.startswith("github.com/") else (
+                f"https://github.com/{repo_arg}/pull/{target}" if repo_arg else target
+            )
             log({"op": "pr_view", "target": key, "argv": argv})
             resp = by_url.get(key)
             if resp is None or resp.get("error"):
@@ -318,6 +318,7 @@ def make_env(tmp_path: Path, cfg: dict, *, extra_env: dict[str, str] | None = No
     env.pop("DEADLINE_NAME", None)
     env.pop("GH_PR_WAIT_TEST_MIN_INTERVAL", None)
     env.pop("GH_PR_WAIT_TEST_STOP_TIMEOUT", None)
+    env.pop("GH_HOST", None)
     env["GH_BIN"] = str(fake_gh)
     env["GH_PR_WAIT_STATE_DIR"] = str(sdir)
     env["FAKE_GH_CONFIG"] = str(cfg_path)
@@ -371,9 +372,10 @@ def pr_state(
     }
 
 
-def test_attach_then_read_ordering_and_instant_wake_pass(tmp_path):
+def test_default_keeps_subscription_and_delete_on_exit_opts_in(tmp_path):
+    """I.1: Default keeps even HTTP 201 subscriptions (matching gh event listen); --delete-on-exit opts in with stop-before-delete."""
     cfg = {
-        "created_sub_id": "sub_pass_1",
+        "created_sub_id": "sub_def_1",
         "create_http_status": 201,
         "attach_delay_s": 0.05,
         "pr_views": [
@@ -385,44 +387,36 @@ def test_attach_then_read_ordering_and_instant_wake_pass(tmp_path):
             ]),
         ],
         "listen_actions": [
-            {
-                "after_pr_views": 1,
-                "kind": "event",
-                "event": {
-                    "id": "ev_1",
-                    "type": "com.github.pull_request.check_suite.status.changed.v1",
-                    "data": {"conclusion": "success"},
-                },
-            }
+            {"after_pr_views": 1, "kind": "event", "event": {"id": "ev_1", "type": "com.github.pull_request.check_suite.status.changed.v1"}},
         ],
     }
-    env, log_path = make_env(tmp_path, cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
-    r = run_wait(["https://github.com/djbclark/demo/pull/42", "--no-deadline", "--json"], env)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["ok"] is True
-    assert out["mode"] == "event-stream"
-    assert out["reason"] == "checks_passed"
-    assert out["events_received"] == 1
-    assert out["subscription_id"] == "sub_pass_1"
-    assert out["subscription_deleted"] is True
-    assert out["checks_summary"] == {"total": 3, "passed": 3, "failed": 0, "pending": 0}
+    # 1. Default mode: keeps subscription (subscription_deleted=False, NO sub_delete call).
+    env_def, log_def = make_env(tmp_path / "default", cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
+    r_def = run_wait(["https://github.com/djbclark/demo/pull/42", "--no-deadline", "--json"], env_def)
+    assert r_def.returncode == 0, r_def.stderr
+    out_def = json.loads(r_def.stdout)
+    assert out_def["ok"] is True and out_def["mode"] == "event-stream"
+    assert out_def["subscription_id"] == "sub_def_1"
+    assert out_def["subscription_deleted"] is False
+    ops_def = read_log(log_def)
+    assert ops_def[[e["op"] for e in ops_def].index("listen_ready")]["t"] <= ops_def[[e["op"] for e in ops_def].index("pr_view")]["t"]
+    assert not any(e["op"] == "sub_delete" for e in ops_def)
 
-    ops = read_log(log_path)
-    op_names = [e["op"] for e in ops]
-    idx_ready = op_names.index("listen_ready")
-    idx_first_view = op_names.index("pr_view")
-    assert idx_ready < idx_first_view
-    assert ops[idx_ready]["t"] <= ops[idx_first_view]["t"]
-    idx_exited = op_names.index("listen_exited")
-    idx_delete = op_names.index("sub_delete")
-    assert idx_exited < idx_delete
-    assert ops[idx_delete]["listen_alive"] is False
-    assert "--" in ops[idx_delete]["argv"]
+    # 2. Explicit --delete-on-exit: deletes AFTER proving listener exit!
+    env_del, log_del = make_env(tmp_path / "del", cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
+    r_del = run_wait(["https://github.com/djbclark/demo/pull/42", "--delete-on-exit", "--no-deadline", "--json"], env_del)
+    assert r_del.returncode == 0, r_del.stderr
+    out_del = json.loads(r_del.stdout)
+    assert out_del["subscription_deleted"] is True
+    ops_del = read_log(log_del)
+    op_names = [e["op"] for e in ops_del]
+    assert op_names.index("listen_exited") < op_names.index("sub_delete")
+    assert ops_del[op_names.index("sub_delete")]["listen_alive"] is False
+    assert "--hostname=github.com" in ops_del[op_names.index("sub_delete")]["argv"]
 
 
-def test_http_200_reused_subscription_across_state_dirs_never_deleted(tmp_path):
-    """I.1: HTTP 200 OK from POST /event-subscriptions proves server reuse -> NEVER deleted even with fresh state dir."""
+def test_http_200_reused_subscription_never_deleted_even_with_delete_on_exit(tmp_path):
+    """I.1: HTTP 200 OK proves reuse -> NEVER deleted even when --delete-on-exit is passed."""
     cfg = {
         "created_sub_id": "sub_remote_200",
         "create_http_status": 200,
@@ -431,7 +425,7 @@ def test_http_200_reused_subscription_across_state_dirs_never_deleted(tmp_path):
         ],
     }
     env, log_path = make_env(tmp_path / "other_host", cfg)
-    r = run_wait(["djbclark/demo#42", "--no-deadline", "--json"], env)
+    r = run_wait(["djbclark/demo#42", "--delete-on-exit", "--no-deadline", "--json"], env)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["subscription_id"] == "sub_remote_200"
@@ -439,35 +433,39 @@ def test_http_200_reused_subscription_across_state_dirs_never_deleted(tmp_path):
     assert not any(e["op"] == "sub_delete" for e in read_log(log_path))
 
 
-def test_failed_refcount_write_on_tracked_subscription_falls_back_cleanly(tmp_path, monkeypatch):
-    """I.1: When joining an existing tracked subscription, a failed refcount write falls back instead of attaching unregistered."""
+def test_failed_refcount_write_or_lock_failure_falls_back_cleanly(tmp_path, monkeypatch):
+    """I.1: Lock failure or refcount write failure falls back to polling instead of attaching unregistered."""
     mod = load_module()
     sdir = tmp_path / "state"
     monkeypatch.setenv("GH_PR_WAIT_STATE_DIR", str(sdir))
     pr_ref = mod.PRRef(url="https://github.com/djbclark/demo/pull/42", host="github.com", owner="djbclark", repo="demo", number=42)
     coord = mod.SubscriptionCoord(pr_ref, mod.EVENTS_FOR["checks"])
-    # Seed state with an active local waiter (current test process).
     coord._ensure_dir()
     assert coord._write_state({
         "sub_id": "sub_tracked_1",
         "shared_external": False,
         "keep_forever": False,
-        "waiters": [coord._me_entry()],
+        "waiters": [coord._me_entry(phase="running", listener_pid=os.getpid(), listener_start=coord.start_token)],
     })
-    # Force subsequent _write_state to fail.
     monkeypatch.setattr(coord, "_write_state", lambda data: False)
     logs: list[str] = []
-    session = mod.StreamSession(coord, keep_subscription=False, cancel=mod.CancelState(), log_fn=logs.append)
+    session = mod.StreamSession(coord, delete_on_exit=True, cancel=mod.CancelState(), log_fn=logs.append)
     ok, fb = mod._acquire_subscription(
         pr_ref, mod.EVENTS_FOR["checks"], session, time.monotonic() + 5.0, mod.CancelState(), logs.append,
     )
-    assert ok is False
-    assert fb is not None and "falling back" in fb
+    assert ok is False and fb is not None and "falling back" in fb
     assert session.sub_id is None
 
+    # Lock acquisition unavailable -> also falls back cleanly (never attaches unregistered).
+    monkeypatch.setattr(coord, "_acquire_flock", lambda dl: None)
+    ok2, fb2 = mod._acquire_subscription(
+        pr_ref, mod.EVENTS_FOR["checks"], session, time.monotonic() + 5.0, mod.CancelState(), logs.append,
+    )
+    assert ok2 is False and fb2 is not None and "lock unavailable" in fb2
 
-def test_concurrent_waiters_share_subscription_and_only_last_deletes(tmp_path):
-    """I.1: Two interleaved concurrent waiters share one 201 subscription; only the last exiting waiter deletes it."""
+
+def test_concurrent_delete_on_exit_waiters_only_last_deletes(tmp_path):
+    """I.1: Two interleaved --delete-on-exit waiters share one 201 sub; only the last exiting waiter deletes it."""
     shared_state = tmp_path / "shared_state"
     cfg_a = {
         "created_sub_id": "sub_shared_1",
@@ -495,7 +493,7 @@ def test_concurrent_waiters_share_subscription_and_only_last_deletes(tmp_path):
     env_b, log_b = make_env(tmp_path / "b", cfg_b, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"}, state_dir=shared_state)
 
     pa = subprocess.Popen(
-        [str(TOOL), "djbclark/demo#42", "--no-deadline", "--json"],
+        [str(TOOL), "djbclark/demo#42", "--delete-on-exit", "--no-deadline", "--json"],
         env=env_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     dl = time.monotonic() + 5.0
@@ -504,7 +502,7 @@ def test_concurrent_waiters_share_subscription_and_only_last_deletes(tmp_path):
             break
         time.sleep(0.02)
     pb = subprocess.Popen(
-        [str(TOOL), "DJBCLARK/DEMO#42", "--no-deadline", "--json"],
+        [str(TOOL), "DJBCLARK/DEMO#42", "--delete-on-exit", "--no-deadline", "--json"],
         env=env_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     out_a, err_a = pa.communicate(timeout=15)
@@ -513,18 +511,50 @@ def test_concurrent_waiters_share_subscription_and_only_last_deletes(tmp_path):
     assert pb.returncode == 0, err_b
     res_a = json.loads(out_a)
     res_b = json.loads(out_b)
-    assert res_a["subscription_id"] == "sub_shared_1"
-    assert res_b["subscription_id"] == "sub_shared_1"
-    assert res_a["subscription_deleted"] is False
-    assert res_b["subscription_deleted"] is True
+    assert res_a["subscription_id"] == "sub_shared_1" and res_b["subscription_id"] == "sub_shared_1"
+    assert res_a["subscription_deleted"] is False and res_b["subscription_deleted"] is True
     assert not any(e["op"] == "sub_delete" for e in read_log(log_a))
     assert sum(1 for e in read_log(log_b) if e["op"] == "sub_delete") == 1
     assert not any(e["op"] == "sub_create" for e in read_log(log_b))
     assert (shared_state.stat().st_mode & 0o777) == 0o700
 
 
+def test_dead_starting_phase_waiter_blocks_peer_delete_on_exit(tmp_path, monkeypatch):
+    """I.2: Dead parent waiter stuck in phase='starting' (no recorded listener) causes peer B with --delete-on-exit to mark keep_forever and SKIP deletion."""
+    mod = load_module()
+    sdir = tmp_path / "state"
+    monkeypatch.setenv("GH_PR_WAIT_STATE_DIR", str(sdir))
+    deleted: list[list[str]] = []
+    monkeypatch.setattr(mod, "run_gh", lambda args, **kw: (deleted.append(args) or (0, "", "")))
+
+    pr_ref = mod.PRRef(url="https://github.com/djbclark/demo/pull/42", host="github.com", owner="djbclark", repo="demo", number=42)
+    coord_b = mod.SubscriptionCoord(pr_ref, mod.EVENTS_FOR["checks"])
+    coord_b._ensure_dir()
+    me_b = coord_b._me_entry(phase="running", listener_pid=os.getpid(), listener_start=coord_b.start_token)
+    assert me_b is not None
+    # Dead parent waiter A left in phase="starting" with listener_pid=None (spawn-to-record gap!).
+    dead_a = {"pid": 999998, "start_time": "dead-token", "phase": "starting", "listener_pid": None, "listener_start": None}
+    assert coord_b._write_state({
+        "sub_id": "sub_starting_gap",
+        "shared_external": False,
+        "keep_forever": False,
+        "waiters": [dead_a, me_b],
+    })
+
+    logs_b: list[str] = []
+    sess_b = mod.StreamSession(coord_b, delete_on_exit=True, cancel=mod.CancelState(), log_fn=logs_b.append)
+    sess_b.sub_id = "sub_starting_gap"
+    sess_b.ownership_confirmed = True
+    sess_b.shared_external = False
+    sess_b.registered_in_coord = True
+    assert sess_b.close() is False
+    assert deleted == []
+    st = coord_b._read_state()
+    assert st["keep_forever"] is True and st["shared_external"] is True
+
+
 def test_durable_keep_forever_after_waiter_a_unproven_reap_blocks_waiter_b_delete(tmp_path, monkeypatch):
-    """I.2: Waiter A fails to reap its listener -> writes durable keep_forever=True -> Waiter B closing cleanly skips delete!"""
+    """I.2: Waiter A fails to reap its listener -> writes durable keep_forever=True -> Waiter B with --delete-on-exit skips delete."""
     mod = load_module()
     sdir = tmp_path / "state"
     monkeypatch.setenv("GH_PR_WAIT_STATE_DIR", str(sdir))
@@ -552,13 +582,12 @@ def test_durable_keep_forever_after_waiter_a_unproven_reap_blocks_waiter_b_delet
     pr_ref = mod.PRRef(url="https://github.com/djbclark/demo/pull/42", host="github.com", owner="djbclark", repo="demo", number=42)
     coord_a = mod.SubscriptionCoord(pr_ref, mod.EVENTS_FOR["checks"])
     coord_b = mod.SubscriptionCoord(pr_ref, mod.EVENTS_FOR["checks"])
-    # Simulate two distinct live waiters A and B sharing one 201-created subscription.
     coord_a._ensure_dir()
-    me_a = coord_a._me_entry()
+    me_a = coord_a._me_entry(phase="starting")
     assert me_a is not None
     coord_b.pid = os.getppid()
     coord_b.start_token = mod.proc_start_token(coord_b.pid)
-    me_b = coord_b._me_entry()
+    me_b = coord_b._me_entry(phase="running", listener_pid=os.getpid(), listener_start=coord_a.start_token)
     assert me_b is not None
     assert coord_a._write_state({
         "sub_id": "sub_shared_reap",
@@ -567,25 +596,19 @@ def test_durable_keep_forever_after_waiter_a_unproven_reap_blocks_waiter_b_delet
         "waiters": [me_a, me_b],
     })
 
-    logs_a: list[str] = []
-    sess_a = mod.StreamSession(coord_a, keep_subscription=False, cancel=mod.CancelState(), log_fn=logs_a.append)
+    sess_a = mod.StreamSession(coord_a, delete_on_exit=True, cancel=mod.CancelState(), log_fn=lambda _: None)
     sess_a.sub_id = "sub_shared_reap"
     sess_a.ownership_confirmed = True
     sess_a.shared_external = False
     sess_a.registered_in_coord = True
     sess_a.attach_proc(StuckProc())  # type: ignore[arg-type]
 
-    # Waiter A closes with unproven reap -> skips delete AND persists keep_forever=True.
     assert sess_a.close() is False
-    assert sess_a.listener_reaped is False
-    assert sess_a.proc is not None
-    st_after_a = coord_a._read_state()
-    assert st_after_a["keep_forever"] is True
+    assert sess_a.listener_reaped is False and sess_a.proc is not None
+    assert coord_a._read_state()["keep_forever"] is True
     assert deleted == []
 
-    # Waiter B now closes cleanly with no remaining waiters -> MUST STILL SKIP DELETE!
-    logs_b: list[str] = []
-    sess_b = mod.StreamSession(coord_b, keep_subscription=False, cancel=mod.CancelState(), log_fn=logs_b.append)
+    sess_b = mod.StreamSession(coord_b, delete_on_exit=True, cancel=mod.CancelState(), log_fn=lambda _: None)
     sess_b.sub_id = "sub_shared_reap"
     sess_b.ownership_confirmed = True
     sess_b.shared_external = False
@@ -594,26 +617,84 @@ def test_durable_keep_forever_after_waiter_a_unproven_reap_blocks_waiter_b_delet
     assert deleted == []
 
 
+def test_hostname_github_com_pinned_even_with_enterprise_gh_host(tmp_path):
+    """II.3: --hostname=github.com and --repo=github.com/... are always pinned even when GH_HOST points at Enterprise."""
+    # 1. --for checks --delete-on-exit
+    cfg_c = {
+        "created_sub_id": "sub_pin_1",
+        "create_http_status": 201,
+        "pr_views": [pr_state(checks=[{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}])],
+    }
+    env_c, log_c = make_env(tmp_path / "checks", cfg_c, extra_env={"GH_HOST": "ghe.corp.example"})
+    rc = run_wait(["djbclark/demo#42", "--delete-on-exit", "--no-deadline", "--json"], env_c)
+    assert rc.returncode == 0, rc.stderr
+    ops_c = read_log(log_c)
+    create_ev = next(e for e in ops_c if e["op"] == "sub_create")
+    delete_ev = next(e for e in ops_c if e["op"] == "sub_delete")
+    view_ev = next(e for e in ops_c if e["op"] == "pr_view")
+    assert "--hostname=github.com" in create_ev["argv"]
+    assert "--hostname=github.com" in delete_ev["argv"]
+    assert "--repo=github.com/djbclark/demo" in view_ev["argv"]
+
+    # 2. --for review (GraphQL)
+    cfg_r = {
+        "created_sub_id": "sub_pin_2",
+        "create_http_status": 201,
+        "pr_views": [
+            pr_state(reviews=[]),
+            pr_state(reviews=[{"id": "R1", "databaseId": 1, "state": "APPROVED", "submittedAt": "2026-11-25T10:00:00Z"}]),
+        ],
+        "listen_actions": [
+            {"after_pr_views": 1, "kind": "event", "event": {"id": "ev_r", "type": "com.github.pull_request.review.submitted.v1", "data": {"api_url": "https://api.github.com/repos/djbclark/demo/pulls/42/reviews/1"}}},
+        ],
+    }
+    env_r, log_r = make_env(tmp_path / "review", cfg_r, extra_env={"GH_HOST": "ghe.corp.example", "GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
+    rr = run_wait(["djbclark/demo#42", "--for", "review", "--no-deadline", "--json"], env_r)
+    assert rr.returncode == 0, rr.stderr
+    gql_ev = next(e for e in read_log(log_r) if e["op"] == "pr_view")
+    assert "--hostname=github.com" in gql_ev["argv"]
+
+
+def test_line_reader_bounds_per_tick_drain():
+    """II.2: LineReader caps per-tick drain at max_lines and retains buffered remainder cleanly."""
+    mod = load_module()
+    r_fd, w_fd = os.pipe()
+    try:
+        reader = mod.LineReader(r_fd)
+        payload = "".join(f"line-{i}\n" for i in range(600)).encode("utf-8")
+        # Write in a background writer or nonblocking chunks? 600 short lines (~5 KB) fits well inside 64 KB pipe buffer.
+        os.write(w_fd, payload)
+        os.close(w_fd)
+        w_fd = -1
+        batch1 = reader.drain_lines(max_lines=256)
+        assert len(batch1) == 256 and batch1[0] == "line-0" and batch1[-1] == "line-255"
+        assert reader.has_buffered_line() is True
+        batch2 = reader.drain_lines(max_lines=256)
+        assert len(batch2) == 256 and batch2[0] == "line-256" and batch2[-1] == "line-511"
+        batch3 = reader.drain_lines(max_lines=256)
+        assert len(batch3) == 88 and batch3[0] == "line-512" and batch3[-1] == "line-599"
+    finally:
+        if w_fd >= 0:
+            os.close(w_fd)
+        os.close(r_fd)
+
+
 def test_listener_ignoring_sigterm_escalates_to_sigkill_then_deletes(tmp_path):
-    """I.2: Listener ignoring SIGTERM gets SIGKILLed, reaped, and only then subscription is deleted."""
     cfg = {
         "created_sub_id": "sub_kill_1",
         "create_http_status": 201,
         "ignore_sigterm": True,
-        "pr_views": [
-            pr_state(checks=[{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]),
-        ],
+        "pr_views": [pr_state(checks=[{"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}])],
     }
     env, log_path = make_env(tmp_path, cfg, extra_env={"GH_PR_WAIT_TEST_STOP_TIMEOUT": "0.2"})
-    r = run_wait(["djbclark/demo#42", "--no-deadline", "--json"], env)
+    r = run_wait(["djbclark/demo#42", "--delete-on-exit", "--no-deadline", "--json"], env)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["subscription_deleted"] is True
     del_ev = next(e for e in read_log(log_path) if e["op"] == "sub_delete")
     assert del_ev["listen_alive"] is False
 
 
-def test_cancellation_during_subscription_create_cleans_up(tmp_path):
-    """I.2: SIGTERM arriving during subscription create still records ownership and deletes it."""
+def test_cancellation_during_subscription_create_cleans_up_with_delete_on_exit(tmp_path):
     cfg = {
         "created_sub_id": "sub_mid_create",
         "create_http_status": 201,
@@ -622,7 +703,7 @@ def test_cancellation_during_subscription_create_cleans_up(tmp_path):
     }
     env, log_path = make_env(tmp_path, cfg)
     proc = subprocess.Popen(
-        [str(TOOL), "djbclark/demo#42", "--timeout", "30s", "--no-deadline"],
+        [str(TOOL), "djbclark/demo#42", "--delete-on-exit", "--timeout", "30s", "--no-deadline"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -644,17 +725,14 @@ def test_cancellation_during_subscription_create_cleans_up(tmp_path):
 
 
 def test_sigterm_and_repeated_signals_clean_up_once(tmp_path):
-    """I.2: Repeated SIGTERMs do not abort cleanup; stream exits before delete and exits 143."""
     cfg = {
         "created_sub_id": "sub_sig_1",
         "create_http_status": 201,
-        "pr_views": [
-            pr_state(checks=[{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": ""}]),
-        ],
+        "pr_views": [pr_state(checks=[{"__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": ""}])],
     }
     env, log_path = make_env(tmp_path, cfg)
     proc = subprocess.Popen(
-        [str(TOOL), "djbclark/demo#42", "--timeout", "30s", "--no-deadline"],
+        [str(TOOL), "djbclark/demo#42", "--delete-on-exit", "--timeout", "30s", "--no-deadline"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -701,7 +779,7 @@ def test_instant_wake_check_failure_and_pr_closed(tmp_path):
     r = run_wait(["djbclark/demo#42", "--no-deadline", "--json"], env)
     assert r.returncode == 1, r.stderr
     out = json.loads(r.stdout)
-    assert out["ok"] is False and out["reason"] == "checks_failed" and out["subscription_deleted"] is True
+    assert out["ok"] is False and out["reason"] == "checks_failed" and out["subscription_deleted"] is False
 
     cfg2 = {
         "created_sub_id": "sub_closed_1",
@@ -719,7 +797,7 @@ def test_instant_wake_check_failure_and_pr_closed(tmp_path):
     assert r2.returncode == 1 and json.loads(r2.stdout)["reason"] == "pr_closed"
 
 
-def test_already_passing_keep_subscription_and_empty_checks(tmp_path):
+def test_keep_subscription_compat_and_empty_checks(tmp_path):
     cfg = {
         "created_sub_id": "sub_keep_1",
         "create_http_status": 201,
@@ -752,22 +830,18 @@ def test_already_passing_keep_subscription_and_empty_checks(tmp_path):
 
 
 def test_review_pending_to_submitted_and_dismissed_does_not_false_trigger(tmp_path):
-    """I.3 & II.1: PENDING->submitted triggers; APPROVED->DISMISSED on existing review does NOT trigger; GraphQL omits body."""
     cfg = {
         "created_sub_id": "sub_rev_imm",
         "create_http_status": 201,
         "pr_views": [
-            # Baseline: R_exist (APPROVED) + R_draft (PENDING, excluded)
             pr_state(reviews=[
                 {"id": "PRR_exist", "databaseId": 1001, "state": "APPROVED", "submittedAt": "2026-11-25T10:00:00Z"},
                 {"id": "PRR_draft", "databaseId": 1002, "state": "PENDING", "submittedAt": None},
             ]),
-            # R_exist becomes DISMISSED (mutable state change, same (id, submittedAt)) -> MUST NOT trigger!
             pr_state(reviews=[
                 {"id": "PRR_exist", "databaseId": 1001, "state": "DISMISSED", "submittedAt": "2026-11-25T10:00:00Z"},
                 {"id": "PRR_draft", "databaseId": 1002, "state": "PENDING", "submittedAt": None},
             ]),
-            # R_draft is finally submitted -> MUST trigger!
             pr_state(reviews=[
                 {"id": "PRR_exist", "databaseId": 1001, "state": "DISMISSED", "submittedAt": "2026-11-25T10:00:00Z"},
                 {"id": "PRR_draft", "databaseId": 1002, "state": "COMMENTED", "submittedAt": "2026-11-25T10:05:00Z"},
@@ -785,13 +859,10 @@ def test_review_pending_to_submitted_and_dismissed_does_not_false_trigger(tmp_pa
     gql_calls = [e for e in read_log(log_path) if e["op"] == "pr_view"]
     assert len(gql_calls) == 3
     for call in gql_calls:
-        assert call["kind"] == "graphql"
-        assert "body" not in " ".join(call["argv"])
+        assert call["kind"] == "graphql" and "body" not in " ".join(call["argv"])
 
 
 def test_review_exact_api_url_correlation_vs_unrelated_same_second_review(tmp_path):
-    """I.3: Exact databaseId correlation from data.api_url reconciles post-attach review; unrelated event never matches pre-attach review."""
-    # Case A: Pre-attach review (databaseId 1001, even in same wall-clock second!) + unrelated event for 9999 -> MUST NOT trigger!
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     cfg_unrel = {
         "created_sub_id": "sub_unrel",
@@ -804,10 +875,8 @@ def test_review_exact_api_url_correlation_vs_unrelated_same_second_review(tmp_pa
         ],
     }
     env_u, _ = make_env(tmp_path / "unrel", cfg_unrel, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
-    ru = run_wait(["djbclark/demo#42", "--for", "review", "--timeout", "0.35s", "--no-deadline", "--json"], env_u)
-    assert ru.returncode == 8, ru.stderr
+    assert run_wait(["djbclark/demo#42", "--for", "review", "--timeout", "0.35s", "--no-deadline", "--json"], env_u).returncode == 8
 
-    # Case B: Post-attach review (databaseId 2002) folded into initial snapshot + exact matching api_url event -> triggers!
     cfg_match = {
         "created_sub_id": "sub_match",
         "create_http_status": 201,
@@ -820,36 +889,26 @@ def test_review_exact_api_url_correlation_vs_unrelated_same_second_review(tmp_pa
     }
     env_m, _ = make_env(tmp_path / "match", cfg_match, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     rm = run_wait(["djbclark/demo#42", "--for", "review", "--no-deadline", "--json"], env_m)
-    assert rm.returncode == 0, rm.stderr
-    assert json.loads(rm.stdout)["reason"] == "review_submitted"
+    assert rm.returncode == 0 and json.loads(rm.stdout)["reason"] == "review_submitted"
 
 
 def test_review_stream_to_poll_fallback_preserves_baseline(tmp_path):
-    """I.3: Baseline established in stream is preserved on fallback to polling."""
     rev1 = {"id": "R1", "databaseId": 1, "state": "COMMENTED", "submittedAt": "2020-01-01T00:00:00Z"}
     rev2 = {"id": "R2", "databaseId": 2, "state": "APPROVED", "submittedAt": "2026-11-25T12:00:00Z"}
     cfg = {
         "created_sub_id": "sub_fb_base",
         "create_http_status": 201,
-        "pr_views": [
-            pr_state(reviews=[rev1]),
-            pr_state(reviews=[rev1]),
-            pr_state(reviews=[rev1, rev2]),
-        ],
+        "pr_views": [pr_state(reviews=[rev1]), pr_state(reviews=[rev1]), pr_state(reviews=[rev1, rev2])],
         "listen_actions": [{"after_pr_views": 1, "kind": "exit", "rc": 1}],
     }
     env, _ = make_env(tmp_path, cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     r = run_wait(["djbclark/demo#42", "--for", "review", "--fallback-interval", "0.02", "--no-deadline", "--json"], env)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["mode"] == "poll-fallback" and out["reason"] == "review_submitted"
+    assert r.returncode == 0 and json.loads(r.stdout)["mode"] == "poll-fallback" and json.loads(r.stdout)["reason"] == "review_submitted"
 
 
 def test_for_any_poll_fallback_detects_review_only_and_mergeable_only_deltas(tmp_path):
-    """I.4: --for any poll fallback detects review-only and mergeability-only deltas without fetching review bodies."""
     rev1 = {"id": "R1", "databaseId": 1, "state": "COMMENTED", "submittedAt": "2020-01-01T00:00:00Z"}
     rev2 = {"id": "R2", "databaseId": 2, "state": "APPROVED", "submittedAt": "2026-11-25T12:00:00Z"}
-    # Stream exits mid-wait -> poll fallback sees ONLY a new review (head/checks/state unchanged).
     cfg_rev = {
         "created_sub_id": "sub_any_rev",
         "create_http_status": 201,
@@ -862,29 +921,18 @@ def test_for_any_poll_fallback_detects_review_only_and_mergeable_only_deltas(tmp
     }
     env_r, log_r = make_env(tmp_path / "any_rev", cfg_rev, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     rr = run_wait(["djbclark/demo#42", "--for", "any", "--fallback-interval", "0.02", "--no-deadline", "--json"], env_r)
-    assert rr.returncode == 0, rr.stderr
-    out_r = json.loads(rr.stdout)
-    assert out_r["mode"] == "poll-fallback" and out_r["reason"] == "state_changed"
+    assert rr.returncode == 0 and json.loads(rr.stdout)["reason"] == "state_changed"
     for call in [e for e in read_log(log_r) if e["op"] == "pr_view"]:
-        assert call["kind"] == "graphql"
-        assert "body" not in " ".join(call["argv"])
+        assert call["kind"] == "graphql" and "body" not in " ".join(call["argv"])
 
-    # Non-github host poll fallback detects mergeability-only delta (MERGEABLE -> CONFLICTING).
     ghe_url = "https://ghe.example.com/djbclark/demo/pull/42"
-    cfg_m = {
-        "pr_views": [
-            pr_state(url=ghe_url, mergeable="MERGEABLE"),
-            pr_state(url=ghe_url, mergeable="CONFLICTING"),
-        ],
-    }
+    cfg_m = {"pr_views": [pr_state(url=ghe_url, mergeable="MERGEABLE"), pr_state(url=ghe_url, mergeable="CONFLICTING")]}
     env_m, _ = make_env(tmp_path / "any_mergeable", cfg_m, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     rm = run_wait([ghe_url, "--for", "any", "--fallback-interval", "0.02", "--no-deadline", "--json"], env_m)
-    assert rm.returncode == 0, rm.stderr
-    assert json.loads(rm.stdout)["reason"] == "state_changed"
+    assert rm.returncode == 0 and json.loads(rm.stdout)["reason"] == "state_changed"
 
 
 def test_for_any_requires_subscribed_type_and_nonempty_id_and_detects_check_swap(tmp_path):
-    """II.2: --for any ignores missing id and unsubscribed types; poll detects equal-count check swap."""
     ev_valid = {"id": "ev_any_1", "type": "com.github.pull_request.head.changed.v1", "data": {}}
     cfg = {
         "created_sub_id": "sub_any_1",
@@ -892,18 +940,15 @@ def test_for_any_requires_subscribed_type_and_nonempty_id_and_detects_check_swap
         "pr_views": [pr_state(head="oldsha"), pr_state(head="newsha")],
         "listen_actions": [
             {"after_pr_views": 1, "kind": "stdout_raw", "text": '{"not_an_event": true}'},
-            {"after_pr_views": 1, "kind": "stdout_raw", "text": '{"type": "com.github.pull_request.head.changed.v1"}'},  # missing id!
-            {"after_pr_views": 1, "kind": "stdout_raw", "text": '{"id": "x", "type": "com.github.bogus.v1"}'},  # unsubscribed type!
+            {"after_pr_views": 1, "kind": "stdout_raw", "text": '{"type": "com.github.pull_request.head.changed.v1"}'},
+            {"after_pr_views": 1, "kind": "stdout_raw", "text": '{"id": "x", "type": "com.github.bogus.v1"}'},
             {"after_pr_views": 1, "delay_s": 0.05, "kind": "event", "event": ev_valid},
         ],
     }
     env, _ = make_env(tmp_path / "stream", cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     r = run_wait(["djbclark/demo#42", "--for", "any", "--no-deadline", "--json"], env)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["event"] == ev_valid and out["events_received"] == 1
+    assert r.returncode == 0 and json.loads(r.stdout)["event"] == ev_valid
 
-    # Equal-count check swap on poll fallback.
     ghe_url = "https://ghe.example.com/djbclark/demo/pull/42"
     cfg_swap = {
         "pr_views": [
@@ -926,13 +971,8 @@ def test_for_merge_and_malformed_pr_state_fail_closed(tmp_path):
     cfg = {
         "created_sub_id": "sub_m_1",
         "create_http_status": 201,
-        "pr_views": [
-            pr_state(state="OPEN"),
-            pr_state(state="MERGED", merged_at="2026-11-25T10:00:00Z"),
-        ],
-        "listen_actions": [
-            {"after_pr_views": 1, "kind": "event", "event": {"id": "ev_m", "type": "com.github.pull_request.state.changed.v1"}},
-        ],
+        "pr_views": [pr_state(state="OPEN"), pr_state(state="MERGED", merged_at="2026-11-25T10:00:00Z")],
+        "listen_actions": [{"after_pr_views": 1, "kind": "event", "event": {"id": "ev_m", "type": "com.github.pull_request.state.changed.v1"}}],
     }
     env, log_path = make_env(tmp_path / "merged", cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     r = run_wait(["djbclark/demo#42", "--for", "merge", "--no-deadline", "--json"], env)
@@ -941,7 +981,6 @@ def test_for_merge_and_malformed_pr_state_fail_closed(tmp_path):
         if ev["op"] == "pr_view":
             assert "reviews" not in ev["json"] and "statusCheckRollup" not in ev["json"]
 
-    # OPEN PR with truthy malformed mergedAt -> rejected (timeout 8).
     env_m, _ = make_env(
         tmp_path / "bad_m",
         {"created_sub_id": "sub_bm", "create_http_status": 201, "pr_views": [pr_state(state="OPEN", merged_at="not-a-ts")]},
@@ -949,7 +988,6 @@ def test_for_merge_and_malformed_pr_state_fail_closed(tmp_path):
     )
     assert run_wait(["djbclark/demo#42", "--for", "merge", "--timeout", "0.25s", "--no-deadline", "--json"], env_m).returncode == 8
 
-    # Non-list statusCheckRollup with --allow-empty-checks -> NEVER passes!
     bad_pr = pr_state(state="OPEN")
     bad_pr["statusCheckRollup"] = "corrupt"  # type: ignore[assignment]
     env_r, _ = make_env(
@@ -979,8 +1017,7 @@ def test_event_burst_dedup_rate_limit_and_safety_floor(tmp_path):
     env, log_path = make_env(tmp_path / "burst", cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.05"})
     r = run_wait(["djbclark/demo#42", "--no-deadline", "--json"], env)
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["events_received"] == 3
-    assert "rate limit hit; backing off" in r.stderr
+    assert json.loads(r.stdout)["events_received"] == 3 and "rate limit hit; backing off" in r.stderr
     assert len([e for e in read_log(log_path) if e["op"] == "pr_view"]) == 3
 
     env_sf, _ = make_env(
@@ -1022,8 +1059,7 @@ def test_strict_readiness_split_utf8_oversize_and_reconnect_heartbeat(tmp_path):
     }
     env_u, _ = make_env(tmp_path / "utf8", cfg_u, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     ru = run_wait(["djbclark/demo#42", "--for", "any", "--no-deadline", "--json"], env_u)
-    assert ru.returncode == 0, ru.stderr
-    assert json.loads(ru.stdout)["event"] == ev_utf8
+    assert ru.returncode == 0 and json.loads(ru.stdout)["event"] == ev_utf8
 
 
 @pytest.mark.parametrize("case", ["403_create", "422_create", "unknown_event_cmd", "attach_timeout", "non_github"])
@@ -1045,13 +1081,15 @@ def test_fallback_to_polling(tmp_path, case):
         cfg["listen_fail_before_attach"] = {"rc": 1, "stderr": 'unknown command "event" for "gh"'}
     elif case == "attach_timeout":
         cfg["listen_hang_before_attach"] = True
-        extra_args = ["--attach-timeout", "0.2"]
+        extra_args = ["--attach-timeout", "0.2", "--delete-on-exit"]
 
     env, log_path = make_env(tmp_path, cfg, extra_env={"GH_PR_WAIT_TEST_MIN_INTERVAL": "0.03"})
     r = run_wait([url, "--fallback-interval", "0.03", "--no-deadline", "--json", *extra_args], env)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["ok"] is True and out["mode"] == "poll-fallback" and out["subscription_id"] is None
+    if case == "422_create":
+        assert "gh-pr-wait cleanup" in r.stderr
 
     ops = read_log(log_path)
     if case == "non_github":
@@ -1067,7 +1105,6 @@ def test_polling_clamp_and_timeout_guards(tmp_path):
     r = run_wait([url, "--fallback-interval", "5", "--no-deadline", "--json"], env)
     assert r.returncode == 0 and "clamping --fallback-interval from 5s to 60s" in r.stderr
 
-    # Attach hangs past entire timeout -> exits 8 without running fallback pr_view.
     cfg_exp = {
         "created_sub_id": "sub_exp_1",
         "create_http_status": 201,
@@ -1078,7 +1115,6 @@ def test_polling_clamp_and_timeout_guards(tmp_path):
     assert run_wait(["djbclark/demo#42", "--timeout", "0.25s", "--attach-timeout", "5", "--no-deadline", "--json"], env_e).returncode == 8
     assert not any(e["op"] == "pr_view" for e in read_log(log_e))
 
-    # Bare-number URL inference timeout maps cleanly to exit 8 (not exit 2!).
     cfg_inf = {"infer_delay_s": 0.5, "infer_url": "https://github.com/djbclark/demo/pull/42"}
     env_i, _ = make_env(tmp_path / "inf_to", cfg_inf)
     assert run_wait(["42", "--timeout", "0.15s", "--no-deadline"], env_i).returncode == 8
@@ -1138,6 +1174,9 @@ def test_cleanup_validates_operands_caches_pr_and_rejects_malformed(tmp_path):
     assert skip_reasons["sub_bad_url"] == "invalid_resource_url"
     ops2 = read_log(log2)
     assert sum(1 for e in ops2 if e["op"] == "pr_view" and e["target"] == "https://github.com/o/r/pull/2") == 1
+    for ev in ops2:
+        if ev["op"] == "sub_delete":
+            assert "--hostname=github.com" in ev["argv"]
 
     env3, log3 = make_env(tmp_path / "all", {"existing_subs": subs, "pr_views_by_url": pr_views_by_url})
     r3 = run_wait(["cleanup", "--all", "--json"], env3)
@@ -1158,6 +1197,7 @@ def test_cleanup_validates_operands_caches_pr_and_rejects_malformed(tmp_path):
     ["https://github.com/owner/repo/pull/1?x=1"],
     ["http://github.com/owner/repo/pull/1"],
     ["owner/repo#1", "-R", "other/repo"],
+    ["owner/repo#1", "--delete-on-exit", "--keep-subscription"],
     ["owner/repo#1", "--timeout", "0"],
     ["owner/repo#1", "--timeout", "notadur"],
     ["owner/repo#1", "--safety-interval", "-5"],
@@ -1171,7 +1211,6 @@ def test_invalid_inputs_exit_2(tmp_path, bad_args):
 
 
 def test_supervised_abbreviated_flag_and_single_url_inference(tmp_path):
-    """II.3: Supervised inner argv built from parsed values handles abbreviated `--time 99 99` and infers URL once."""
     record_path = tmp_path / "deadline-argv.json"
     fake_deadline = tmp_path / "fake_deadline.py"
     fake_deadline.write_text(
@@ -1205,12 +1244,12 @@ def test_supervised_abbreviated_flag_and_single_url_inference(tmp_path):
         ],
     }
     env, log_path = make_env(tmp_path, cfg, extra_env={"DEADLINE_BIN": str(fake_deadline)})
-    r = run_wait(["--time", "99", "99", "--safety-interval", "300", "--json"], env)
+    r = run_wait(["--time", "99", "99", "--delete-on-exit", "--safety-interval", "300", "--json"], env)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["pr_url"] == "https://github.com/djbclark/inferred/pull/99"
     assert sum(1 for e in read_log(log_path) if e["op"] == "pr_view_url") == 1
     dl_argv = json.loads(record_path.read_text(encoding="utf-8"))
     inner = dl_argv[dl_argv.index("--") + 1:]
     assert inner[1] == "https://github.com/djbclark/inferred/pull/99"
-    assert "--timeout" in inner
-    assert inner[inner.index("--timeout") + 1].endswith("s")
+    assert "--delete-on-exit" in inner
+    assert "--timeout" in inner and inner[inner.index("--timeout") + 1].endswith("s")
