@@ -434,3 +434,67 @@ def test_route_keeps_no_local_named_like_the_module_function():
     route = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "route")
     assigned = {n.id for n in ast.walk(route) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     assert "barred_notes" not in assigned and "barred_list" in assigned
+
+
+@pytest.fixture
+def shipped_policy(tmp_path):
+    """Exercise current policy even after a test reloads the legacy fixture."""
+    previous = r.POLICY
+    shipped, _ = r.load_effective_policy(root=ROOT, home=tmp_path, environ={})
+    r.apply_policy(shipped)
+    try:
+        yield
+    finally:
+        r.apply_policy(previous)
+
+
+@pytest.mark.parametrize("name", ["venice", "rfab"])
+def test_manual_pi_services_never_win_automatic_routes(accept, shipped_policy, name):
+    from pi_defaults import choose
+
+    accept(ACCEPT_ALL + f"\n[pools.{name}]\naccepted = true\n")
+    svc = r.BY_NAME[name]
+    quota = drained(**{name: 100.0})
+    assert name in r.NEVER_ROUTE and name in r.OPERATOR_GATED
+    assert svc.models["code"] in r.policy_markdown()
+    with mock.patch.object(r, "REPO_SCOPED", {name: r.REPO_SCOPED["clinepass"]}):
+        assert name not in {s.name for s in r.discover(quota)}
+        assert r.candidate_block(svc, quota, "techno-euphora", pi_unaccepted=set()) == (
+            f"{name}: operator-gated (manual only)"
+        )
+        # Exercise the shared candidate guard even if discovery returns only this pool.
+        with mock.patch.object(r, "discover", return_value=[svc]):
+            assert r.plan(["code", "bulk"], quota=quota, scope_repo="techno-euphora") == [
+                ("code", None), ("bulk", None),
+            ]
+            assert choose("code", [svc.models["code"]], quota=quota, scope_repo="techno-euphora")["service"] is None
+
+
+@pytest.mark.parametrize("name", ["venice", "rfab"])
+def test_manual_model_namespace_cannot_route_under_an_active_pool(shipped_policy, name):
+    model = r.BY_NAME[name].models["code"]
+    alias = dataclasses.replace(r.BY_NAME["cursor"], models={"code": f"  '{model}' --effort high"})
+    assert r.candidate_block(alias, {}, None, pi_unaccepted=set()) == (
+        "cursor: operator-gated Pi model profile (manual only)"
+    )
+
+def test_automatic_discovery_excludes_explicit_mcp_profiles(monkeypatch):
+    profiles = {"claude-mcp-rfab", "codex-mcp-chrome-devtools__rfab"}
+    monkeypatch.setattr(r, "paseo_providers", lambda: profiles | {"unrelated"})
+    found = {svc.name for svc in r.discover({})}
+    assert profiles.isdisjoint(found)
+    assert "unrelated" in found
+
+
+def test_pi_catalog_excludes_operator_gated_models(shipped_policy, monkeypatch):
+    allowed = "zai/glm-5.3"
+    manual = ["Venice/z-ai-glm-5-3", "rfab/openai:gpt-6.2-sol"]
+    ids = [allowed, *manual]
+    rows = [{"id": model, "thinkingOptionIds": ["high"]} for model in ids]
+    monkeypatch.setattr(r, "_paseo_json", lambda _: (rows, None))
+    monkeypatch.setattr(r, "_pi_models", lambda models: models)
+    monkeypatch.setattr(r, "_PROVIDER_MODELS", {})
+    monkeypatch.setattr(r, "_PROVIDER_THINKING", {})
+    assert all(r.pi_excluded(model) for model in manual)
+    assert r.provider_models("pi") == [allowed]
+    assert r.provider_thinking_options("pi") == {allowed: ("high",)}

@@ -114,7 +114,7 @@ default_profile = { bulk = 60, mechanical = 60 }
 # Staff's pool, never a slice target. Names the dispatch gate holds for approval ([dispatch].operator_gated) are
 # never discovered either.
 never_route = ["hermes", "clinepass", "antigravity", "alibaba", "devin", "copilot", "pi", "crush", "kiro",
-               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "grok", "grok-bot"]
+               "cline", "agy", "qwen", "goose", "zcode", "muse", "aider", "venicecode", "venice", "rfab", "grok", "grok-bot"]
 # Discovery names the provider or TUI; aiuse names the account behind it. An alias folds a provider or fork name onto
 # the curated service that already covers it, so it never becomes a second entry (Paseo's `opencode` provider is the
 # Go pool). The retired TUIs have no alias: they are `never_route` above.
@@ -166,12 +166,9 @@ suggest_better_above = 15.0
 suggest_better_delta = 3
 
 [dispatch]
-# Never dispatched without the operator's specific, explicit approval for that run (operator 2026-10-15).
-# hermes (operator 2026-10-15: "hermes should never be used" as a delegation target) needs
-# ACP_OPERATOR_APPROVED=<agent>. omp left this list on 2026-10-19 (its Claude API credits are a
-# normal tier). route_agent never discovers a name listed here. The ACP_OPERATOR_APPROVED check that lived in
-# bin/acp-dispatch / tools/acp-run left with them (2026-11-14): `never_route` is what still keeps hermes out.
-operator_gated = ["hermes"]
+# Manual access on explicit operator request only. These names cannot take an automatic
+# route even when a repository scope or Pi acceptance entry would otherwise allow them.
+operator_gated = ["hermes", "venice", "rfab"]
 # Fable at xhigh/max should almost never run (operator 2026-10-18): the same approval gate, keyed
 # ACP_OPERATOR_APPROVED=fable-xhigh. NOT ENFORCED since 2026-11-14 (the gate was bin/acp-dispatch's gate_policy); it is an
 # instruction, and `policy --md` only prints it. Fable at high is the frontier route_agent.py suggests.
@@ -563,6 +560,27 @@ note = "Hermes-usable API pool; watch the burn alert; never a slice target outsi
 access = "api"
 agent = "pi"
 models = { bulk = "clinepass/cline-pass/deepseek-v4.1-flash", mechanical = "clinepass/cline-pass/deepseek-v4.1-flash", code = "clinepass/cline-pass/glm-5.3", research = "clinepass/cline-pass/glm-5.3" }
+
+# Operator-gated Pi catalog rows (2026-11-25). Profiles are for reference.
+[[service]]
+name = "venice"
+cli = "pi (Venice.ai)"
+good_at = { judgment = 50, code = 50, research = 50, bulk = 50 }
+billing = "prepaid"
+note = "Venice.ai via Pi, explicit operator request only"
+access = "api"
+agent = "pi"
+models = { judgment = "venice/openai-gpt-62-astra", code = "venice/z-ai-glm-5-3", research = "venice/openai-gpt-62-sol", bulk = "venice/qwen-3-8-flash" }
+
+[[service]]
+name = "rfab"
+cli = "pi (Reality Fabricator)"
+good_at = { judgment = 50, code = 50, bulk = 50 }
+billing = "prepaid"
+note = "Reality Fabricator via Pi, explicit operator request only"
+access = "api"
+agent = "pi"
+models = { judgment = "rfab/openai:gpt-6.2-astra", code = "rfab/openai:gpt-6.2-sol", bulk = "rfab/openrouter:deepseek/deepseek-v4.1-flash" }
 
 # The paid half of the same provider. Retired with the prepaid tier, not
 # because the provider is unusable — restoring it is a top-up decision.

@@ -38,7 +38,8 @@ def load_acceptance(path: Path | None = None) -> dict[str, dict[str, Any]]:
 
 
 def routing_pi_services() -> list[str]:
-    return sorted(s.name for s in router.SERVICES if s.acp_agent == "pi" and not s.retired)
+    return sorted(s.name for s in router.SERVICES
+                  if s.acp_agent == "pi" and not s.retired and not router.is_never_routed(s.name))
 
 
 def unaccepted_auto_services(path: Path | None = None) -> set[str]:

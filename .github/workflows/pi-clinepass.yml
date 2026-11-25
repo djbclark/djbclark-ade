@@ -1,9 +1,9 @@
-name: Pi ClinePass
+name: Pi manual providers
 on:
   push:
     branches: [emergency-clinepass-pi]
   pull_request:
-    paths: ['pi-extensions/clinepass/**', 'tests/test_pi_clinepass.py', '.github/workflows/pi-clinepass.yml']
+    paths: ['pi-extensions/clinepass/**', 'pi-extensions/venice/**', 'pi-extensions/rfab/**', 'bin/ade*mcp*rfab*', 'config/mcp-on-demand.toml', 'tests/test_pi_clinepass.py', 'tests/test_pi_venice_rfab.py', '.github/workflows/pi-clinepass.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,4 +20,4 @@ jobs:
       - name: Install current Pi
         run: npm install -g @earendil-works/pi-coding-agent@latest
       - name: Provider registration, credential failures and routing reservation
-        run: uv run --with pytest python -m pytest tests/test_pi_clinepass.py tests/test_pi_defaults.py -q
+        run: uv run --with pytest python -m pytest tests/test_pi_clinepass.py tests/test_pi_venice_rfab.py tests/test_pi_defaults.py -q

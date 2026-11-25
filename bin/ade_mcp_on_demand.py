@@ -60,6 +60,11 @@ def state_dir() -> Path:
     return Path(os.environ.get("ADE_STATE_DIR") or Path.home() / ".local" / "state" / "ade") / "mcp"
 
 
+def is_task_profile(provider: str) -> bool:
+    """Whether the provider id is reserved for explicit per-task MCP attachment."""
+    return any(provider.startswith(f"{base}-mcp-") for base in SUPPORTED)
+
+
 def profile_id(provider: str, names: list[str]) -> str:
     return f"{provider}-mcp-{SEP.join(sorted(names))}"
 

@@ -112,11 +112,39 @@ Go, Z.ai, and DeepSeek, and Google tool calls followed by a later completed
 response. Google free-tier multi-step runs need pacing. OpenAI API spending
 and Anthropic API balance were independently blocked; their vendor monthly
 pools are separate. Zen free rejected its free quota. OpenRouter's tested
-shared free models did not establish a reliable task loop. Venice spending
-is deliberately disabled; ClinePass automatic spending remains reserved for
-Hermes/Hindsight (manual Pi exception below).
+shared free models did not establish a reliable task loop. ClinePass automatic
+spending remains reserved for Hermes/Hindsight (manual Pi exception below).
 These observations are dated acceptance results, not universal entitlement
 or billing guarantees. Runtime profiles require their own smoke checks.
+
+## Venice.ai and Reality Fabricator manual access (2026-11-25)
+
+Both providers require an explicit operator request for the task. From a
+durable ADE checkout, pass the extension and the model for that launch:
+
+```sh
+pi -e ~/src/djbclark-ade/pi-extensions/venice/index.mjs --provider venice --model openai-gpt-62-sol
+pi -e ~/src/djbclark-ade/pi-extensions/rfab/index.mjs --provider rfab --model openai:gpt-6.2-sol
+```
+
+A new Pi session without the extension flag unloads the provider. Leave both
+extensions out of the shared settings and default model lists. Pi resolves
+`VENICE_API_KEY` or `RFAB_API_KEY` through `sudo-secretspec` for the request.
+Any quota or payment refusal comes from the provider. Venice reported
+`canConsume: false` in the operator's 2026-11-25 balance check.
+
+The Venice shortlist uses the provider's live text/tool model catalog and base
+USD prices per million tokens. Venice can charge a higher rate for extended
+context. RFab publishes relative billing multipliers and tool capabilities.
+Its Pi rows use a conservative 65,536-token window, 16,384-token output ceiling,
+text input, and zero cost fields as placeholders. The API also caps input at
+400,000 characters. Actual charges follow provider usage and the RFab rate
+multiplier. RFab returns buffered chat completions, so Pi receives text and
+tool calls together when the response completes.
+
+ADE lists both pools in its policy and always excludes them from automatic
+routing, including `ade/auto`. See the [media API reference](rfab-api.md)
+for RFab art and MCP usage.
 
 ## ClinePass emergency manual access (2026-11-15)
 
