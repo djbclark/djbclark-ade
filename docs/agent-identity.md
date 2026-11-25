@@ -8,12 +8,12 @@ not just a nickname.
 
 Always give:
 
-- **agent id** — the full Paseo id (UUID, never a bare short ID such as `5023c6fe`) or the session id of the agent.
+- **agent id** — for Paseo agents, **both the 7-char tab-tooltip prefix and full UUID** formatted as `<7-char> (<full-UUID>)` (e.g. `86df0a5 (86df0a5f-33ea-4365-999c-74ab63cc173a)`, operator ruling 2026-11-25; never a bare short ID alone), or the session id of a non-Paseo agent.
 - **workspace ID** (`wks_…`, added by operator ruling 2026-11-23 for Paseo agents) and **workspace name** — Paseo `workspace ls` `name`, or the herdr workspace `label`.
 
 Then give the placement fields for the harness the agent actually runs in:
 
-- A **Paseo** agent (a Paseo GUI/window agent): **full agent ID, workspace ID (`wks_…`), window name** (its workspace name), and **tab name** (operator ruling 2026-11-23; see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
+- A **Paseo** agent (a Paseo GUI/window agent): **7-char tab-tooltip prefix + full agent ID** (`<7-char> (<full-UUID>)`), **workspace ID (`wks_…`), window name** (its workspace name), and **tab name** (operator rulings 2026-11-23, 2026-11-25; see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
 - A **herdr** terminal agent (Claude Code in a herdr pane): the herdr workspace label, the tab label, and the pane id.
 
 A field that does not apply or cannot be resolved is written `?`, never invented
