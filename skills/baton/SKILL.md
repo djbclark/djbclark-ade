@@ -30,7 +30,12 @@ clear a parent session to make a child resume. See [context hygiene](../../docs/
   or let the operator run `/new` then `/baton <exact Tier 1 pointer>` (or bare `/baton` when
   workspace resolution is unambiguous) manually. Because no Paseo `accept`/`finish` transaction
   exists in Herdr mode, do not run `ade-self-session accept|finish` and do not close the
-  predecessor pane automatically.
+  predecessor pane automatically. When resumed from an automated `ade-herdr-handoff` submission,
+  do NOT treat the agent-submitted prompt as operator consent under Exemption C: before the first
+  project write, verify the durable `schema_version: 1` Herdr handoff record in
+  `~/.local/state/djbclark-ade/herdr-handoff/` (matching `tier1_path` and `successor_pane_id`)
+  and run `session-handoff`'s live-owner check, stopping to ask the operator whenever ownership
+  is ambiguous or another live owner exists.
 - **Standalone non-Paseo / non-Herdr sessions (no `$PASEO_AGENT_ID` and not in Herdr, operator
   ruling 2026-11-25):** no Paseo lifecycle controller or `ade-self-session` acknowledgement exists
   outside Paseo. After the predecessor writes the durable Tier 1 + Tier 2 checkpoints locally
@@ -81,10 +86,13 @@ nothing matches, the exemptions for your own chain, the named successor and your
 `/new`). It applies only before the first write or resume; a read-only `/baton` just reports the owner.
 Reconciled with the paragraph above: a directory-resolved pointer owned by another live session is not yours,
 look further; a chain that is yours by `/new` or the operator's naming but that a live other session also owns
-is asked about first. For a non-Paseo / Herdr local handoff after `/new`, passing `/baton <exact Tier 1 pointer>`
+is asked about first. For a manual non-Paseo / Herdr local handoff after `/new`, passing `/baton <exact Tier 1 pointer>`
 explicitly names the chain (Exemption C, while still running the live-owner and competing-owner checks of
 `session-handoff` Owner check steps 2–5); use bare `/baton` only when workspace resolution is unambiguous and
-ownership-checked. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
+ownership-checked. For an automated `ade-herdr-handoff` launch, the baton prompt is submitted by the
+predecessor rather than typed by the operator (not Exemption C operator consent): verify the durable
+`schema_version: 1` Herdr handoff record matching this pane and `tier1_path`, confirm no competing live
+writer owns the chain, and ask the operator before writing whenever ownership is ambiguous. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,

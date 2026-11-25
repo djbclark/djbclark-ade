@@ -1,6 +1,6 @@
 ### Added
 
-- Added `bin/ade-herdr-handoff` (`bin/ade_herdr_handoff.py`, linked into `~/.local/bin` via `bin/ade-update` `BIN_LINKS`) to restore automated Herdr self-handoff for genuinely Herdr-hosted sessions outside Paseo (Carried #122 Phase 2): enforces strict Paseo-wins / live `herdr pane current --current` caller verification, fail-closed preflight before layout mutation, per-pane `flock` serialization, durable `schema_version: 1` (`0600`) records and checkpoint preservation, single-submit `/baton` (Claude) or `$baton` (Codex) launch in a new tab without closing the predecessor pane or blind-retrying, plus `--dry-run` and `--status` (#999).
+- Added `bin/ade-herdr-handoff` (`bin/ade_herdr_handoff.py`, linked into `~/.local/bin` via `bin/ade-update` `BIN_LINKS`) to restore automated Herdr self-handoff for genuinely Herdr-hosted sessions outside Paseo (Carried #122 Phase 2): enforces strict Paseo-wins, exact `herdr pane current --current`, and OS ancestor process-tree verification via `herdr pane process-info --pane <id>`, fail-closed preflight (including symlink-refusing checkpoint reads and per-kind `--effort` validation) before layout mutation, per-pane advisory `flock` with atomic sibling metadata, durable `schema_version: 1` (`0600`) records and checkpoint preservation, single non-waiting `/baton` (Claude) or `$baton` (Codex) submission in a new tab without closing the predecessor pane or blind-retrying, plus `--dry-run` and `--status` (#999).
 
 ### Changed
 

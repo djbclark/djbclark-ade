@@ -1,30 +1,35 @@
 """Automated Herdr self-handoff for non-Paseo sessions running inside a Herdr pane.
 
 Carried #122 Phase 2 (2026-11-25): restores safe, deterministic Herdr tab/pane
-succession using the current Herdr JSON CLI (`herdr pane current --current`,
-`herdr tab create`, `herdr agent start`, `herdr agent prompt`).
+succession using the current Herdr v0.9.5 JSON CLI (`herdr pane current --current`,
+`herdr pane process-info --pane <id>`, `herdr tab create`, `herdr agent start`,
+`herdr agent prompt`).
 
 Safety invariants:
 - `PASEO_AGENT_ID` (non-blank) ALWAYS wins as Paseo mode: refuses immediately so
   Paseo-hosted sessions use `bin/ade-self-session handoff`.
 - Outside Paseo, verifies genuine Herdr hosting: `HERDR_ENV=1`, non-blank
-  `HERDR_PANE_ID`, and live `herdr pane current --current` confirming the calling
-  pane (never trusting inherited `HERDR_ENV=1` alone).
-- Fail-closed preflight validates checkpoint, Tier 1 path, cwd, git HEAD, kind,
-  model, effort, mode, agent name, and per-pane lock BEFORE mutating Herdr layout.
+  `HERDR_PANE_ID`, live `herdr pane current --current` returning exact `pane_id == HERDR_PANE_ID`,
+  AND `herdr pane process-info --pane <id>` returning `shell_pid > 1` that is a real OS ancestor
+  PID of this process (never trusting inherited `HERDR_ENV=1` or `HERDR_PANE_ID` alone).
+- Fail-closed preflight validates checkpoint (absolute regular UTF-8 file, symlinks refused),
+  Tier 1 path, cwd, git HEAD, kind, model, per-kind effort, mode, agent name, and per-pane
+  advisory lock BEFORE mutating Herdr layout.
 - Launches a real interactive TUI (`claude` or `codex`) in a new tab of the same
   workspace and submits the baton prompt ONCE (`/baton <tier1>` for Claude,
-  `$baton <tier1>` for Codex). Never uses `pane run` / raw `send-keys` for
-  prompting and never blind-retries on `agent_not_ready`, `agent_blocked`,
-  `agent_prompt_stalled`, or timeout.
+  `$baton <tier1>` for Codex) without `--timeout` on `herdr agent prompt` (Herdr v0.9.5
+  rejects `--timeout` unless `--wait` is passed; `--prompt-timeout` bounds Python's
+  subprocess timeout). Never uses `pane run` / raw `send-keys` for prompting and never
+  blind-retries on `agent_not_ready`, `agent_blocked`, `agent_prompt_stalled`, or unknown outcomes.
 - Preserves the predecessor pane (never closes, kills, or exits it).
 - Persists a durable `schema_version: 1` JSON record (`0o600`, atomic write) and
-  secret-scrubs all error messages and stderr tails.
+  secret-scrubs full stderr BEFORE clipping.
 """
 from __future__ import annotations
 
 import contextlib
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -54,17 +59,27 @@ CLAUDE_PERMISSION_MODES = (
 )
 DEFAULT_CLAUDE_MODE = "bypassPermissions"
 
+# Verified per-client effort values (2026-11-25):
+# - claude: live `claude --help` and `bin/route_agent.py` CLAUDE_EFFORT_LEVELS
+# - codex: `model_reasoning_effort` enum (codex-cli)
+EFFORT_LEVELS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "claude": ("low", "medium", "high", "xhigh", "max"),
+    "codex": ("none", "minimal", "low", "medium", "high", "xhigh"),
+}
+
 MAX_CHECKPOINT_BYTES = 1024 * 1024
 MAX_RECORD_BYTES = 256 * 1024
+MAX_LOCK_META_BYTES = 8 * 1024
 DEFAULT_START_TIMEOUT_MS = 60_000
 DEFAULT_PROMPT_TIMEOUT_MS = 30_000
 MIN_TIMEOUT_MS = 1_000
 MAX_TIMEOUT_MS = 300_000
 PROBE_TIMEOUT_S = 15.0
+MAX_ANCESTOR_DEPTH = 64
 
 TAIL_LIMIT = 512
 MESSAGE_LIMIT = 300
-STDERR_CAP = 64 * 1024
+MAX_SCRUB_BYTES = 1024 * 1024
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 
 # Strict identifier validators (matching skills/herdr/SKILL.md and ade_self_session.py)
@@ -73,7 +88,6 @@ WORKSPACE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
 TAB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
 AGENT_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@\[\]-]{0,127}")
-EFFORT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
 TITLE_LIMIT = 80
 
 # Secret redaction (mirrors bin/ade_self_session.py)
@@ -159,15 +173,28 @@ def default_state_dir(env: dict[str, str] | None = None) -> Path:
     return Path.home() / DEFAULT_STATE_REL
 
 
+def scrub_secrets(text: Any) -> str:
+    """Printable, secret-scrubbed string over the full buffer (up to MAX_SCRUB_BYTES from the start)."""
+    raw_full = str(text or "")
+    # Never slice off a leading prefix before scrubbing: if an input exceeds MAX_SCRUB_BYTES,
+    # scrub from the start so every leading `keyword=` / `Bearer ` / URL userinfo prefix stays intact.
+    if len(raw_full) > MAX_SCRUB_BYTES:
+        raw_full = raw_full[:MAX_SCRUB_BYTES]
+    cleaned = "".join(c if c.isprintable() or c in "\n\t" else "?" for c in raw_full)
+    cleaned = _URL_USERINFO.sub(lambda m: m.group(1) + "[redacted]@", cleaned)
+    cleaned = _BARE_TOKEN.sub("[redacted]", cleaned)
+    cleaned = _COOKIE.sub(lambda m: m.group(1) + "[redacted]", cleaned)
+    cleaned = _BEARER.sub(lambda m: m.group(1) + "[redacted]", cleaned)
+    cleaned = _SECRETISH.sub(lambda m: m.group(1) + "[redacted]", cleaned)
+    return cleaned.strip()
+
+
 def bounded(text: Any, limit: int) -> str:
-    """Printable, secret-scrubbed tail of text, at most `limit` characters."""
-    raw = "".join(c if c.isprintable() or c in "\n\t" else "?" for c in str(text or "")[-STDERR_CAP:])
-    raw = _URL_USERINFO.sub(lambda m: m.group(1) + "[redacted]@", raw)
-    raw = _BARE_TOKEN.sub("[redacted]", raw)
-    raw = _COOKIE.sub(lambda m: m.group(1) + "[redacted]", raw)
-    raw = _BEARER.sub(lambda m: m.group(1) + "[redacted]", raw)
-    raw = _SECRETISH.sub(lambda m: m.group(1) + "[redacted]", raw).strip()
-    return raw if len(raw) <= limit else "..." + raw[-(limit - 3) :]
+    """Scrub secrets FIRST, then clip to at most `limit` characters."""
+    cleaned = scrub_secrets(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)] + "..."
 
 
 def valid_code(code: str) -> bool:
@@ -224,6 +251,12 @@ def read_regular(path: Path, limit: int, *, nofollow: bool = False) -> bytes:
     try:
         fd = os.open(path, flags)
     except OSError as exc:
+        if nofollow and exc.errno == errno.ELOOP:
+            raise HerdrHandoffError(
+                f"symlink refused: {path}",
+                code="symlink_refused",
+                exit_code=EXIT_USAGE,
+            ) from None
         raise HerdrHandoffError(
             f"cannot open file {path}: {exc.strerror or type(exc).__name__}",
             code="file_unreadable",
@@ -308,12 +341,13 @@ def validate_model(model: str | None) -> str | None:
     return model
 
 
-def validate_effort(effort: str | None) -> str | None:
+def validate_effort(kind: str, effort: str | None) -> str | None:
     if effort is None:
         return None
-    if not isinstance(effort, str) or EFFORT_RE.fullmatch(effort) is None:
+    allowed = EFFORT_LEVELS_BY_KIND.get(kind, ())
+    if not isinstance(effort, str) or effort not in allowed:
         raise HerdrHandoffError(
-            "invalid --effort: letters, digits, _ . - (1-32 chars) required",
+            f"invalid --effort {effort!r} for --kind {kind}; expected one of: {', '.join(allowed)}",
             code="invalid_effort",
             exit_code=EXIT_USAGE,
         )
@@ -385,7 +419,7 @@ def validate_checkpoint(path: Path) -> tuple[str, bytes, str]:
             code="invalid_checkpoint",
             exit_code=EXIT_USAGE,
         )
-    data = read_regular(path, MAX_CHECKPOINT_BYTES)
+    data = read_regular(path, MAX_CHECKPOINT_BYTES, nofollow=True)
     if not data.strip():
         raise HerdrHandoffError("--checkpoint must be non-empty", code="invalid_checkpoint", exit_code=EXIT_USAGE)
     try:
@@ -448,8 +482,8 @@ def build_baton_prompt(kind: str, tier1_path: str) -> str:
     return f"/baton {tier1_path}"
 
 
-def _safe_lock_name(pane_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", pane_id) + ".lock"
+def _safe_lock_stem(pane_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", pane_id)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -464,6 +498,53 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _parent_pid(pid: int) -> int | None:
+    """Return OS parent PID for `pid` on macOS or Linux, or None when unavailable."""
+    if not isinstance(pid, int) or pid <= 1:
+        return None
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.is_file():
+        try:
+            text = proc_stat.read_text(encoding="utf-8", errors="replace")
+            rparen = text.rfind(")")
+            if rparen >= 0:
+                fields = text[rparen + 2 :].split()
+                if len(fields) >= 2 and fields[1].isdigit():
+                    return int(fields[1])
+        except OSError:
+            pass
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    val = (proc.stdout or "").strip()
+    return int(val) if val.isdigit() else None
+
+
+def caller_ancestor_pids(start_pid: int | None = None) -> set[int]:
+    """Walk the real OS ancestor chain starting at `start_pid` (default `os.getpid()`), excluding PID <= 1."""
+    pid = os.getpid() if start_pid is None else start_pid
+    ancestors: set[int] = set()
+    cur = pid
+    for _ in range(MAX_ANCESTOR_DEPTH):
+        if not isinstance(cur, int) or cur <= 1 or cur in ancestors:
+            break
+        ancestors.add(cur)
+        nxt = _parent_pid(cur)
+        if nxt is None or nxt <= 1 or nxt == cur:
+            break
+        cur = nxt
+    return ancestors
 
 
 def _git_entry_above(cwd: str) -> bool:
@@ -482,16 +563,21 @@ class HerdrHandoffService:
         herdr_bin: str | None = None,
         runner: Any = None,
         progress: Any = None,
+        ancestor_pids_fn: Any = None,
     ) -> None:
         self.env = dict(os.environ if env is None else env)
         self.state_dir = (state_dir or default_state_dir(self.env)).resolve()
         self.herdr_bin_override = herdr_bin or (self.env.get(HERDR_BIN_ENV) or "").strip() or None
         self.runner = runner or subprocess.run
         self.progress = progress or (lambda msg: None)
+        self.ancestor_pids_fn = ancestor_pids_fn or caller_ancestor_pids
 
     def resolve_herdr_bin(self) -> str:
         if self.herdr_bin_override:
-            cand = Path(os.path.expanduser(self.herdr_bin_override))
+            expanded = os.path.expanduser(self.herdr_bin_override)
+            # Always resolve an explicit override to an absolute path so relative paths like
+            # `./herdr` never normalize to a slashless name that subprocess resolves via PATH.
+            cand = Path(os.path.abspath(expanded))
             if cand.is_file() and os.access(cand, os.X_OK):
                 return str(cand)
             raise HerdrHandoffError(
@@ -506,7 +592,7 @@ class HerdrHandoffService:
                 code="herdr_not_found",
                 exit_code=EXIT_ERROR,
             )
-        return found
+        return os.path.abspath(found)
 
     def check_caller_env(self) -> str:
         """Enforce skills/herdr/SKILL.md ADE rule 1: PASEO_AGENT_ID always wins; require HERDR_ENV=1 + HERDR_PANE_ID."""
@@ -569,8 +655,10 @@ class HerdrHandoffService:
             ) from None
 
         stdout = proc.stdout or ""
-        stderr = (proc.stderr or "")[-STDERR_CAP:]
-        tail = bounded(stderr, TAIL_LIMIT)
+        raw_stderr = proc.stderr or ""
+        # Scrub full stderr BEFORE clipping so a secret whose identifying prefix sits near the
+        # start of stderr is redacted before truncation.
+        tail = bounded(raw_stderr, TAIL_LIMIT)
         if len(stdout) > MAX_STDOUT_BYTES:
             raise HerdrCommandError(
                 f"herdr {op} returned an oversized response",
@@ -582,7 +670,7 @@ class HerdrHandoffService:
                 outcome="unknown",
             )
         if proc.returncode != 0:
-            envelope = parse_error_envelope(stderr, stdout)
+            envelope = parse_error_envelope(raw_stderr, stdout)
             if envelope is None:
                 raise HerdrCommandError(
                     f"herdr {op} failed (rc {proc.returncode}) with no JSON error envelope",
@@ -608,27 +696,28 @@ class HerdrHandoffService:
         try:
             payload = json.loads(stdout)
         except ValueError:
+            # Never persist raw unstructured stdout; keep fixed safe diagnostic + scrubbed stderr.
             raise HerdrCommandError(
                 f"herdr {op} returned non-JSON stdout",
                 op=op,
-                herdr_code=None,
-                herdr_message=None,
+                herdr_code="UNPARSEABLE_OUTPUT",
+                herdr_message=f"herdr {op} returned non-JSON stdout",
                 rc=proc.returncode,
-                stderr_tail=tail or bounded(stdout, TAIL_LIMIT),
+                stderr_tail=tail,
                 outcome="unknown",
             ) from None
         if not isinstance(payload, dict):
             raise HerdrCommandError(
                 f"herdr {op} returned unexpected JSON type",
                 op=op,
-                herdr_code=None,
-                herdr_message=None,
+                herdr_code="UNEXPECTED_JSON_TYPE",
+                herdr_message=f"herdr {op} returned unexpected JSON type",
                 rc=proc.returncode,
                 stderr_tail=tail,
                 outcome="unknown",
             )
         if payload.get("error"):
-            envelope = parse_error_envelope(stdout, stderr)
+            envelope = parse_error_envelope(stdout, raw_stderr)
             code, msg = envelope if envelope is not None else (None, None)
             detail = ": ".join(x for x in (code, msg) if x)
             raise HerdrCommandError(
@@ -643,7 +732,9 @@ class HerdrHandoffService:
         return payload
 
     def verify_current_pane(self, herdr_bin: str, env_pane_id: str) -> dict[str, Any]:
-        """Run `herdr pane current --current` and confirm this process genuinely lives in that pane."""
+        """Confirm `herdr pane current --current` matches HERDR_PANE_ID AND prove caller process-tree
+        membership via `herdr pane process-info --pane <id>` (`shell_pid` in OS ancestor chain).
+        """
         try:
             payload = self.run_herdr(herdr_bin, ["pane", "current", "--current"], timeout_s=PROBE_TIMEOUT_S)
         except HerdrCommandError as exc:
@@ -664,7 +755,6 @@ class HerdrHandoffService:
         pane = result.get("pane") if isinstance(result.get("pane"), dict) else result
         live_pane_id = pane.get("pane_id")
         workspace_id = pane.get("workspace_id")
-        previous_pane_id = pane.get("previous_pane_id")
         tab_id = pane.get("tab_id")
 
         if not isinstance(live_pane_id, str) or PANE_ID_RE.fullmatch(live_pane_id) is None:
@@ -679,17 +769,71 @@ class HerdrHandoffService:
                 code="herdr_pane_unconfirmed",
                 exit_code=EXIT_REFUSED,
             )
-        if live_pane_id != env_pane_id and previous_pane_id != env_pane_id:
+        if live_pane_id != env_pane_id:
             raise HerdrHandoffError(
                 f"herdr pane current --current returned pane {live_pane_id!r}, which does not match "
                 f"HERDR_PANE_ID={env_pane_id!r}; refusing to act on another pane",
                 code="pane_mismatch",
                 exit_code=EXIT_REFUSED,
             )
+
+        # Independent process-tree verification (skills/herdr/SKILL.md ADE rule 1):
+        # `herdr pane current --current` resolves inherited HERDR_PANE_ID without checking caller
+        # ancestry. Query `herdr pane process-info --pane <live_pane_id>` and verify the pane's
+        # `shell_pid` (> 1) sits in this process's real OS ancestor PID chain.
+        try:
+            proc_payload = self.run_herdr(
+                herdr_bin, ["pane", "process-info", "--pane", live_pane_id], timeout_s=PROBE_TIMEOUT_S
+            )
+        except HerdrCommandError as exc:
+            raise HerdrHandoffError(
+                f"could not verify caller process tree via `herdr pane process-info --pane {live_pane_id}`: {exc}",
+                code="caller_not_in_pane",
+                exit_code=EXIT_REFUSED,
+                detail=exc.info,
+            ) from None
+
+        proc_result = proc_payload.get("result")
+        if not isinstance(proc_result, dict):
+            raise HerdrHandoffError(
+                "herdr pane process-info returned no result object; cannot prove caller belongs to pane",
+                code="caller_not_in_pane",
+                exit_code=EXIT_REFUSED,
+            )
+        proc_info = (
+            proc_result.get("process_info")
+            if isinstance(proc_result.get("process_info"), dict)
+            else proc_result
+        )
+        proc_pane_id = proc_info.get("pane_id")
+        shell_pid = proc_info.get("shell_pid")
+        if proc_pane_id != live_pane_id:
+            raise HerdrHandoffError(
+                f"herdr pane process-info returned pane_id {proc_pane_id!r} (expected {live_pane_id!r})",
+                code="caller_not_in_pane",
+                exit_code=EXIT_REFUSED,
+            )
+        if not isinstance(shell_pid, int) or isinstance(shell_pid, bool) or shell_pid <= 1:
+            raise HerdrHandoffError(
+                f"herdr pane process-info returned unusable shell_pid ({shell_pid!r}); "
+                "cannot prove caller belongs to this Herdr pane",
+                code="caller_not_in_pane",
+                exit_code=EXIT_REFUSED,
+            )
+        ancestors = self.ancestor_pids_fn()
+        if shell_pid not in ancestors:
+            raise HerdrHandoffError(
+                f"caller process is not a descendant of Herdr pane {live_pane_id} shell_pid={shell_pid}; "
+                "HERDR_PANE_ID appears inherited from another pane — refusing to mutate Herdr layout",
+                code="caller_not_in_pane",
+                exit_code=EXIT_REFUSED,
+            )
+
         return {
             "pane_id": live_pane_id,
             "workspace_id": workspace_id,
             "tab_id": tab_id if isinstance(tab_id, str) and TAB_ID_RE.fullmatch(tab_id) else None,
+            "shell_pid": shell_pid,
             "agent": pane.get("agent") if isinstance(pane.get("agent"), str) else None,
         }
 
@@ -728,12 +872,27 @@ class HerdrHandoffService:
             exit_code=EXIT_ERROR,
         )
 
+    @staticmethod
+    def _read_lock_meta(meta_path: Path) -> dict[str, Any] | None:
+        if not meta_path.exists():
+            return None
+        try:
+            raw = read_regular(meta_path, MAX_LOCK_META_BYTES, nofollow=True)
+            data = json.loads(raw.decode("utf-8"))
+            return data if isinstance(data, dict) else None
+        except (HerdrHandoffError, UnicodeDecodeError, ValueError, OSError):
+            return None
+
     @contextlib.contextmanager
     def pane_lock(self, pane_id: str):
-        """Acquire a non-blocking per-pane flock; detects and recovers stale lock metadata cleanly."""
+        """Acquire a non-blocking per-pane flock on an untouched lock inode; publish diagnostic
+        metadata atomically in a sibling `.meta.json` file (Rule 6).
+        """
         locks_dir = self.state_dir / "locks"
         locks_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        lock_path = locks_dir / _safe_lock_name(pane_id)
+        stem = _safe_lock_stem(pane_id)
+        lock_path = locks_dir / (stem + ".lock")
+        meta_path = locks_dir / (stem + ".meta.json")
         flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         try:
             fd = os.open(lock_path, flags, 0o600)
@@ -756,39 +915,32 @@ class HerdrHandoffService:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 holder = ""
-                try:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
-                    if raw:
-                        holder = f" ({bounded(raw, 120)})"
-                except OSError:
-                    pass
+                prev = self._read_lock_meta(meta_path)
+                if prev is not None:
+                    holder = f" (pid={prev.get('pid')}, acquired_at={prev.get('acquired_at')})"
                 raise HerdrHandoffError(
                     f"another Herdr handoff is already in progress for pane {pane_id}{holder}; refusing duplicate launch",
                     code="handoff_in_progress",
                     exit_code=EXIT_REFUSED,
                 ) from None
 
-            # Lock acquired. Check whether leftover metadata from a dead/previous run existed.
-            try:
-                os.lseek(fd, 0, os.SEEK_SET)
-                prev_raw = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
-                if prev_raw:
-                    prev_meta = json.loads(prev_raw)
-                    prev_pid = prev_meta.get("pid") if isinstance(prev_meta, dict) else None
-                    if isinstance(prev_pid, int) and prev_pid != os.getpid() and not _pid_alive(prev_pid):
-                        stale_recovered = True
-            except (OSError, ValueError):
+            # Advisory flock acquired on untouched lock inode. Check sibling metadata for dead-PID recovery.
+            prev = self._read_lock_meta(meta_path)
+            if prev is not None:
+                prev_pid = prev.get("pid")
+                if isinstance(prev_pid, int) and prev_pid != os.getpid() and not _pid_alive(prev_pid):
+                    stale_recovered = True
+            elif meta_path.exists():
                 stale_recovered = True
 
-            meta = json.dumps(
-                {"pid": os.getpid(), "pane_id": pane_id, "acquired_at": _utc_now()},
-                sort_keys=True,
-            ).encode("utf-8") + b"\n"
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, meta)
-            os.fsync(fd)
+            meta_bytes = (
+                json.dumps(
+                    {"pid": os.getpid(), "pane_id": pane_id, "acquired_at": _utc_now()},
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            write_atomic(meta_path, meta_bytes, mode=0o600)
             yield stale_recovered
         finally:
             try:
@@ -840,7 +992,7 @@ class HerdrHandoffService:
         # 2. Validate all arguments BEFORE touching Herdr layout
         kind = validate_kind(kind)
         model = validate_model(model)
-        effort = validate_effort(effort)
+        effort = validate_effort(kind, effort)
         mode = validate_mode(kind, mode)
         start_timeout_ms = validate_timeout_ms(start_timeout_ms, flag="--start-timeout")
         prompt_timeout_ms = validate_timeout_ms(prompt_timeout_ms, flag="--prompt-timeout")
@@ -855,12 +1007,13 @@ class HerdrHandoffService:
         native_args = build_native_args(kind, model=model, effort=effort, mode=mode)
         baton_prompt = build_baton_prompt(kind, tier1_abs)
 
-        # 3. Verify live Herdr binary and calling pane via `herdr pane current --current`
+        # 3. Verify live Herdr binary, calling pane, and independent process-tree ancestry
         herdr_bin = self.resolve_herdr_bin()
         current_pane = self.verify_current_pane(herdr_bin, env_pane_id)
         pred_pane_id = current_pane["pane_id"]
         workspace_id = current_pane["workspace_id"]
         pred_tab_id = current_pane.get("tab_id")
+        pred_shell_pid = current_pane["shell_pid"]
 
         focus_flag = "--focus" if focus else "--no-focus"
         tab_create_args = [
@@ -874,6 +1027,15 @@ class HerdrHandoffService:
             tab_label,
             focus_flag,
         ]
+        # Herdr v0.9.5 rejects `--timeout` on `herdr agent prompt` unless `--wait` is also passed.
+        # Single non-waiting submission omits `--timeout` from Herdr argv and enforces
+        # `--prompt-timeout` via Python's subprocess timeout instead.
+        prompt_args = [
+            "agent",
+            "prompt",
+            agent_name,
+            baton_prompt,
+        ]
 
         if dry_run:
             return {
@@ -883,6 +1045,7 @@ class HerdrHandoffService:
                 "status": "dry-run",
                 "predecessor_pane_id": pred_pane_id,
                 "predecessor_tab_id": pred_tab_id,
+                "predecessor_shell_pid": pred_shell_pid,
                 "workspace_id": workspace_id,
                 "cwd": cwd_abs,
                 "head": head,
@@ -915,15 +1078,7 @@ class HerdrHandoffService:
                         "--",
                         *native_args,
                     ],
-                    "agent_prompt": [
-                        herdr_bin,
-                        "agent",
-                        "prompt",
-                        agent_name,
-                        baton_prompt,
-                        "--timeout",
-                        str(prompt_timeout_ms),
-                    ],
+                    "agent_prompt": [herdr_bin, *prompt_args],
                 },
             }
 
@@ -942,6 +1097,7 @@ class HerdrHandoffService:
                 "status": "launching",
                 "predecessor_pane_id": pred_pane_id,
                 "predecessor_tab_id": pred_tab_id,
+                "predecessor_shell_pid": pred_shell_pid,
                 "workspace_id": workspace_id,
                 "cwd": cwd_abs,
                 "head": head,
@@ -1033,19 +1189,12 @@ class HerdrHandoffService:
             except HerdrHandoffError as exc:
                 return fail_record("agent_start", exc)
 
-            # Step 3: Submit baton prompt ONCE (never blind-retry, never raw send-keys / pane run)
-            prompt_args = [
-                "agent",
-                "prompt",
-                agent_name,
-                baton_prompt,
-                "--timeout",
-                str(prompt_timeout_ms),
-            ]
+            # Step 3: Submit baton prompt ONCE (no `--timeout` flag on non-waiting Herdr prompt;
+            # never blind-retry, never raw send-keys / pane run)
             try:
-                self.run_herdr(herdr_bin, prompt_args, timeout_s=(prompt_timeout_ms / 1000.0) + 15.0)
+                self.run_herdr(herdr_bin, prompt_args, timeout_s=prompt_timeout_ms / 1000.0)
             except HerdrCommandError as exc:
-                uncertain = exc.herdr_code in ("agent_prompt_stalled", "TIMEOUT", None)
+                uncertain = (exc.outcome == "unknown") or (exc.herdr_code == "agent_prompt_stalled")
                 return fail_record("agent_prompt", exc, prompt_uncertain=uncertain)
             except HerdrHandoffError as exc:
                 return fail_record("agent_prompt", exc, prompt_uncertain=True)

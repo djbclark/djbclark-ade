@@ -342,15 +342,20 @@ after completing Steps 0–7 locally (skipping Step 8), run:
 ~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint ABSOLUTE_TIER2_PATH --tier1 EXACT_TIER1_POINTER [--kind claude|codex] [--model MODEL] [--effort LEVEL] [--title TEXT]
 ```
 
-`ade-herdr-handoff` refuses if `$PASEO_AGENT_ID` is set (Paseo always wins), verifies the live pane
-via `herdr pane current --current`, validates all flags and checkpoint/Tier 1 files before mutating
-Herdr layout, acquires a per-pane lockfile, opens a new tab in the same Herdr workspace, starts a
-real interactive TUI (`claude` with `--permission-mode bypassPermissions` or `codex` with
+`ade-herdr-handoff` refuses if `$PASEO_AGENT_ID` is set (Paseo always wins), verifies exact
+`herdr pane current --current` plus OS ancestor process-tree membership via
+`herdr pane process-info --pane <id>`, validates all flags (including per-kind `--effort`) and
+checkpoint (symlinks refused) / Tier 1 files before mutating Herdr layout, acquires a per-pane
+advisory `flock`, opens a new tab in the same Herdr workspace, starts a real interactive TUI
+(`claude` with `--permission-mode bypassPermissions` or `codex` with
 `--dangerously-bypass-approvals-and-sandbox`), submits `/baton <tier1>` (Claude) or `$baton <tier1>`
-(Codex) once via `herdr agent prompt`, writes a `schema_version: 1` JSON record (`0600`) under
-`~/.local/state/djbclark-ade/herdr-handoff/`, and leaves this predecessor pane intact (never closes
-or kills it, and never blind-retries on `agent_not_ready` / `agent_blocked` / `agent_prompt_stalled`;
-see [docs/self-session.md Section H](../../docs/self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25)).
+(Codex) once via non-waiting `herdr agent prompt`, writes a `schema_version: 1` JSON record (`0600`)
+under `~/.local/state/djbclark-ade/herdr-handoff/`, and leaves this predecessor pane intact (never
+closes or kills it, and never blind-retries on `agent_not_ready` / `agent_blocked` /
+`agent_prompt_stalled` / unknown outcomes; the successor establishes resume authority from the
+durable record and `session-handoff` live-owner check rather than treating the submitted prompt as
+operator consent; see
+[docs/self-session.md Section H](../../docs/self-session.md#h-automated-herdr-self-handoff-binade-herdr-handoff-2026-11-25)).
 If the operator prefers manual reset in Herdr (operator ruling 2026-11-25), report the Tier 1/Tier 2
 paths and let them run `/new` + `/baton <exact Tier 1 pointer>` instead.
 

@@ -729,48 +729,70 @@ machine:
 
 ```bash
 ~/src/djbclark-ade/bin/ade-herdr-handoff --checkpoint /abs/path/HANDOFF.md --tier1 /abs/path/SESSION_LOG.md \
-  [--kind claude|codex] [--model MODEL] [--effort LEVEL] [--mode MODE] [--cwd DIR] [--title TEXT] [--dry-run] [--json]
+  [--kind claude|codex] [--model MODEL] [--effort LEVEL] [--mode MODE] [--cwd DIR] \
+  [--title TEXT] [--name NAME] [--focus|--no-focus] [--start-timeout MS] [--prompt-timeout MS] \
+  [--state-dir DIR] [--herdr-bin PATH] [--dry-run] [--json]
 ~/src/djbclark-ade/bin/ade-herdr-handoff --status /abs/path/handoff-ID.json [--json]
 ```
 
-1. **Strict caller detection (`skills/herdr/SKILL.md` ADE rule 1).** Non-blank
-   `PASEO_AGENT_ID` always wins as Paseo mode: `ade-herdr-handoff` refuses (exit `4`,
+1. **Strict caller detection & process-tree verification (`skills/herdr/SKILL.md` ADE rule 1).**
+   Non-blank `PASEO_AGENT_ID` always wins as Paseo mode: `ade-herdr-handoff` refuses (exit `4`,
    `code: "paseo_mode_active"`) without calling `herdr` so Paseo sessions stay on
    `bin/ade-self-session handoff`. Outside Paseo, it requires `HERDR_ENV=1`, a valid
-   `HERDR_PANE_ID`, and live confirmation via `herdr pane current --current` (matching
-   `pane_id` or `previous_pane_id`; never trusting inherited `HERDR_ENV=1` alone).
+   `HERDR_PANE_ID`, live `herdr pane current --current` returning exact `pane_id == HERDR_PANE_ID`
+   (never trusting inherited `HERDR_ENV=1` alone or an unverified mismatched pane), AND
+   independent process-tree verification via `herdr pane process-info --pane <pane_id>` confirming
+   the pane's `shell_pid` (`> 1`) sits in the caller's real OS ancestor PID chain (failing closed
+   with exit `4`, `code: "caller_not_in_pane"` when a stale inherited `HERDR_PANE_ID` belongs to
+   another live pane).
 2. **Fail-closed preflight and per-pane lock.** Before creating any tab or pane, it
-   validates `--kind` (`claude` or `codex`), `--model`, `--effort`, `--mode` (`claude`
-   only, default `bypassPermissions`), `--name` (`[a-z][a-z0-9_-]{0,31}`), `--title`,
-   timeouts, `--checkpoint` (absolute path, regular UTF-8 non-empty file `<= 1 MiB`),
-   `--tier1` (existing regular file, no control characters), `--cwd` (existing directory),
-   and exact `git rev-parse HEAD` (clean `null` when outside any git repository with no
-   `.git` entry above; fail closed on broken `.git` or unborn HEAD). It then acquires a
-   non-blocking per-pane `flock` under
-   `${ADE_HERDR_HANDOFF_STATE:-~/.local/state/djbclark-ade/herdr-handoff}/locks/` (exiting
-   `4` on active contention; recovering stale dead-PID metadata cleanly) and atomically
-   preserves the checkpoint copy (`0o600`) with SHA-256 before mutating Herdr layout.
+   validates `--kind` (`claude` or `codex`), `--model`, `--effort` (validated per kind:
+   `claude`: `low|medium|high|xhigh|max`; `codex`: `none|minimal|low|medium|high|xhigh`),
+   `--mode` (`claude` only, default `bypassPermissions`), `--name` (`[a-z][a-z0-9_-]{0,31}`),
+   `--title`, `--start-timeout` / `--prompt-timeout` (`1000..300000` ms), `--state-dir`
+   (default `$ADE_HERDR_HANDOFF_STATE` or `~/.local/state/djbclark-ade/herdr-handoff`),
+   `--herdr-bin` (default `$ADE_HERDR_BIN` or `PATH`, always resolved to an absolute path),
+   `--checkpoint` (absolute path, regular UTF-8 non-empty file `<= 1 MiB`, symlinks refused
+   via `O_NOFOLLOW`), `--tier1` (existing regular file, no control characters), `--cwd`
+   (existing directory), and exact `git rev-parse HEAD` (clean `null` when outside any git
+   repository with no `.git` entry above; fail closed on broken `.git` or unborn HEAD). It
+   then acquires a non-blocking per-pane advisory `flock` on an untouched `.lock` inode under
+   `<state-dir>/locks/` (recording diagnostic PID/timestamp atomically in a sibling
+   `.meta.json`; exiting `4` on active contention; recovering stale dead-PID metadata cleanly)
+   and atomically preserves the checkpoint copy (`0o600`) with SHA-256 before mutating Herdr
+   layout.
 3. **Deterministic 3-step launch (no blind retry, no raw pane prompting).**
    1. `herdr tab create --workspace <workspace_id> --cwd <cwd> --label <tab_label> --no-focus`
       (or `--focus`), parsing `.result.tab.tab_id` and `.result.root_pane.pane_id` (and
       refusing if `successor_pane_id == predecessor_pane_id`).
-   2. `herdr agent start <name> --kind <kind> --pane <pane_id> --timeout <ms> -- <native-args>`
+   2. `herdr agent start <name> --kind <kind> --pane <pane_id> --timeout <start_timeout_ms> -- <native-args>`
       (`claude`: `--permission-mode bypassPermissions` plus optional `--model` / `--effort`;
       `codex`: `--dangerously-bypass-approvals-and-sandbox` plus optional `-m` / `-c model_reasoning_effort=...`).
-   3. Single prompt submission via `herdr agent prompt <name> "<baton>" --timeout <ms>`,
-      using `/baton <tier1>` for Claude and `$baton <tier1>` for Codex (`skills/baton/SKILL.md`).
+   3. Single non-waiting prompt submission via `herdr agent prompt <name> "<baton>"`
+      (omitting `--timeout` on Herdr argv because Herdr `0.9.5` rejects `--timeout` without
+      `--wait`; `--prompt-timeout` bounds Python's `subprocess.run` operation timeout), using
+      `/baton <tier1>` for Claude and `$baton <tier1>` for Codex (`skills/baton/SKILL.md`).
       Never uses `herdr pane run` or raw `send-keys` for prompting. On `agent_not_ready`,
-      `agent_blocked`, `agent_prompt_stalled`, or timeout, records `status: "failed"`
-      (with `prompt_delivery_uncertain: true` for ambiguous prompt failures) and exits `1`
+      `agent_blocked`, `agent_prompt_stalled`, or any unknown outcome (timeout, oversized or
+      unparseable stdout), records `status: "failed"` (setting `prompt_delivery_uncertain: true`
+      whenever `outcome == "unknown"` or `code == "agent_prompt_stalled"`) and exits `1`
       without retrying.
-4. **Predecessor safety and durable record.** Never closes, kills, or exits the
-   predecessor pane (`predecessor_preserved: true`), matching `skills/herdr/SKILL.md`
-   safety rules. Writes an atomic `0o600` JSON record (`schema_version: 1`) recording
-   `predecessor_pane_id`, `workspace_id`, `successor_tab_id`, `successor_pane_id`,
-   `successor_agent_name`, `checkpoint_path`, `preserved_checkpoint_path`,
-   `checkpoint_sha256`, `tier1_path`, `head`, `status` (`launched` | `failed` | `dry-run`),
-   and secret-scrubbed error details. `--status RECORD` inspects a saved record (`O_NOFOLLOW`,
+4. **Predecessor safety, durable record, and successor baton authority.** Never closes,
+   kills, or exits the predecessor pane (`predecessor_preserved: true`), matching
+   `skills/herdr/SKILL.md` safety rules. Writes an atomic `0o600` JSON record
+   (`schema_version: 1`) recording `predecessor_pane_id`, `predecessor_shell_pid`,
+   `workspace_id`, `successor_tab_id`, `successor_pane_id`, `successor_agent_name`,
+   `checkpoint_path`, `preserved_checkpoint_path`, `checkpoint_sha256`, `tier1_path`,
+   `head`, `status` (`launched` | `failed` | `dry-run`), and error details scrubbed of
+   credentials before clipping. `--status RECORD` inspects a saved record (`O_NOFOLLOW`,
    bounded read) with zero `herdr` calls. `--dry-run` validates preflight and prints planned
-   commands without writing state or mutating Herdr layout.
+   commands without writing state or mutating Herdr layout. **Resume authority:** because
+   `ade-herdr-handoff` submits the baton prompt itself rather than the operator typing it,
+   an agent-submitted `/baton <tier1>` prompt is NOT treated as operator consent under
+   `session-handoff` Exemption C; before its first project write, the Herdr successor verifies
+   the matching `schema_version: 1` record in `<state-dir>` (`status: "launched"`, matching
+   `tier1_path` and `successor_pane_id == $HERDR_PANE_ID`) and runs `session-handoff`'s
+   live-owner check to confirm no other live session is actively writing the chain, stopping
+   to ask the operator whenever ownership is ambiguous or another live owner exists.
 5. **Exit codes.** `0` launched / dry-run / status ok; `1` operational or Herdr error;
-   `2` usage or input validation error; `4` refused by caller/lock guard.
+   `2` usage or input validation error; `4` refused by caller/process-tree/lock guard.
