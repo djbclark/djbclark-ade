@@ -78,10 +78,12 @@ floor) is gone: it told a lead to "hand off" with ~90k of room left. The 80k bou
 about ten tool rounds ahead of the hard tier's own 50k; there a handoff (a fresh session re-writes
 ~46k) beats the compaction that is certain to follow (~72k re-written plus a summariser call, ~104k
 left behind), and earlier than that a handoff only throws away a cache that still has room to pay
-back. The 120k floor stays because compacting at 200k or less simulated a net loss. The boundary
-and hard texts print the computed wall and the tokens left, keep the 2026-11-14 ruling (when handing
-off, do it yourself; never hand the operator a `/new`) and say that a finished task alone is no
-reason to hand off or compact below the boundary tier. The total-based hard tier also covers
+back. The 120k floor stays because compacting at 200k or less simulated a net loss. The boundary and hard texts print the computed wall and the tokens left, keep the 2026-11-14
+ruling in Paseo mode (`PASEO_AGENT_ID` set: when handing off, do it yourself; never hand the
+operator a `/new`), switch to local-handoff guidance when `PASEO_AGENT_ID` is unset/blank
+(non-Paseo / Herdr Claude Code mode, operator ruling 2026-11-25: run `/self-handoff` Steps 0-7
+locally, skip Step 9, let the operator run `/new` + `/baton`), and say that a finished task alone
+is no reason to hand off or compact below the boundary tier. The total-based hard tier also covers
 regrowth after a compaction (floor ~104k). The hook runs under `UserPromptSubmit` and, where the settings
 register it (2026-10-29), `PostToolUse`; its text tells the agent how many tool rounds fit
 before the wall and says it runs on prompt submit and between tool rounds (at most every

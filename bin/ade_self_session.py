@@ -566,7 +566,15 @@ class Service:
                           None, None, rc, bounded(stderr, TAIL_LIMIT)) from None
 
     def actor(self):
-        return ident(self.env.get('PASEO_AGENT_ID', ''))
+        raw = self.env.get('PASEO_AGENT_ID', '')
+        if not isinstance(raw, str) or not raw.strip():
+            raise SessionError(
+                'PASEO_AGENT_ID is unset (a full UUID is required; ade-self-session is Paseo-only). '
+                'For non-Paseo / Herdr Claude Code sessions (operator ruling 2026-11-25), '
+                'write the Tier 1/Tier 2 handoff locally (Steps 0-7), skip Step 9, and let the operator '
+                'run /new + /baton manually'
+            )
+        return ident(raw)
 
     def listed(self, agent):
         # Exactly the listing `agent archive` resolves ids from: no `-a`, which adds includeBackground

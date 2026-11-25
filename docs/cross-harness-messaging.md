@@ -40,6 +40,11 @@ Paseo agent, asking for `ack <your id>`.)
   new one). `paseo send`'s own exit code is never read as delivery.
 - xmsg never writes the reply path. It writes `<path>.status`
   (`xmsg-status: queued`); the ack arrives at `<path>` from the peer.
+- **Practical note (2026-11-25):** a Herdr / non-Paseo Claude session messaging
+  a Paseo lead must send via `bin/xmsg to-paseo` with `--reply-file <path>` (not
+  bare `paseo send` without a reply path) so the Paseo lead can reply atomically
+  via `bin/xmsg ack <path> …` instead of falling back to the operator's
+  clipboard (`clip`).
 
 ## To a local Claude Code session (from a Paseo/Pi agent)
 

@@ -4087,3 +4087,38 @@ def test_pr955_low4_advise_lead_window_guards_resolve_and_unexpected_errors(setu
     assert out['status'] == 'archived'
     assert out['lead_window']['state'] == 'unknown'
     assert 'RuntimeError: boom' in out['lead_window']['reason']
+
+
+@pytest.mark.parametrize('missing', [None, '', '   '])
+def test_q122_missing_paseo_agent_id_gives_non_paseo_local_handoff_hint(setup, missing):
+    """Carried #122 (2026-11-25): unset/blank PASEO_AGENT_ID keeps 'a full UUID is required'
+    and points non-Paseo / Herdr Claude Code sessions to local Steps 0-7 + manual /new + /baton."""
+    service, native, checkpoint = setup
+    if missing is None:
+        service.env.pop('PASEO_AGENT_ID', None)
+    else:
+        service.env['PASEO_AGENT_ID'] = missing
+    with pytest.raises(ss.SessionError) as exc:
+        service.handoff(checkpoint, quiesced=True)
+    msg = str(exc.value)
+    assert 'PASEO_AGENT_ID is unset' in msg
+    assert 'a full UUID is required' in msg
+    assert 'Paseo-only' in msg
+    assert 'Steps 0-7' in msg and 'skip Step 9' in msg and '/new + /baton' in msg
+    assert native.calls == []
+    assert not list(service.state.glob('handoff-*.json'))
+
+    with pytest.raises(ss.SessionError) as exc_compact:
+        service.compact(checkpoint, request_id='c-nonpaseo')
+    assert 'PASEO_AGENT_ID is unset' in str(exc_compact.value)
+    assert '/new + /baton' in str(exc_compact.value)
+
+
+def test_q122_malformed_paseo_agent_id_keeps_strict_ident_error(setup):
+    """Non-empty malformed PASEO_AGENT_ID still raises ident()'s strict 'a full UUID is required'."""
+    service, native, checkpoint = setup
+    service.env['PASEO_AGENT_ID'] = 'not-a-uuid'
+    with pytest.raises(ss.SessionError) as exc:
+        service.handoff(checkpoint, quiesced=True)
+    assert str(exc.value) == 'a full UUID is required'
+    assert native.calls == []

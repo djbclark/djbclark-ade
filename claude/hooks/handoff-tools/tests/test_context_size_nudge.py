@@ -60,7 +60,15 @@ def settings_file(monkeypatch, tmp_path_factory):
 
 @pytest.fixture
 def hook(monkeypatch, tmp_path, capsys):
-    """Run the hook once per call; returns (stdout, pings sent)."""
+    """Run the hook once per call; returns (stdout, pings sent).
+
+    Defaults to Paseo mode (`PASEO_AGENT_ID` set) so existing Paseo-mode tests stay
+    deterministic under GitHub Actions CI where `PASEO_AGENT_ID` is unset; non-Paseo
+    tests explicitly clear/blank `PASEO_AGENT_ID`.
+    """
+    monkeypatch.setenv("PASEO_AGENT_ID", "11111111-1111-4111-8111-111111111111")
+    monkeypatch.delenv("HERDR_ENV", raising=False)
+    monkeypatch.delenv("HERDR_PANE_ID", raising=False)
     monkeypatch.setattr(nudge, "STATE_PATH", tmp_path / "state.json")
     pings = []
     monkeypatch.setattr(
@@ -947,3 +955,97 @@ def test_q98_small_window_successor_above_80k_does_not_re_handoff_until_growth(h
     _append(path, _usage(85_000 + nudge.ASK_MIN_GROWTH))
     out, _ = hook(f"s-q98-{window}", path)
     assert "Context is large" in out and "At the next task completion" in out
+
+
+# --- Carried #122 (2026-11-25): Paseo vs non-Paseo / Herdr Claude Code local-handoff mode ---
+
+
+@pytest.mark.parametrize("env_overrides", [
+    {"PASEO_AGENT_ID": None},
+    {"PASEO_AGENT_ID": ""},
+    {"PASEO_AGENT_ID": "   "},
+    {"PASEO_AGENT_ID": None, "HERDR_ENV": "1", "HERDR_PANE_ID": "w3H:p10"},
+])
+def test_q122_non_paseo_herdr_mode_all_four_messages_and_pings(hook, tmp_path, monkeypatch, env_overrides):
+    """Operator ruling 2026-11-25: without PASEO_AGENT_ID, direct local /self-handoff Steps 0-7,
+    skip Step 9, and manual /new + /baton across boundary, ask, ask_repeat, and post_compact_handoff_due."""
+    for key, val in env_overrides.items():
+        if val is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, val)
+    assert nudge._in_paseo() is False
+
+    # 1. boundary
+    path = _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL, name="nonpaseo.jsonl")
+    out_boundary, pings_b = hook("s-np", path)
+    assert "At the next task completion" in out_boundary and pings_b == []
+
+    # 2. ask (hard tier) + hard-tier ping
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out_ask, pings_ask = hook("s-np", path)
+    assert "Context is large" in out_ask
+    assert len(pings_ask) == 1
+    assert "non-Paseo local mode" in pings_ask[0][1]
+    assert "Steps 0-7" in pings_ask[0][1] and "/new + /baton" in pings_ask[0][1]
+    assert "Step 9" not in pings_ask[0][1]
+
+    # 3. ask_repeat (still at/above hard tier)
+    _append(path, _usage(nudge.ASK_TOTAL + 10_000))
+    out_repeat, pings_rep = hook("s-np", path)
+    assert "Hard handoff reminder (#1):" in out_repeat and pings_rep == []
+
+    # 4. post_compact_handoff_due + post-compaction overdue ping
+    _append(path, _BOUNDARY_LINE + _usage(104_000))
+    out_post, pings_post = hook("s-np", path)
+    assert "Post-compaction handoff due:" in out_post
+    assert len(pings_post) == 1
+    assert "auto-compacted after missed hard handoff" in pings_post[0][1]
+    assert "non-Paseo local mode" in pings_post[0][1]
+    assert "Steps 0-7" in pings_post[0][1] and "/new + /baton" in pings_post[0][1]
+
+    for label, text in (
+        ("boundary", out_boundary),
+        ("ask", out_ask),
+        ("ask_repeat", out_repeat),
+        ("post_compact_handoff_due", out_post),
+    ):
+        assert "never hand the operator a /new" not in text, label
+        assert "ade-self-session handoff" not in text, label
+        assert "Step 9 yourself" not in text and "Step 9 now" not in text, label
+        assert "non-Paseo / Herdr Claude Code mode" in text, label
+        assert "/self-handoff" in text and "Steps 0-7" in text, label
+        assert "skip Step 9" in text, label
+        assert "`/new` + `/baton`" in text, label
+
+
+def test_q122_paseo_mode_wins_even_when_herdr_env_is_inherited(hook, tmp_path, monkeypatch):
+    """skills/herdr/SKILL.md ADE rule 1: HERDR_ENV=1 can be inherited from a daemon started in a pane;
+    when PASEO_AGENT_ID is set, Paseo mode still preserves Step 9 and 'never hand the operator a /new'."""
+    monkeypatch.setenv("PASEO_AGENT_ID", "22222222-2222-4222-8222-222222222222")
+    monkeypatch.setenv("HERDR_ENV", "1")
+    monkeypatch.setenv("HERDR_PANE_ID", "w3H:p10")
+    assert nudge._in_paseo() is True
+
+    path = _transcript(tmp_path, 170_000, nudge.BOUNDARY_TOTAL, name="paseo-herdr.jsonl")
+    out_boundary, _ = hook("s-ph", path)
+    assert "never hand the operator a /new" in out_boundary
+    assert "ade-self-session handoff" in out_boundary and "skip Step 9" not in out_boundary
+
+    _append(path, _usage(nudge.ASK_TOTAL))
+    out_ask, pings_ask = hook("s-ph", path)
+    assert "never hand the operator a /new" in out_ask
+    assert "ade-self-session handoff" in out_ask and "skip Step 9" not in out_ask
+    assert len(pings_ask) == 1 and "/self-handoff then /new" in pings_ask[0][1]
+
+    _append(path, _usage(nudge.ASK_TOTAL + 10_000))
+    out_repeat, _ = hook("s-ph", path)
+    assert "Hard handoff reminder (#1):" in out_repeat
+    assert "ade-self-session handoff" in out_repeat and "skip Step 9" not in out_repeat
+
+    _append(path, _BOUNDARY_LINE + _usage(104_000))
+    out_post, pings_post = hook("s-ph", path)
+    assert "Post-compaction handoff due:" in out_post
+    assert "never hand the operator a /new" in out_post
+    assert "ade-self-session handoff" in out_post and "skip Step 9" not in out_post
+    assert len(pings_post) == 1 and "/self-handoff is overdue." in pings_post[0][1]
