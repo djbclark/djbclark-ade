@@ -753,7 +753,8 @@ def test_hard_tier_pages_once_per_climb_on_267k_wall_and_small_dip_does_not_repa
     box.clock[0] += 30
     assert box(219_703, event="PostToolUse", sid="s-ping")
     assert len(pings) == 1
-    assert "/self-handoff then /new" in pings[0][0]
+    assert "acknowledged /self-handoff Step 9 transfer" in pings[0][0]
+    assert "/new" not in pings[0][0] and "at its next boundary" not in pings[0][0]
     assert "219k/267k" in pings[0][0]
 
     # Repeated tool calls at hard tier, small dip (<25%) and re-climb never double-page.
@@ -900,8 +901,10 @@ def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
     assert "Context is large:" in msg0 and "At the next task completion" in msg0
     assert "never hand the operator a /new" not in msg0
     assert "ade-self-session handoff" not in msg0
-    assert "skip Step 9" in msg0 and "`/new` + `/baton`" in msg0
-    assert len(pings) == 1 and "non-Paseo local mode" in pings[0] and "/new + /baton" in pings[0]
+    assert "skip Step 9" in msg0 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg0
+    assert len(pings) == 1 and "non-Paseo local mode" in pings[0]
+    assert "guided to write local /self-handoff (Steps 0-7) for manual /new + /baton" in pings[0]
+    assert "at its next boundary" not in pings[0]
 
     box.clock[0] += 65
     out1 = box(245_000, event="PostToolUse", sid="s-herdr")
@@ -919,5 +922,5 @@ def test_q122_non_paseo_posttooluse_and_compaction_flow(box, monkeypatch):
     assert "Post-compaction handoff due:" in msg2
     assert "never hand the operator a /new" not in msg2
     assert "ade-self-session handoff" not in msg2
-    assert "skip Step 9" in msg2 and "`/new` + `/baton`" in msg2
+    assert "skip Step 9" in msg2 and "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)" in msg2
     assert len(pings) == 2 and "non-Paseo local mode" in pings[1] and "/new + /baton" in pings[1]

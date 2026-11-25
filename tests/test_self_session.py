@@ -4104,14 +4104,14 @@ def test_q122_missing_paseo_agent_id_gives_non_paseo_local_handoff_hint(setup, m
     assert 'PASEO_AGENT_ID is unset' in msg
     assert 'a full UUID is required' in msg
     assert 'Paseo-only' in msg
-    assert 'Steps 0-7' in msg and 'skip Step 9' in msg and '/new + /baton' in msg
+    assert 'Steps 0-7' in msg and 'skip Step 9' in msg and '/new then /baton <exact Tier 1 pointer>' in msg
     assert native.calls == []
     assert not list(service.state.glob('handoff-*.json'))
 
     with pytest.raises(ss.SessionError) as exc_compact:
         service.compact(checkpoint, request_id='c-nonpaseo')
     assert 'PASEO_AGENT_ID is unset' in str(exc_compact.value)
-    assert '/new + /baton' in str(exc_compact.value)
+    assert '/new then /baton <exact Tier 1 pointer>' in str(exc_compact.value)
 
 
 def test_q122_malformed_paseo_agent_id_keeps_strict_ident_error(setup):

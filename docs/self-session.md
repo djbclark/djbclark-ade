@@ -37,7 +37,8 @@ unsupported. **Non-Paseo / Herdr Claude Code exception (operator ruling 2026-11-
 when `PASEO_AGENT_ID` is unset or blank (such as a Herdr pane or standalone Claude
 Code terminal), `ade-self-session` refuses with a local-handoff hint; write the
 Tier 1/Tier 2 handoff locally (`/self-handoff` Steps 0–7), skip Step 9, and let
-the operator run `/new` + `/baton` manually when ready. `--paseo-home DIR` pins
+the operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`)
+manually when ready. `--paseo-home DIR` pins
 the local daemon home for every command; use the same home/state directory for
 every step. The default state directory is `~/.local/state/djbclark-ade/self-session`.
 
@@ -527,8 +528,8 @@ Unsupported runtime remains a blocker, not a successful handoff. **Non-Paseo /
 Herdr Claude Code exception (operator ruling 2026-11-25):** Section C1 applies to
 Paseo workspaces only; in a Claude Code session outside Paseo (no `PASEO_AGENT_ID`,
 e.g. a Herdr pane or standalone terminal), write the Tier 1/Tier 2 handoff locally
-(`/self-handoff` Steps 0–7), skip Step 9 and C1, and let the operator run `/new` +
-`/baton` manually when ready.
+(`/self-handoff` Steps 0–7), skip Step 9 and C1, and let the operator run `/new`
+then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready.
 
 ## D. Duplicates, partial failures and status
 

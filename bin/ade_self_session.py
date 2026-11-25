@@ -572,7 +572,7 @@ class Service:
                 'PASEO_AGENT_ID is unset (a full UUID is required; ade-self-session is Paseo-only). '
                 'For non-Paseo / Herdr Claude Code sessions (operator ruling 2026-11-25), '
                 'write the Tier 1/Tier 2 handoff locally (Steps 0-7), skip Step 9, and let the operator '
-                'run /new + /baton manually'
+                'run /new then /baton <exact Tier 1 pointer> (or /baton) manually'
             )
         return ident(raw)
 

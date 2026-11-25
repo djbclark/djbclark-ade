@@ -56,8 +56,10 @@ retirement itself. Partial transfers follow Step 9's partial-transfer rule and k
 **Claude Code outside Paseo / Herdr mode (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
 when `$PASEO_AGENT_ID` is unset or blank (e.g. a Herdr pane or standalone Claude Code terminal),
 complete Steps 0–7 locally (write, validate, commit/push the Tier 2 handoff doc and update Tier 1),
-skip Steps 8 and 9 (`ade-self-session` and Section C1 require Paseo), report the handoff path and
-next action, and let the operator run `/new` + `/baton` manually when ready.
+skip Steps 8 and 9 (`ade-self-session` and Section C1 require Paseo), report the Tier 1 pointer
+path, Tier 2 handoff path, and next action, and let the operator run `/new` then
+`/baton <exact Tier 1 pointer>` (or bare `/baton` when workspace resolution is unambiguous) manually
+when ready.
 
 ## Step 0 — Run the `loose` sweep silently first (operator rule, 2026-10-08)
 
@@ -327,8 +329,8 @@ acknowledgement/retirement checks.
 
 **Non-Paseo / Herdr Claude Code mode (no `$PASEO_AGENT_ID`, operator ruling 2026-11-25):**
 `ade-self-session` and Section C1 require Paseo. Outside Paseo, skip Steps 8 and 9 after completing
-Steps 0–7 locally, report the handoff file path and next action, and let the operator run `/new` +
-`/baton` manually when ready.
+Steps 0–7 locally, report the Tier 1 pointer path, Tier 2 handoff path, and next action, and let the
+operator run `/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready.
 
 **Automatic tracking & worker adoption:** A lead's other top-level workers (started with
 `env -u PASEO_AGENT_ID -u PASEO_AGENT_CWD -u PASEO_WORKSPACE_ID paseo run …`, so they are not its
@@ -381,10 +383,11 @@ hermes-ping (`~/.local/bin/hermes-ping`, sent **before** this step), not only in
 
 **Document only:** skip this step when running Claude Code outside Paseo / in Herdr with no
 `$PASEO_AGENT_ID` (operator ruling 2026-11-25: complete Steps 0–7 locally and let the operator run
-`/new` + `/baton`), when a skill that clears the session itself runs the handoff, when the operator
-says "doc only" or otherwise asks for the document without a restart, or when you are a sub-agent
-or a dispatched slice (above). `loose` Rule 4 option 1 wants this step to run in Paseo sessions: it
-does not make a Paseo handoff document-only. Say in the report that Step 9 was skipped and why.
+`/new` then `/baton <exact Tier 1 pointer>` or `/baton`), when a skill that clears the session
+itself runs the handoff, when the operator says "doc only" or otherwise asks for the document
+without a restart, or when you are a sub-agent or a dispatched slice (above). `loose` Rule 4 option
+1 wants this step to run in Paseo sessions: it does not make a Paseo handoff document-only. Say in
+the report that Step 9 was skipped and why.
 
 ## Opt-in NATS coordination
 

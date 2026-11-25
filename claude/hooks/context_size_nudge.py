@@ -677,13 +677,24 @@ def _early_message(total, growth):
     )
 
 
-def _successor_note(successor):
+def _successor_note(successor, in_paseo=None):
     """The Fable-lead ruling (2026-10-23): a Fable session hands off to Opus."""
     if not successor:
         return ""
+    in_paseo = _in_paseo() if in_paseo is None else bool(in_paseo)
     spec, why = successor
-    return (f" Note: {why}; after the handoff tell the operator to relaunch "
-            f"`claude --model {spec.split('/', 1)[1]}` rather than continuing on this model.")
+    model_name = spec.split("/", 1)[1]
+    if in_paseo:
+        return (
+            f" Note: {why}; pass `--provider {spec}` to `ade-self-session handoff` (or, if not "
+            f"operator-authorized for cross-model Step 9, ask the operator to relaunch "
+            f"`claude --model {model_name}`) rather than continuing on this model."
+        )
+    return (
+        f" Note: {why}; after writing the local handoff (Steps 0-7), instead of `/new` in this "
+        f"Fable process, let the operator relaunch `claude --model {model_name}` and resume with "
+        "`/baton <exact Tier 1 pointer>` (or `/baton`)."
+    )
 
 
 def _in_paseo():
@@ -702,7 +713,7 @@ _LOCAL_HANDOFF = (
     "no `PASEO_AGENT_ID` is present (non-Paseo / Herdr Claude Code mode — operator ruling 2026-11-25): "
     "run `/self-handoff` Steps 0-7 locally (write, validate, commit/push the Tier 2 handoff doc and "
     "update Tier 1), skip Step 9 (`ade-self-session` is Paseo-only), and let the operator run "
-    "`/new` + `/baton` manually when ready"
+    "`/new` then `/baton <exact Tier 1 pointer>` (or `/baton`) manually when ready"
 )
 
 
@@ -726,7 +737,7 @@ def _boundary_message(total, successor=None, wall=None, in_paseo=None):
         f"work is not a direct continuation and work remains, {action}: a fresh session "
         "re-writes ~46k, a compaction re-writes ~72k plus a summariser call and leaves ~104k "
         "behind. Do not compact mid-task."
-        + _successor_note(successor)
+        + _successor_note(successor, in_paseo=in_paseo)
     )
 
 
@@ -783,7 +794,8 @@ def _ask_message(total, growth, repeat, successor=None, wall=None, in_paseo=None
         f"finished and more work remains, same topic or not, {action}; a fresh session "
         "re-writes ~46k. Keep going in-context only when the work must "
         "continue. "
-        + _midtask_note(total, "let the auto-compaction take it", wall) + _successor_note(successor) + " "
+        + _midtask_note(total, "let the auto-compaction take it", wall)
+        + _successor_note(successor, in_paseo=in_paseo) + " "
         + _COST_NOTE
     )
 
@@ -803,7 +815,7 @@ def _hard_repeat_message(total, growth, repeat_num, successor=None, wall=None, i
         "Still at or above the hard handoff tier — stop starting inline work and "
         + action
         + _midtask_note(total, "let the auto-compaction take it", wall)
-        + _successor_note(successor)
+        + _successor_note(successor, in_paseo=in_paseo)
     )
 
 
@@ -831,7 +843,7 @@ def _post_compact_handoff_message(total, handoff_due, successor=None, wall=None,
         f"and is now at {total:,} tokens in degraded compacted context. "
         "A hard handoff was already missed — do not keep working in this compacted session. "
         + action
-        + _successor_note(successor)
+        + _successor_note(successor, in_paseo=in_paseo)
     )
 
 
@@ -1230,15 +1242,17 @@ def _check_state(data, event, session_id, transcript_path):
             if in_paseo:
                 ping_msg = (
                     f"{repo}: Claude Code context at ~{total // 1000}k/{wall // 1000}k "
-                    f"(+{growth // 1000}k since start or last compact, hard handoff tier); agent will "
-                    "/self-handoff then /new, or /compact, at its next boundary."
+                    f"(+{growth // 1000}k since start or last compact, hard handoff tier); "
+                    "guided to run acknowledged /self-handoff Step 9 transfer "
+                    "(or continue in-context / let auto-compaction take it only if required)."
                 )
             else:
                 ping_msg = (
                     f"{repo}: Claude Code context at ~{total // 1000}k/{wall // 1000}k "
                     f"(+{growth // 1000}k since start or last compact, hard handoff tier, "
-                    "non-Paseo local mode); agent will write local /self-handoff (Steps 0-7) "
-                    "ready for manual /new + /baton, or /compact, at its next boundary."
+                    "non-Paseo local mode); guided to write local /self-handoff (Steps 0-7) "
+                    "for manual /new + /baton "
+                    "(or continue in-context / let auto-compaction take it only if required)."
                 )
             _send_ping(ping_msg, data.get("cwd"))
     elif session_state["level"] < 2:

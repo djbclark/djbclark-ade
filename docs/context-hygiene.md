@@ -30,10 +30,16 @@ Continuous protection against unplanned interruption is the separate, planned
    compact (2026-11-21: a lead handed itself off at ~150k with 117k of room left). Write the
    owned Tier 1 log and handoff with absolute paths, branch/head, dirty files,
    unresolved decisions, active job records, unread results and exact next steps.
-2. A top-level session runs the `self-handoff` skill; Step 9 defaults to
-   `ade-self-session handoff` with a durable checkpoint. The agent launches and
-   verifies its own successor via [self-session](self-session.md), including the
-   agent-run fallback when supported; operator typing is never the fallback. A dispatched slice may hand off its own task with a durable checkpoint and
+2. A top-level Paseo-hosted session (`PASEO_AGENT_ID` set) runs the `self-handoff`
+   skill; Step 9 defaults to `ade-self-session handoff` with a durable checkpoint.
+   The agent launches and verifies its own successor via [self-session](self-session.md),
+   including the agent-run fallback when supported; for Paseo-hosted sessions,
+   operator typing is never the fallback. Outside Paseo (a Herdr pane or standalone
+   Claude Code terminal with `PASEO_AGENT_ID` unset/blank, operator ruling 2026-11-25),
+   complete `/self-handoff` Steps 0–7 locally, skip Steps 8 and 9, and let the operator
+   run `/new` then `/baton <exact Tier 1 pointer>` (or bare `/baton` when workspace
+   resolution is unambiguous), keeping all `session-handoff` live-owner checks intact.
+   A dispatched slice may hand off its own task with a durable checkpoint and
    scope/ownership coordination, but must never clear or archive its parent. The native
    self-session helper takes its predecessor only from its own Paseo identity.
 3. Never throw away an unsent draft, interrupt a running worker, or reset before
@@ -82,7 +88,8 @@ back. The 120k floor stays because compacting at 200k or less simulated a net lo
 ruling in Paseo mode (`PASEO_AGENT_ID` set: when handing off, do it yourself; never hand the
 operator a `/new`), switch to local-handoff guidance when `PASEO_AGENT_ID` is unset/blank
 (non-Paseo / Herdr Claude Code mode, operator ruling 2026-11-25: run `/self-handoff` Steps 0-7
-locally, skip Step 9, let the operator run `/new` + `/baton`), and say that a finished task alone
+locally, skip Step 9, let the operator run `/new` then `/baton <exact Tier 1 pointer>` or `/baton`),
+and say that a finished task alone
 is no reason to hand off or compact below the boundary tier. The total-based hard tier also covers
 regrowth after a compaction (floor ~104k). The hook runs under `UserPromptSubmit` and, where the settings
 register it (2026-10-29), `PostToolUse`; its text tells the agent how many tool rounds fit
