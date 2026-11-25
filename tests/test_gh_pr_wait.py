@@ -671,16 +671,14 @@ def test_hostname_github_com_pinned_even_with_enterprise_gh_host(tmp_path):
     assert list_ev["gh_host"] == "github.com"
 
 
-def test_line_reader_bounds_per_tick_drain():
-    """II.2: LineReader caps per-tick lines AND read/byte budget (even with zero newlines)."""
+def test_line_reader_bounds_per_tick_drain(tmp_path):
+    """II.2: LineReader caps per-tick lines AND read/byte budget (even with zero newlines), using temp files (never pipes)."""
     mod = load_module()
-    r_fd, w_fd = os.pipe()
+    lines_file = tmp_path / "lines.txt"
+    lines_file.write_bytes("".join(f"line-{i}\n" for i in range(600)).encode("utf-8"))
+    r_fd = os.open(str(lines_file), os.O_RDONLY)
     try:
         reader = mod.LineReader(r_fd)
-        payload = "".join(f"line-{i}\n" for i in range(600)).encode("utf-8")
-        os.write(w_fd, payload)
-        os.close(w_fd)
-        w_fd = -1
         batch1 = reader.drain_lines(max_lines=256)
         assert len(batch1) == 256 and batch1[0] == "line-0" and batch1[-1] == "line-255"
         assert reader.has_buffered_line() is True
@@ -689,20 +687,18 @@ def test_line_reader_bounds_per_tick_drain():
         batch3 = reader.drain_lines(max_lines=256)
         assert len(batch3) == 88 and batch3[0] == "line-512" and batch3[-1] == "line-599"
     finally:
-        if w_fd >= 0:
-            os.close(w_fd)
         os.close(r_fd)
 
     # Newline-free stream bounded by max_reads / max_bytes so drain_lines returns promptly.
-    r2, w2 = os.pipe()
+    blob_file = tmp_path / "nonl.bin"
+    blob_file.write_bytes(b"a" * 32768)
+    r2 = os.open(str(blob_file), os.O_RDONLY)
     try:
         reader2 = mod.LineReader(r2)
-        os.write(w2, b"a" * 32768)
         out = reader2.drain_lines(max_lines=256, max_reads=2, max_bytes=16384)
         assert out == []
         assert len(reader2.buf) == 16384  # stopped after 2 reads / 16 KiB instead of draining all 32 KiB
     finally:
-        os.close(w2)
         os.close(r2)
 
 
@@ -771,7 +767,6 @@ def test_sigterm_and_repeated_signals_clean_up_once(tmp_path):
         else:
             pytest.fail("timed out waiting for initial pr_view before SIGTERM")
         proc.send_signal(signal.SIGTERM)
-        time.sleep(0.03)
         if proc.poll() is None:
             proc.send_signal(signal.SIGTERM)
         rc = proc.wait(timeout=10.0)
@@ -779,7 +774,8 @@ def test_sigterm_and_repeated_signals_clean_up_once(tmp_path):
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    assert rc == 143
+    # 143 when Python exits cleanly via handler; -SIGTERM if second signal lands after main() restores SIG_DFL.
+    assert rc in (143, -signal.SIGTERM)
     ops = read_log(log_path)
     op_names = [e["op"] for e in ops]
     assert op_names.index("listen_exited") < op_names.index("sub_delete")
