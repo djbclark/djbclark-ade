@@ -763,18 +763,26 @@ def _model_transcript(tmp_path, model, *sizes, name="model-transcript.jsonl"):
 
 
 _OPUS_NOTE = "relaunch `claude --model claude-opus-5-5`"
+_PASEO_OPUS_AUTH = "switching to `claude/claude-opus-5-5` is advisory and requires explicit operator authorization first"
 
 
 def test_fable_session_gets_the_relaunch_note_in_both_messages(hook, tmp_path):
     path = _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL)
     out, _ = hook("s-fable", path)
-    assert out.count(_OPUS_NOTE) == 1 and "At the next task completion" in out
+    assert "At the next task completion" in out
     assert "this session runs on Fable" in out and "self-slash" not in out
-    assert "--provider claude/claude-opus-5-5" in out
+    assert out.count(_PASEO_OPUS_AUTH) == 1
+    assert "once authorized, pass `--provider claude/claude-opus-5-5` to `ade-self-session handoff`" in out
+    assert "retaining Paseo acknowledgement and retirement checks" in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
     _append(path, _model_transcript(tmp_path, _FABLE, nudge.ASK_TOTAL, name="x.jsonl").read_text())
     out, _ = hook("s-fable", path)
-    assert "Context is large" in out and _OPUS_NOTE in out
-    assert "--provider claude/claude-opus-5-5" in out
+    assert "Context is large" in out
+    assert _PASEO_OPUS_AUTH in out
+    assert "once authorized, pass `--provider claude/claude-opus-5-5` to `ade-self-session handoff`" in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
 
 
 def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
@@ -784,7 +792,7 @@ def test_fable_lead_true_means_no_relaunch_note(hook, tmp_path, monkeypatch):
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     assert nudge._fable_lead_allowed() is True
     out, _ = hook("s-fable-lead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
+    assert "this session runs on Fable" not in out and "--provider" not in out and "relaunch" not in out
     monkeypatch.delenv("ROUTING_POLICY")
     shipped = Path(nudge.__file__).resolve().parents[2] / "config" / "ade.toml"
     assert nudge._routing_policy_path() == shipped and nudge._fable_lead_allowed() is True
@@ -812,12 +820,14 @@ def test_fable_lead_absent_false_or_unreadable_keeps_the_relaunch_note(hook, tmp
     monkeypatch.setenv("ROUTING_POLICY", str(policy))
     assert nudge._fable_lead_allowed() is False
     out, _ = hook("s-fable-nolead", _model_transcript(tmp_path, _FABLE, 46_000, nudge.BOUNDARY_TOTAL))
-    assert _OPUS_NOTE in out
+    assert _PASEO_OPUS_AUTH in out
+    assert "without operator authorization, retain the standard Paseo `ade-self-session handoff` procedure and its quota guard" in out
+    assert "claude --model" not in out and "relaunch" not in out
 
 
 def test_other_models_get_no_relaunch_note(hook, tmp_path):
     out, _ = hook("s-opus", _model_transcript(tmp_path, "claude-opus-5-5", 46_000, nudge.BOUNDARY_TOTAL))
-    assert "relaunch" not in out
+    assert "this session runs on Fable" not in out and "--provider" not in out and "relaunch" not in out
 
 
 def test_sidechain_and_synthetic_records_do_not_decide_the_model(tmp_path):

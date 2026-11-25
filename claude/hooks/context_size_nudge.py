@@ -686,9 +686,11 @@ def _successor_note(successor, in_paseo=None):
     model_name = spec.split("/", 1)[1]
     if in_paseo:
         return (
-            f" Note: {why}; pass `--provider {spec}` to `ade-self-session handoff` (or, if not "
-            f"operator-authorized for cross-model Step 9, ask the operator to relaunch "
-            f"`claude --model {model_name}`) rather than continuing on this model."
+            f" Note: {why}; switching to `{spec}` is advisory and requires explicit operator "
+            f"authorization first — once authorized, pass `--provider {spec}` to "
+            "`ade-self-session handoff` (retaining Paseo acknowledgement and retirement checks); "
+            "without operator authorization, retain the standard Paseo `ade-self-session handoff` "
+            "procedure and its quota guard."
         )
     return (
         f" Note: {why}; after writing the local handoff (Steps 0-7), instead of `/new` in this "
