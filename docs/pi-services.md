@@ -119,16 +119,24 @@ or billing guarantees. Runtime profiles require their own smoke checks.
 
 ## Venice.ai and Reality Fabricator manual access (2026-11-25)
 
-Both providers require an explicit operator request for the task. From a
-durable ADE checkout, pass the extension and the model for that launch:
+Both providers require an explicit operator request for the task.
+
+Per the 2026-11-25 operator ruling, `/Users/djbclark/src/djbclark-ade/pi-extensions/venice/index.mjs`
+is registered in `~/.pi/agent/settings.json` (matching `clinepass`) so Paseo
+exposes `pi/venice/...` for explicit manual selection while `venice` stays
+`operator_gated`, `never_route`, and `accepted = false` in
+`config/pi-pool-acceptance.toml`. Reality Fabricator (`rfab`) stays CLI-only
+via `-e` and is left out of `~/.pi/agent/settings.json`:
 
 ```sh
-pi -e ~/src/djbclark-ade/pi-extensions/venice/index.mjs --provider venice --model openai-gpt-62-sol
+# Venice (registered in ~/.pi/agent/settings.json for Pi and Paseo; -e optional)
+pi --provider venice --model openai-gpt-62-sol
+
+# Reality Fabricator (CLI-only via -e; not registered in ~/.pi/agent/settings.json)
 pi -e ~/src/djbclark-ade/pi-extensions/rfab/index.mjs --provider rfab --model openai:gpt-6.2-sol
 ```
 
-A new Pi session without the extension flag unloads the provider. Leave both
-extensions out of the shared settings and default model lists. Pi resolves
+A new Pi session without `-e` unloads `rfab`. Pi resolves
 `VENICE_API_KEY` or `RFAB_API_KEY` through `sudo-secretspec` for the request.
 Any quota or payment refusal comes from the provider. Venice reported
 `canConsume: false` in the operator's 2026-11-25 balance check.
