@@ -188,6 +188,8 @@ MAX_DIAG_BYTES = 64 * 1024
 MAX_PRE_ATTACH_LINES = 256
 MAX_PRE_ATTACH_BYTES = 1024 * 1024
 MAX_DRAIN_LINES = 256
+MAX_DRAIN_READS = 64
+MAX_DRAIN_BYTES = 1024 * 1024
 MAX_SEEN_EVENT_IDS = 2000
 BLOCKED_SIGNALS = frozenset({signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
 
@@ -364,10 +366,16 @@ def call_timeout(deadline_mono: float, cap: float = GH_CMD_CAP) -> float | None:
     return min(cap, max(0.05, rem))
 
 
+def github_com_env() -> dict[str, str]:
+    """Subprocess environment pinning GH_HOST=github.com for Event Streams commands lacking --hostname."""
+    return {**os.environ, "GH_HOST": "github.com"}
+
+
 def run_gh(
     args: list[str],
     *,
     timeout: float = GH_CMD_CAP,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Run `gh` with argv list (never shell=True)."""
     cmd = [gh_bin(), *args]
@@ -380,6 +388,7 @@ def run_gh(
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            env=env,
             check=False,
         )
         return proc.returncode, proc.stdout, proc.stderr
@@ -1386,14 +1395,21 @@ class LineReader:
     def has_buffered_line(self) -> bool:
         return b"\n" in self.buf
 
-    def drain_lines(self, *, max_lines: int = MAX_DRAIN_LINES) -> list[str]:
-        """Drain at most `max_lines` complete lines without blocking so high-volume output cannot starve timeout checks."""
+    def drain_lines(
+        self,
+        *,
+        max_lines: int = MAX_DRAIN_LINES,
+        max_reads: int = MAX_DRAIN_READS,
+        max_bytes: int = MAX_DRAIN_BYTES,
+    ) -> list[str]:
+        """Drain at most `max_lines` lines within a per-tick read/byte budget so continuous output without newlines cannot spin."""
         lines: list[str] = []
-        # First emit any complete lines already sitting in self.buf from an earlier capped drain.
         self._flush_buf_lines(lines, max_lines)
         if len(lines) >= max_lines or self.eof:
             return lines
-        while len(lines) < max_lines:
+        reads = 0
+        bytes_read = 0
+        while len(lines) < max_lines and reads < max_reads and bytes_read < max_bytes:
             try:
                 chunk = os.read(self.fd, 8192)
             except BlockingIOError:
@@ -1401,6 +1417,7 @@ class LineReader:
             except OSError:
                 self.eof = True
                 chunk = b""
+            reads += 1
             if not chunk:
                 self.eof = True
                 if self.buf and not self.dropping_oversize and len(lines) < max_lines:
@@ -1408,6 +1425,7 @@ class LineReader:
                     self.buf.clear()
                 self.dropping_oversize = False
                 break
+            bytes_read += len(chunk)
             self._consume_chunk(chunk, lines, max_lines)
             if len(chunk) < 8192:
                 break
@@ -1717,6 +1735,7 @@ def _run_event_stream(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
+                env=github_com_env(),
             )
         except OSError as exc:
             session.close()
@@ -2088,6 +2107,7 @@ def cmd_cleanup(argv: list[str]) -> int:
             "--json=id,resourceUrl,eventTypes,expiresAt",
         ],
         timeout=GH_CMD_CAP,
+        env=github_com_env(),
     )
     if rc != 0:
         detail = (err or out).strip().splitlines()[:1]

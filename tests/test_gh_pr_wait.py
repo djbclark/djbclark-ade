@@ -120,7 +120,7 @@ FAKE_GH_SCRIPT = textwrap.dedent(
         raise SystemExit(0)
 
     if argv[:3] == ["event", "subscription", "list"]:
-        log({"op": "sub_list", "argv": argv})
+        log({"op": "sub_list", "argv": argv, "gh_host": os.environ.get("GH_HOST")})
         err = cfg.get("list_error")
         if err:
             print(err["stderr"], file=sys.stderr)
@@ -130,7 +130,7 @@ FAKE_GH_SCRIPT = textwrap.dedent(
 
     if argv[:2] == ["event", "listen"]:
         pid_path.write_text(str(os.getpid()), encoding="utf-8")
-        log({"op": "listen_start", "pid": os.getpid(), "argv": argv})
+        log({"op": "listen_start", "pid": os.getpid(), "argv": argv, "gh_host": os.environ.get("GH_HOST")})
 
         if cfg.get("ignore_sigterm"):
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -630,9 +630,11 @@ def test_hostname_github_com_pinned_even_with_enterprise_gh_host(tmp_path):
     assert rc.returncode == 0, rc.stderr
     ops_c = read_log(log_c)
     create_ev = next(e for e in ops_c if e["op"] == "sub_create")
+    listen_ev = next(e for e in ops_c if e["op"] == "listen_start")
     delete_ev = next(e for e in ops_c if e["op"] == "sub_delete")
     view_ev = next(e for e in ops_c if e["op"] == "pr_view")
     assert "--hostname=github.com" in create_ev["argv"]
+    assert listen_ev["gh_host"] == "github.com"
     assert "--hostname=github.com" in delete_ev["argv"]
     assert "--repo=github.com/djbclark/demo" in view_ev["argv"]
 
@@ -651,18 +653,31 @@ def test_hostname_github_com_pinned_even_with_enterprise_gh_host(tmp_path):
     env_r, log_r = make_env(tmp_path / "review", cfg_r, extra_env={"GH_HOST": "ghe.corp.example", "GH_PR_WAIT_TEST_MIN_INTERVAL": "0.02"})
     rr = run_wait(["djbclark/demo#42", "--for", "review", "--no-deadline", "--json"], env_r)
     assert rr.returncode == 0, rr.stderr
-    gql_ev = next(e for e in read_log(log_r) if e["op"] == "pr_view")
+    ops_r = read_log(log_r)
+    gql_ev = next(e for e in ops_r if e["op"] == "pr_view")
+    listen_r = next(e for e in ops_r if e["op"] == "listen_start")
     assert "--hostname=github.com" in gql_ev["argv"]
+    assert listen_r["gh_host"] == "github.com"
+
+    # 3. cleanup subscription list also pins GH_HOST=github.com
+    cfg_cl = {
+        "existing_subs": [{"id": "sub_cl_1", "resourceUrl": "https://github.com/o/r/pull/1", "eventTypes": ["a"]}],
+        "pr_views_by_url": {"https://github.com/o/r/pull/1": {"url": "https://github.com/o/r/pull/1", "state": "MERGED"}},
+    }
+    env_cl, log_cl = make_env(tmp_path / "cleanup_host", cfg_cl, extra_env={"GH_HOST": "ghe.corp.example"})
+    rcl = run_wait(["cleanup", "--dry-run", "--json"], env_cl)
+    assert rcl.returncode == 0, rcl.stderr
+    list_ev = next(e for e in read_log(log_cl) if e["op"] == "sub_list")
+    assert list_ev["gh_host"] == "github.com"
 
 
 def test_line_reader_bounds_per_tick_drain():
-    """II.2: LineReader caps per-tick drain at max_lines and retains buffered remainder cleanly."""
+    """II.2: LineReader caps per-tick lines AND read/byte budget (even with zero newlines)."""
     mod = load_module()
     r_fd, w_fd = os.pipe()
     try:
         reader = mod.LineReader(r_fd)
         payload = "".join(f"line-{i}\n" for i in range(600)).encode("utf-8")
-        # Write in a background writer or nonblocking chunks? 600 short lines (~5 KB) fits well inside 64 KB pipe buffer.
         os.write(w_fd, payload)
         os.close(w_fd)
         w_fd = -1
@@ -677,6 +692,18 @@ def test_line_reader_bounds_per_tick_drain():
         if w_fd >= 0:
             os.close(w_fd)
         os.close(r_fd)
+
+    # Newline-free stream bounded by max_reads / max_bytes so drain_lines returns promptly.
+    r2, w2 = os.pipe()
+    try:
+        reader2 = mod.LineReader(r2)
+        os.write(w2, b"a" * 32768)
+        out = reader2.drain_lines(max_lines=256, max_reads=2, max_bytes=16384)
+        assert out == []
+        assert len(reader2.buf) == 16384  # stopped after 2 reads / 16 KiB instead of draining all 32 KiB
+    finally:
+        os.close(w2)
+        os.close(r2)
 
 
 def test_listener_ignoring_sigterm_escalates_to_sigkill_then_deletes(tmp_path):
