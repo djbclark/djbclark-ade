@@ -20,6 +20,11 @@
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         },
+        "inventory_max_inactive_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Skip unlisted non-archived non-forks older than this many days. Omit to disable the cutoff."
+        },
         "check_user_interaction_limits": { "type": "boolean" },
         "api_version": { "type": "string", "minLength": 1 },
         "defaults": { "$ref": "#/$defs/policy" },

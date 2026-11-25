@@ -245,7 +245,7 @@ def renewal_plan(
             "reason": "current limit is not exactly the configured limit; "
             "a check never changes the limit itself",
         }
-    expires = ah._parse_expires_at(current.get("expires_at"))
+    expires = ah._parse_github_datetime(current.get("expires_at"))
     if expires is None:
         return {"renew": False, "reason": "current expiry unreadable"}
     remaining = (expires - now).total_seconds() / 86400.0
@@ -327,10 +327,10 @@ def renew_interaction_limits(
     after, after_detail = ah._gh_json(
         reader, ["api", "user/interaction-limits"], api_version=cfg.api_version
     )
-    before = ah._parse_expires_at(
+    before = ah._parse_github_datetime(
         current.get("expires_at") if isinstance(current, dict) else None
     )
-    after_expires = ah._parse_expires_at(
+    after_expires = ah._parse_github_datetime(
         after.get("expires_at") if isinstance(after, dict) else None
     )
     # The new expiry must be strictly later: a PUT that exits 0 without
