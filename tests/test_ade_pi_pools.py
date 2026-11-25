@@ -40,12 +40,13 @@ def test_shipped_file_accepts_only_the_live_cursor_and_zai_shortlist():
     rows = pools.load_acceptance(REPO / "config" / "pi-pool-acceptance.toml")
     assert rows["cursor"]["accepted"] is True and rows["zai"]["accepted"] is True
     # antigravity was accepted 2026-11-19 and switched off 2026-11-21 (operator: native Paseo antigravity provider only)
-    for name in ("antigravity", "grok", "sipb", "go", "clinepass"):
+    for name in ("antigravity", "grok", "sipb", "go", "clinepass", "venice", "rfab"):
         assert rows[name]["accepted"] is False
     # clinepass dispatches through Pi for manual use (agent = "pi") but stays
     # unaccepted, so the fail-closed gate reports it and never auto-routes it.
     assert set(pools.routing_pi_services()) == {"cursor", "zai", "clinepass"}
-    code, _, blocking = pools.check_auto(REPO / "config" / "pi-pool-acceptance.toml")
+    code, status, blocking = pools.check_auto(REPO / "config" / "pi-pool-acceptance.toml")
+    assert not any(row["blocks_auto"] for row in status if row["pool"] in {"venice", "rfab"})
     assert code == 2 and blocking == ["clinepass"]
 
 

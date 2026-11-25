@@ -4,3 +4,8 @@
 [servers.chrome-devtools]
 command = "npx"
 args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect", "--no-usage-statistics", "--no-performance-crux", "--redact-network-headers"]
+
+# Explicit per-task attachment only. The bridge resolves the secret in memory.
+[servers.rfab]
+command = "ade-mcp-rfab"
+args = []

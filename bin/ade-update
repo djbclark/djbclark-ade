@@ -134,7 +134,7 @@ OK_LINK_STATES = ("linked", "not installed")
 # Repo tools that must be on PATH as ~/.local/bin/<name> -> <canonical checkout>/bin/<name> (step 3d). Extend this tuple:
 # nothing else needs to change. It lives here, not in config/ade.toml, because ade-update is stdlib-only and must run
 # before (and without) any config parse, and a name here is a promise that bin/<name> exists (or is skipped with a note).
-BIN_LINKS = ("git-commit-own", "load-watch", "agent-id", "lsp-root-guard", "gh-pr-wait", "ade-herdr-handoff")
+BIN_LINKS = ("git-commit-own", "load-watch", "agent-id", "lsp-root-guard", "gh-pr-wait", "ade-herdr-handoff", "ade-mcp-rfab")
 BIN_LINK_DIR = "~/.local/bin"
 # Standalone executable copies installed into ~/.local/libexec/ade/<name> (step 3e), never symlinked into the
 # checkout so another branch or dirty tree never breaks live sessions (docs/mcp-on-demand.md §11.3).

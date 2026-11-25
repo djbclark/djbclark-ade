@@ -49,3 +49,11 @@ note = "Pi Go path; not automatic"
 accepted = false
 # Pi-mediated ClinePass is an emergency/manual pool, not automatic routing.
 note = "manual emergency access through Pi; native clinepass dispatch is not configured"
+
+[pools.venice]
+accepted = false
+note = "Venice.ai via Pi; operator-gated — use only when explicitly asked, agents may recommend"
+
+[pools.rfab]
+accepted = false
+note = "Reality Fabricator (rfab.ai) via Pi; operator-gated — use only when explicitly asked, agents may recommend"

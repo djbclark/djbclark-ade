@@ -739,3 +739,16 @@ the compressed tsserver and basedpyright pages; this item removes the avoidable 
    `guarded:` and their RSS stays near the project-rooted level (about 220 MB for a basedpyright that has opened one file, section 12.3 item 5, against 1 GB or more unguarded), and the Claude LSP log carries one `lsp-root-guard: workspace root ...` line.
    If the LSP launcher cannot find `lsp-root-guard`, put the absolute path of the `~/.local/bin` link in the plugin entry.
 4. 2a and 2b are the commands in 11.1 and 11.2 under the section 9 approvals.
+
+## 13. Reality Fabricator (2026-11-25)
+
+RFab is attached through the per-task registry in section 11.2. Its
+`ade-mcp-rfab` stdio bridge exits on EOF or the configured idle timeout.
+An ordinary session has no RFab process or discovery schema. This uses
+task-only attachment. ADE excludes task MCP profiles from automatic routing.
+Section 11.3's user-scope lazy bridge would expose
+the server to ordinary sessions.
+
+See the [launch and unload commands](mcp-servers.md#reality-fabricator-on-demand).
+Keep RFab out of the shared client MCP settings and attach it only on explicit
+operator request.

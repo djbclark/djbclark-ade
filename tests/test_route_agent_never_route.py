@@ -434,3 +434,41 @@ def test_route_keeps_no_local_named_like_the_module_function():
     route = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "route")
     assigned = {n.id for n in ast.walk(route) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     assert "barred_notes" not in assigned and "barred_list" in assigned
+
+
+@pytest.mark.parametrize("name", ["venice", "rfab"])
+def test_manual_pi_services_never_win_automatic_routes(accept, monkeypatch, name):
+    from pi_defaults import choose
+
+    accept(ACCEPT_ALL + f"\n[pools.{name}]\naccepted = true\n")
+    svc = r.BY_NAME[name]
+    quota = drained(**{name: 100.0})
+    assert name in r.NEVER_ROUTE and name in r.OPERATOR_GATED
+    assert svc.models["code"] in r.policy_markdown()
+    monkeypatch.setattr(r, "REPO_SCOPED", {name: r.REPO_SCOPED["clinepass"]})
+    assert name not in {s.name for s in r.discover(quota)}
+    assert r.candidate_block(svc, quota, "techno-euphora", pi_unaccepted=set()) == (
+        f"{name}: operator-gated (manual only)"
+    )
+    # Exercise the shared candidate guard even if discovery returns only this pool.
+    monkeypatch.setattr(r, "discover", lambda *_: [svc])
+    assert r.plan(["code", "bulk"], quota=quota, scope_repo="techno-euphora") == [
+        ("code", None), ("bulk", None),
+    ]
+    assert choose("code", [svc.models["code"]], quota=quota, scope_repo="techno-euphora")["service"] is None
+
+
+@pytest.mark.parametrize("name", ["venice", "rfab"])
+def test_manual_model_namespace_cannot_route_under_an_active_pool(name):
+    model = r.BY_NAME[name].models["code"]
+    alias = dataclasses.replace(r.BY_NAME["cursor"], models={"code": f"  '{model}' --effort high"})
+    assert r.candidate_block(alias, {}, None, pi_unaccepted=set()) == (
+        "cursor: operator-gated Pi model profile (manual only)"
+    )
+
+def test_automatic_discovery_excludes_explicit_mcp_profiles(monkeypatch):
+    profiles = {"claude-mcp-rfab", "codex-mcp-chrome-devtools__rfab"}
+    monkeypatch.setattr(r, "paseo_providers", lambda: profiles | {"unrelated"})
+    found = {svc.name for svc in r.discover({})}
+    assert profiles.isdisjoint(found)
+    assert "unrelated" in found

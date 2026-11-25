@@ -135,6 +135,7 @@ from typing import Any, ClassVar
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     import ade_config  # versioned config and isolated legacy routing override
+    from ade_mcp_on_demand import is_task_profile
     import ade_gates  # the frontier gate: config/gates.toml [frontier], docs/gates.md
     import model_family as _family  # model families (gpt-*-astra) → the newest catalog id
     import model_tiers as _model_tiers  # config/model-tiers.toml roles → ids
@@ -146,7 +147,7 @@ except ImportError as _ade_missing:
     # is a bug and surfaces with its traceback.
     _here = Path(__file__).resolve().parent
     if (__name__ != "__main__" or not isinstance(_ade_missing, ModuleNotFoundError)
-            or _ade_missing.name not in ("ade_config", "ade_gates", "model_family", "model_tiers")
+            or _ade_missing.name not in ("ade_config", "ade_gates", "ade_mcp_on_demand", "model_family", "model_tiers")
             or (_here / f"{_ade_missing.name}.py").is_file()):
         raise
     sys.stderr.write("route_agent.py: cannot route standalone, the djbclark-ade modules (ade_config, ade_gates, "
@@ -921,7 +922,8 @@ def load_pi_acceptance(path: Path | None = None) -> dict[str, dict[str, Any]]:
 def pi_unaccepted_services(path: Path | None = None) -> set[str]:
     """Routing Pi services (`agent = "pi"`) the operator has not accepted for automatic routing: no row or `accepted = false`
     (docs/pi-defaults.md B4). Fail closed: an unreadable or malformed acceptance file leaves every Pi service unaccepted."""
-    pi = {s.name for s in SERVICES if s.acp_agent == "pi" and not s.retired}
+    pi = {s.name for s in SERVICES
+          if s.acp_agent == "pi" and not s.retired and not is_never_routed(s.name)}
     try:
         rows = load_pi_acceptance(path)
     except (OSError, ValueError, UnicodeDecodeError, tomllib.TOMLDecodeError):
@@ -930,9 +932,8 @@ def pi_unaccepted_services(path: Path | None = None) -> set[str]:
 
 
 def is_never_routed(name: str) -> bool:
-    """Is service `name` out of every `route`/`plan` candidate list whatever the repo? True for a `[routing].never_route` name
-    that no `[routing.repo_scoped]` row can let back in."""
-    return name in NEVER_ROUTE and name not in REPO_SCOPED
+    """Whether automatic routing excludes the service in every repository."""
+    return is_task_profile(name) or name in OPERATOR_GATED or (name in NEVER_ROUTE and name not in REPO_SCOPED)
 
 
 def candidate_block(svc: Service, quota: dict[str, Any] | None, scope_repo: str | None, *,
@@ -940,12 +941,18 @@ def candidate_block(svc: Service, quota: dict[str, Any] | None, scope_repo: str 
     """Why `svc` may not be handed a slice working in repo `scope_repo` whatever its quota (None when it may), the one predicate
     `route` applies to every candidate, curated or discovered:
 
+    - Per-task MCP provider profiles, which require explicit selection;
+    - `[dispatch].operator_gated` (manual only, regardless of repo scope or Pi acceptance);
     - `[routing].never_route` (a name the repo scope does not list: never);
     - `[routing.repo_scoped.NAME]` (operator 2026-11-02): only the listed repos, and only while the pool's tightest window
       reads at least `min_headroom`; an unknown repo (`scope_repo` None) or an unmeasured pool is refused (fail closed);
     - a Pi service the operator has not accepted in `config/pi-pool-acceptance.toml` (docs/pi-defaults.md B4).
 
     `scope_repo` is the repository of the slice's --cwd (`repo_of`), never read from a slice name."""
+    if is_task_profile(svc.name) or is_task_profile(svc.acp_agent):
+        return f"{svc.name}: per-task MCP provider profile"
+    if svc.name in OPERATOR_GATED:
+        return f"{svc.name}: operator-gated (manual only)"
     scope = REPO_SCOPED.get(svc.name)
     if scope is not None:
         names = ", ".join(sorted(scope.repos))
@@ -962,6 +969,13 @@ def candidate_block(svc: Service, quota: dict[str, Any] | None, scope_repo: str 
     elif svc.name in NEVER_ROUTE:
         return f"{svc.name}: never_route"
     if svc.acp_agent == "pi":
+        try:
+            namespaces = {token.partition("/")[0].lower()
+                          for spec in svc.models.values() for token in shlex.split(spec)[:1]}
+        except ValueError:
+            return f"{svc.name}: malformed Pi model profile"
+        if namespaces & OPERATOR_GATED:
+            return f"{svc.name}: operator-gated Pi model profile (manual only)"
         off = pi_unaccepted_services() if pi_unaccepted is None else pi_unaccepted
         if svc.name in off:
             return f"{svc.name}: Pi pool not accepted for automatic routing (config/pi-pool-acceptance.toml)"
@@ -2365,7 +2379,8 @@ def discover(quota: dict[str, Any] | None = None) -> list[Service]:
         canonical = ALIASES.get(name, name)
         if canonical in services or canonical in known_clis:
             continue                                # same account, already profiled
-        if name in ("codexbar-query-errors",) or name in NEVER_ROUTE or name in OPERATOR_GATED:
+        if (name == "codexbar-query-errors" or name in NEVER_ROUTE
+                or is_never_routed(name) or is_never_routed(canonical)):
             continue
         services[name] = Service(
             name=name, cli=name, good_at=dict(DEFAULT_PROFILE),

@@ -31,6 +31,40 @@ why, and how to re-enable. This table is otherwise the 2026-08-23 snapshot.
 
 **TUI wiring doctor (2026-11-13).** `ade-install doctor` / `just install-doctor` prints one `tui/<id>` summary row per current TUI (the `targets` table of [bin/skill-everywhere](../bin/skill-everywhere) is the one roster: claude, codex, pi, hermes, cursor-agent, grokbot), then detail rows. MCP: each server in [config/mcp-clients.toml](../config/mcp-clients.toml) (the machine-readable mirror of the Roster table's Scope column; a test keeps them in step; a row has a `url`, or for a stdio server a `command` and `args`, checked for Claude Code against `~/.claude.json` and Codex against `~/.codex/config.toml`; the doctor never prints `env`) x each client it lists is `ok` or a `warn` (`missing`, `wrong-url`, `wrong-command` (stdio rows), `wrong-type`, `disabled`) with the exact fix, read from `~/.claude.json` (user-scope `mcpServers`), `~/.codex/config.toml`, `~/.cursor/mcp.json` or `~/.hermes/config.yaml` (key names and URLs only; Pi and Grok Bot have no readable config and report `unknown`). Skills: `skill-everywhere --check --all` states become ok / missing / dangling / points elsewhere, with `bin/skill-everywhere --all` as the fix. Gaps are advisory (exit 0); only an unreadable roster or client config (or a roster without `skill-everywhere`, or the reverse) fails the run; no client config is ever edited and no fix is ever run (the one subprocess is the read-only `skill-everywhere --check --all`, which may render a temporary Grok Bot copy under `$TMPDIR`).
 
+## Reality Fabricator on demand
+
+Attach only when the operator explicitly requests RFab for the task. Use the
+stdio command `ade-mcp-rfab` from the ADE checkout or its PATH link after
+`ade-update`. The bridge opens a Streamable HTTP session on
+`https://api.rfab.ai/api/mcp` and resolves `RFAB_API_KEY` using `sudo-secretspec`
+at the first MCP initialize request. It keeps credentials in memory and
+projects the remote server's tool capability. Client roots, sampling and
+elicitation stay local.
+
+For a one-off Claude Code or Codex session, run the respective command after
+the helper is on PATH:
+
+```sh
+claude --mcp-config '{"mcpServers":{"rfab":{"type":"stdio","command":"ade-mcp-rfab","args":[]}}}'
+codex -c 'mcp_servers.rfab.command="ade-mcp-rfab"' -c 'mcp_servers.rfab.enabled=true'
+```
+
+For a Paseo worker, generate the profile entry with
+`python3 bin/ade_mcp_on_demand.py snippet rfab claude --write` or
+`python3 bin/ade_mcp_on_demand.py snippet rfab codex`. The operator adds the
+entry under `agents.providers` in the Paseo configuration. Once the profile is
+ready, select it for one task using `ade-worker-run --mcp rfab` with an explicit
+`--provider claude` or `--provider codex` and the normal worker arguments.
+The same stdio command can be used by other clients with a task-only stdio
+configuration.
+
+Exit the task client or close the helper's stdin to unload. The helper
+also exits after 300 idle seconds by default. Pass `--idle-timeout SECONDS`
+in its stdio args to change this. Reattach in the client or start another
+explicit task session after expiry. Ordinary Claude Code, Codex, Gemini and Pi
+sessions have no RFab server entry, process or tool schemas. See the
+[art and media API reference](rfab-api.md).
+
 ## Chrome DevTools MCP (added 2026-11-16)
 
 Goal: agents inspect and drive the operator's real Chrome in a way that survives updates. `@latest` on purpose (nothing is
