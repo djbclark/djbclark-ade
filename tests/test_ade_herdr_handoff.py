@@ -120,12 +120,28 @@ if cmd == "agent prompt":
         sys.stdout.write("x" * (4 * 1024 * 1024 + 64))
         sys.stdout.flush()
         sys.exit(0)
+    if os.environ.get("FAKE_PROMPT_RAW_JSON"):
+        print(os.environ["FAKE_PROMPT_RAW_JSON"])
+        sys.exit(0)
     if os.environ.get("FAKE_PROMPT_FAIL"):
         err(
             os.environ.get("FAKE_PROMPT_FAIL_CODE", "agent_prompt_stalled"),
             os.environ.get("FAKE_PROMPT_FAIL_MSG", "prompt did not trigger activity"),
         )
-    ok({{"submitted": True}})
+    ok({{
+        "type": "agent_prompted",
+        "agent": {{
+            "terminal_id": "term-9",
+            "name": os.environ.get("FAKE_PROMPT_AGENT_NAME", args[2]),
+            "agent": "claude",
+            "agent_status": "idle",
+            "workspace_id": os.environ.get("FAKE_LIVE_WS_ID", "w1"),
+            "tab_id": os.environ.get("FAKE_NEW_TAB_ID", "w1:t9"),
+            "pane_id": os.environ.get("FAKE_PROMPT_PANE_ID", os.environ.get("FAKE_NEW_PANE_ID", "w1:p9")),
+            "focused": False,
+            "revision": 1,
+        }},
+    }})
 
 err("unexpected_command", f"unexpected command: {{cmd}}")
 """
@@ -597,10 +613,18 @@ def test_agent_not_ready_fails_closed_without_retry_or_closing_panes(env_box):
     "code,expect_uncertain",
     [
         ("agent_blocked", False),
+        ("agent_not_found", False),
+        ("agent_not_ready", False),
         ("agent_prompt_stalled", True),
+        ("agent_prompt_failed", True),
+        ("timeout", True),
+        ("unexpected_daemon_error", True),
     ],
 )
 def test_agent_prompt_failures_do_not_retry_or_close_predecessor(env_box, code, expect_uncertain):
+    """Round 3 MEDIUM #2 regression: only known pre-submission refusals record certain non-delivery;
+    ambiguous server-side completion errors (`agent_prompt_failed`, lowercase `timeout`,
+    `agent_prompt_stalled`, unknown codes) set prompt_delivery_uncertain=True with a single attempt."""
     r = env_box["run"](
         "--checkpoint",
         str(env_box["checkpoint"]),
@@ -623,6 +647,41 @@ def test_agent_prompt_failures_do_not_retry_or_close_predecessor(env_box, code, 
         ["agent", "start"],
         ["agent", "prompt"],
     ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"FAKE_PROMPT_RAW_JSON": "{}"},
+        {"FAKE_PROMPT_RAW_JSON": json.dumps({"id": "req-1", "result": {"submitted": True}})},
+        {"FAKE_PROMPT_RAW_JSON": json.dumps({"id": "req-1", "result": {"type": "agent_info", "agent": {"name": "x", "pane_id": "w1:p9"}}})},
+        {"FAKE_PROMPT_AGENT_NAME": "wrong-agent"},
+        {"FAKE_PROMPT_PANE_ID": "w1:p999"},
+    ],
+)
+def test_agent_prompt_malformed_or_mismatched_exit0_envelope_fails_closed(env_box, overrides):
+    """Round 3 MEDIUM #1 regression: exit-0 empty `{}` or missing/unrelated/mismatched `agent_prompted`
+    result must NEVER record `status='launched'`; must fail closed with `prompt_delivery_uncertain=True`."""
+    r = env_box["run"](
+        "--checkpoint",
+        str(env_box["checkpoint"]),
+        "--tier1",
+        str(env_box["tier1"]),
+        "--name",
+        "succ-verify-1",
+        env_overrides=overrides,
+    )
+    assert r.returncode == hh.EXIT_ERROR, r.stdout + r.stderr
+    rec = json.loads(r.stdout)
+    assert rec["status"] == "failed"
+    assert rec["failed_stage"] == "agent_prompt"
+    assert rec["error"]["code"] == "invalid_agent_prompt_response"
+    assert rec["prompt_delivery_uncertain"] is True
+    assert rec["predecessor_preserved"] is True
+    persisted = json.loads(Path(rec["record_path"]).read_text(encoding="utf-8"))
+    assert persisted["status"] == "failed"
+    assert persisted["prompt_delivery_uncertain"] is True
+    assert sum(1 for c in env_box["calls"]() if c[:2] == ["agent", "prompt"]) == 1
 
 
 @pytest.mark.parametrize(

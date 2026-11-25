@@ -109,6 +109,22 @@ _BARE_TOKEN = re.compile(
 _CODE_CHARS = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 _ALNUM_RUN = re.compile(r"[A-Za-z0-9]{16,}")
 
+# Herdr v0.9.5 `queue_agent_prompt` pre-submission refusals (src/app/api/agents.rs:123-206):
+# only these codes are guaranteed to fail before PTY submission is queued. Every other prompt
+# error (`agent_prompt_failed`, lowercase `timeout`, `agent_prompt_stalled`, unknown codes, or
+# `outcome == "unknown"`) is conservatively marked `prompt_delivery_uncertain = True`.
+PROMPT_PRE_SUBMIT_REFUSAL_CODES = frozenset(
+    (
+        "agent_blocked",
+        "agent_not_found",
+        "agent_not_ready",
+        "empty_agent_prompt",
+        "invalid_argument",
+        "invalid_target",
+        "pane_not_found",
+    )
+)
+
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -1190,11 +1206,43 @@ class HerdrHandoffService:
                 return fail_record("agent_start", exc)
 
             # Step 3: Submit baton prompt ONCE (no `--timeout` flag on non-waiting Herdr prompt;
-            # never blind-retry, never raw send-keys / pane run)
+            # never blind-retry, never raw send-keys / pane run) and verify typed `agent_prompted`
+            # response envelope binding `agent.name` and `agent.pane_id` before recording `launched`.
             try:
-                self.run_herdr(herdr_bin, prompt_args, timeout_s=prompt_timeout_ms / 1000.0)
+                prompt_resp = self.run_herdr(herdr_bin, prompt_args, timeout_s=prompt_timeout_ms / 1000.0)
+                prompt_result = prompt_resp.get("result")
+                if not isinstance(prompt_result, dict) or prompt_result.get("type") != "agent_prompted":
+                    raise HerdrHandoffError(
+                        "herdr agent prompt returned no valid `agent_prompted` result envelope; delivery uncertain",
+                        code="invalid_agent_prompt_response",
+                        exit_code=EXIT_ERROR,
+                    )
+                prompted_agent = prompt_result.get("agent")
+                if not isinstance(prompted_agent, dict):
+                    raise HerdrHandoffError(
+                        "herdr agent prompt `agent_prompted` result missing `agent` object; delivery uncertain",
+                        code="invalid_agent_prompt_response",
+                        exit_code=EXIT_ERROR,
+                    )
+                resp_name = prompted_agent.get("name")
+                resp_pane = prompted_agent.get("pane_id")
+                resp_tab = prompted_agent.get("tab_id")
+                resp_ws = prompted_agent.get("workspace_id")
+                if (
+                    resp_name != agent_name
+                    or resp_pane != succ_pane_id
+                    or (resp_tab is not None and resp_tab != succ_tab_id)
+                    or (resp_ws is not None and resp_ws != workspace_id)
+                ):
+                    raise HerdrHandoffError(
+                        f"herdr agent prompt acknowledged mismatched target "
+                        f"(name={resp_name!r}, pane_id={resp_pane!r}; expected {agent_name!r}, {succ_pane_id!r}); "
+                        "delivery uncertain",
+                        code="invalid_agent_prompt_response",
+                        exit_code=EXIT_ERROR,
+                    )
             except HerdrCommandError as exc:
-                uncertain = (exc.outcome == "unknown") or (exc.herdr_code == "agent_prompt_stalled")
+                uncertain = (exc.outcome == "unknown") or (exc.herdr_code not in PROMPT_PRE_SUBMIT_REFUSAL_CODES)
                 return fail_record("agent_prompt", exc, prompt_uncertain=uncertain)
             except HerdrHandoffError as exc:
                 return fail_record("agent_prompt", exc, prompt_uncertain=True)

@@ -772,10 +772,15 @@ machine:
       (omitting `--timeout` on Herdr argv because Herdr `0.9.5` rejects `--timeout` without
       `--wait`; `--prompt-timeout` bounds Python's `subprocess.run` operation timeout), using
       `/baton <tier1>` for Claude and `$baton <tier1>` for Codex (`skills/baton/SKILL.md`).
-      Never uses `herdr pane run` or raw `send-keys` for prompting. On `agent_not_ready`,
-      `agent_blocked`, `agent_prompt_stalled`, or any unknown outcome (timeout, oversized or
-      unparseable stdout), records `status: "failed"` (setting `prompt_delivery_uncertain: true`
-      whenever `outcome == "unknown"` or `code == "agent_prompt_stalled"`) and exits `1`
+      Verifies the exit-0 JSON response carries `result.type == "agent_prompted"` with matching
+      `result.agent.name` and `result.agent.pane_id` (failing closed with `status: "failed"` and
+      `prompt_delivery_uncertain: true` on empty, missing, or mismatched exit-0 responses).
+      Never uses `herdr pane run` or raw `send-keys` for prompting. Only deterministic
+      pre-submission refusals (`agent_blocked`, `agent_not_found`, `agent_not_ready`,
+      `empty_agent_prompt`, `invalid_argument`, `invalid_target`, `pane_not_found`) record
+      certain non-delivery; ambiguous server-side completion errors (`agent_prompt_failed`,
+      `timeout`, `agent_prompt_stalled`, unrecognized codes) and all `outcome == "unknown"`
+      failures record `status: "failed"` with `prompt_delivery_uncertain: true` and exit `1`
       without retrying.
 4. **Predecessor safety, durable record, and successor baton authority.** Never closes,
    kills, or exits the predecessor pane (`predecessor_preserved: true`), matching
@@ -786,13 +791,16 @@ machine:
    `head`, `status` (`launched` | `failed` | `dry-run`), and error details scrubbed of
    credentials before clipping. `--status RECORD` inspects a saved record (`O_NOFOLLOW`,
    bounded read) with zero `herdr` calls. `--dry-run` validates preflight and prints planned
-   commands without writing state or mutating Herdr layout. **Resume authority:** because
-   `ade-herdr-handoff` submits the baton prompt itself rather than the operator typing it,
-   an agent-submitted `/baton <tier1>` prompt is NOT treated as operator consent under
-   `session-handoff` Exemption C; before its first project write, the Herdr successor verifies
-   the matching `schema_version: 1` record in `<state-dir>` (`status: "launched"`, matching
-   `tier1_path` and `successor_pane_id == $HERDR_PANE_ID`) and runs `session-handoff`'s
-   live-owner check to confirm no other live session is actively writing the chain, stopping
-   to ask the operator whenever ownership is ambiguous or another live owner exists.
+   commands without writing state or mutating Herdr layout. If a caller passes a custom
+   `--state-dir`, it must include the resulting record path (or state directory) in the
+   handoff/report so the successor can locate the record beyond the default
+   `~/.local/state/djbclark-ade/herdr-handoff/`. **Resume provenance vs write authority:**
+   because `ade-herdr-handoff` submits the baton prompt itself rather than the operator typing
+   it, an agent-submitted `/baton <tier1>` prompt is NOT treated as operator consent under
+   `session-handoff` Exemption C. A matching `status: "launched"` record (`tier1_path` and
+   `successor_pane_id == $HERDR_PANE_ID`) establishes handoff provenance, not an autonomous
+   transfer of write authority: before its first project write, the successor runs
+   `session-handoff`'s live-owner check and stops to ask the operator whenever ownership is
+   ambiguous, another live owner exists, or no `session-handoff` exemption applies.
 5. **Exit codes.** `0` launched / dry-run / status ok; `1` operational or Herdr error;
    `2` usage or input validation error; `4` refused by caller/process-tree/lock guard.

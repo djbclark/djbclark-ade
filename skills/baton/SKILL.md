@@ -31,11 +31,14 @@ clear a parent session to make a child resume. See [context hygiene](../../docs/
   workspace resolution is unambiguous) manually. Because no Paseo `accept`/`finish` transaction
   exists in Herdr mode, do not run `ade-self-session accept|finish` and do not close the
   predecessor pane automatically. When resumed from an automated `ade-herdr-handoff` submission,
-  do NOT treat the agent-submitted prompt as operator consent under Exemption C: before the first
-  project write, verify the durable `schema_version: 1` Herdr handoff record in
-  `~/.local/state/djbclark-ade/herdr-handoff/` (matching `tier1_path` and `successor_pane_id`)
-  and run `session-handoff`'s live-owner check, stopping to ask the operator whenever ownership
-  is ambiguous or another live owner exists.
+  do NOT treat the agent-submitted prompt as operator consent under Exemption C: verify the
+  durable `schema_version: 1` `status: "launched"` Herdr handoff record in
+  `~/.local/state/djbclark-ade/herdr-handoff/` (or the record path / `--state-dir` reported by
+  the predecessor in the handoff when a custom `--state-dir` was used), matching `tier1_path`
+  and `successor_pane_id`. That matching record establishes handoff provenance, not an
+  autonomous transfer of write authority: run `session-handoff`'s live-owner check before the
+  first project write and ask the operator whenever ownership is ambiguous, another live owner
+  exists, or no `session-handoff` exemption applies.
 - **Standalone non-Paseo / non-Herdr sessions (no `$PASEO_AGENT_ID` and not in Herdr, operator
   ruling 2026-11-25):** no Paseo lifecycle controller or `ade-self-session` acknowledgement exists
   outside Paseo. After the predecessor writes the durable Tier 1 + Tier 2 checkpoints locally
@@ -91,8 +94,11 @@ explicitly names the chain (Exemption C, while still running the live-owner and 
 `session-handoff` Owner check steps 2–5); use bare `/baton` only when workspace resolution is unambiguous and
 ownership-checked. For an automated `ade-herdr-handoff` launch, the baton prompt is submitted by the
 predecessor rather than typed by the operator (not Exemption C operator consent): verify the durable
-`schema_version: 1` Herdr handoff record matching this pane and `tier1_path`, confirm no competing live
-writer owns the chain, and ask the operator before writing whenever ownership is ambiguous. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
+`schema_version: 1` `status: "launched"` Herdr handoff record matching this pane and `tier1_path`
+(in `~/.local/state/djbclark-ade/herdr-handoff/`, or the custom `--state-dir` / record path reported
+by the predecessor). That record establishes handoff provenance, while write authority under live-owner
+rules still requires operator confirmation whenever ownership is ambiguous, another live writer exists,
+or no `session-handoff` exemption applies. Incident: 2026-10-31, a `/baton` after `/clear` merged PR 173 ahead of PR 177.
 
 If the operator invoked this with no argument, resolve the current
 directory against the Tier 1 path convention in `session-handoff` (or,
