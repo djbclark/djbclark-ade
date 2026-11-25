@@ -165,3 +165,28 @@ def test_update_failure_exits_nonzero(tmp_path: Path):
     assert r.returncode == 1
     assert "rc=1" in r.stderr
     assert "tagged 0 non-worker agents" in r.stdout
+
+
+def test_human_renamed_tabs_classified_by_structured_labels(tmp_path: Path):
+    env = FakeEnv(tmp_path)
+    renamed_worker = uid(20)
+    renamed_lead = uid(21)
+    renamed_retired = uid(22)
+    state_worker = uid(23)
+    # Write a Paseo agent state file with ade.lead label (simulating ls rows without inline labels)
+    st_dir = env.home / "agents" / "proj"
+    st_dir.mkdir(parents=True, exist_ok=True)
+    (st_dir / f"{state_worker}.json").write_text(
+        json.dumps({"id": state_worker, "labels": {"ade.lead": renamed_lead, "ade.box": "WORKER"}}),
+        encoding="utf-8",
+    )
+    env.data["rows"] = [
+        {"id": renamed_worker, "name": "My custom tab", "status": "idle", "labels": {"ade.lead": renamed_lead, "ade.box": "WORKER"}},
+        {"id": state_worker, "name": "Daniel debugging Venice", "status": "idle"},
+        {"id": renamed_lead, "name": "worker planning notes", "status": "idle", "labels": {"ade.role": "djbclark-ade", "ade.box": "LEAD"}},
+        {"id": renamed_retired, "name": "Custom old tab", "status": "idle", "labels": {"ade.retired": "1"}},
+    ]
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    tagged = [c[2] for c in env.calls() if c[:2] == ["agent", "update"]]
+    assert tagged == [renamed_lead]

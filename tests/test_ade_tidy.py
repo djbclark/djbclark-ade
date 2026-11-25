@@ -1677,3 +1677,49 @@ def test_idle_hours_unreadable_or_failed_logs_blocks_sliced_worker(tmp_path: Pat
     r_apply = e.run("--idle-hours", "4", apply=True, as_json=False)
     assert r_apply.returncode == 0, r_apply.stderr
     assert e.archived_agents() == set()
+
+
+def test_q126_human_renamed_windows_and_tabs_keep_structured_classification_and_safety(tmp_path: Path, monkeypatch) -> None:
+    """Carried #126 (2026-11-25): renaming LEAD, WORKER, and OTHER windows or tabs to arbitrary human strings
+    never loses ownership, never causes a LEAD window to be archived, never falsely flags a registered WORKER box
+    as outside the scheme, and still proposes clean human-facing beginnings."""
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    # Replace default windows with arbitrary human names
+    e.data["workspaces"] = [
+        {"workspaceId": W_MAIN, "project": "myrepo", "name": "Daniel debugging Venice", "isolation": "local", "cwd": str(e.repo)},
+        {"workspaceId": W_WORK, "project": "myrepo", "name": "My custom worker window", "isolation": "local", "cwd": str(e.repo)},
+        {"workspaceId": W_EMPTY, "project": "myrepo", "name": "Old scratch worker", "isolation": "local", "cwd": str(e.repo)},
+    ]
+    # Register W_WORK (occupied) and W_EMPTY (empty, second WORKER box) in structured registry
+    wr_dir = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    wr_dir.mkdir(parents=True, exist_ok=True)
+    (wr_dir / f"{LEAD}.windows.json").write_text(json.dumps({
+        "windows": [W_WORK, W_EMPTY],
+        "entries": {
+            W_WORK: {"windowId": W_WORK, "box": "WORKER", "repo": "myrepo", "lead": LEAD, "work": "Wave 9"},
+            W_EMPTY: {"windowId": W_EMPTY, "box": "WORKER", "repo": "myrepo", "lead": LEAD, "work": "Old"},
+        },
+    }))
+    # Lead tab and worker tab renamed to arbitrary custom strings; internal helper marked by label only.
+    e.agent(LEAD, W_MAIN, "My custom tab", status="running", labels={"ade.role": "myrepo", "ade.box": "LEAD"})
+    w1 = e.agent("90000001-0000-0000-0000-000000000000", W_WORK, "Arbitrary worker title", status="running",
+                 labels={"ade.lead": LEAD, "slice": "venice-fix", "ade.box": "WORKER", "ade.repo": "myrepo"})
+    helper_id = e.agent("90000002-0000-0000-0000-000000000000", W_MAIN, "Renamed helper", status="idle",
+                        labels={"ade.internal": "1"})
+
+    p = json.loads(e.run(as_json=True).stdout)
+    classes = {a["id"]: a["class"] for a in p["agents"]}
+    assert classes[LEAD] == "self"
+    assert classes[w1] == "own-worker"
+    assert classes[helper_id] == "helper"
+    # W_WORK is the keeper WORKER box (NOT flagged "named outside the scheme"); W_EMPTY is the second WORKER box.
+    extra = {x["windowId"]: x for x in p["extra_windows"]}
+    assert W_WORK not in extra
+    assert W_EMPTY in extra and extra[W_EMPTY]["box"] == "WORKER" and "second WORKER window" in extra[W_EMPTY]["why"]
+    # LEAD window is NEVER in archive_windows even though its name has no `LEAD ` prefix.
+    arch_wins = {w["windowId"] for w in p["archive_windows"]}
+    assert W_MAIN not in arch_wins and W_EMPTY in arch_wins
+    # Proposed human-readable display renames restore clear beginnings (`LEAD myrepo (...)`, `WORKER myrepo (...)`).
+    renames = {r["windowId"]: r["to"] for r in p["renames"]}
+    assert renames[W_MAIN] == "LEAD myrepo (My custom tab)"
+    assert renames[W_WORK] == "WORKER myrepo (Wave 9)"

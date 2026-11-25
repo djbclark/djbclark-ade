@@ -19,6 +19,8 @@
 // Exit codes: 0 pinned (or nothing to do), 1 error, 2 usage, 69 macOS only (the launcher reports
 // helper-missing before we run).
 import { pathToFileURL } from "node:url";
+import { readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 
 const DIST = process.env.PASEO_SET_MODEL_CLI_DIST;
@@ -32,13 +34,39 @@ if (cmd !== "pin" || rest.some((x) => x !== "--check")) {
 }
 const check = rest.includes("--check");
 
+function loadRegisteredBoxes() {
+  const dir = process.env.ADE_WORKER_RUN_STATE || path.join(homedir(), ".local", "state", "ade", "worker-run");
+  const out = new Map();
+  let files = [];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".windows.json")).sort();
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    try {
+      const data = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
+      const entries = data && typeof data.entries === "object" ? data.entries : {};
+      for (const [wid, entry] of Object.entries(entries || {})) {
+        if (entry && typeof entry.box === "string" && !out.has(wid)) {
+          out.set(wid, entry.box.toUpperCase());
+        }
+      }
+    } catch {
+      // skip unreadable registry files
+    }
+  }
+  return out;
+}
+
 const effectiveName = (w) => w.title ?? w.name ?? "";
-const isWorkerBox = (w) => {
+const isExcluded = (w, boxes) => {
+  const box = boxes.get(w.id ?? w.workspaceId ?? "");
+  if (box === "WORKER") return true;
+  if (box === "LEAD" || box === "OTHER") return false;
   const n = String(effectiveName(w));
-  // `WORKER <repo>` (current) and `WORKERS <repo>` (the pre-2026-11-14 name) are worker boxes.
-  return n.startsWith("WORKER ") || n.startsWith("WORKERS ");
+  return n.startsWith("WORKER ") || n.startsWith("WORKERS ") || n.startsWith("RETIRED ");
 };
-const isRetiredWindow = (w) => String(effectiveName(w)).startsWith("RETIRED ");
 
 let client;
 let code = 1;
@@ -51,10 +79,11 @@ async function work() {
     console.error("error: the daemon client exposes no setWorkspacePinned; pinning is not available in this Paseo build");
     return 1;
   }
+  const boxes = loadRegisteredBoxes();
   const ws = await client.fetchWorkspaces({});
   const entries = Array.isArray(ws?.entries) ? ws.entries : [];
   const targets = entries.filter((w) =>
-    !w.background && !w.archivingAt && !w.archivedAt && !isWorkerBox(w) && !isRetiredWindow(w));
+    !w.background && !w.archivingAt && !w.archivedAt && !isExcluded(w, boxes));
   const todo = targets.filter((w) => !w.pinnedAt);
   if (check) {
     for (const w of targets) {

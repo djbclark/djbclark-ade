@@ -17,14 +17,14 @@ worktree they are in." At most three windows per lead and repo. Legacy MAIN, WOR
 The mechanics are `bin/ade-tidy` (observe-only by default). Run it from a **top-level lead session**:
 a sub-agent inherits the parent's agent id and its lifecycle actions would hit the parent (dispatch footer rule 15).
 
-## Window naming (authoritative)
+## Window naming (human-facing UI labels; structured metadata is authoritative)
 
-A window is `<KIND> <repo-name> (<current work>)`, KIND one of (**a box**: per lead chain and repo at most one window of each):
+A window's human-facing display name is `<KIND> <repo-name> (<current work>)`, KIND one of (**a box**: per lead chain and repo at most one window of each; operator ruling 2026-11-25: display names are UI labels only and are never treated as authoritative metadata if a human renames a window or tab):
 
-1. **LEAD** (was MAIN) — the lead's own window: the lead tab, plus workers the operator asked for interactively. Its name is
-   always `LEAD <repo-name> (...)`, e.g. `LEAD djbclark-ade (Wave 7)`. **Never archived.**
-2. **WORKER** (was WORKERS) — every worker and reviewer the lead started on its own (tabs `worker <slice> <lead id>`, optionally
-   ` [wt: <worktree>]`, label `ade.lead=<lead id>`); a lead's own worker may sit in any of its boxes without being reported as misplaced.
+1. **LEAD** (was MAIN) — the lead's own window: the lead tab, plus workers the operator asked for interactively. Refreshed to
+   `LEAD <repo-name> (...)`, e.g. `LEAD djbclark-ade (Wave 7)`. **Never archived**, even if renamed by a human.
+2. **WORKER** (was WORKERS) — every worker and reviewer the lead started on its own (concise tabs `worker <slice>`, optionally
+   ` [wt: <worktree>]`, structured labels `ade.lead=<lead id>`, `ade.box=WORKER`, `ade.repo=<repo>`); a lead's own worker may sit in any of its boxes without being reported as misplaced.
 3. **OTHER** (was USER) — probes, side tasks and agents the operator started without the lead, which the lead has connected to.
    Anything that belongs in neither LEAD nor WORKER.
 

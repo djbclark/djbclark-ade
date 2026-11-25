@@ -1,26 +1,28 @@
-"""Paseo window (workspace) names: `<KIND> <repo-name> (<current work>)`, and the legacy forms they replace.
+"""Paseo window (workspace) display names: `<KIND> <repo-name> (<current work>)`, concise tab names, and structured window registry helpers.
 
-Operator ruling 2026-11-14 (docs/workspace-layout.md): per lead and repo at most three windows ("boxes"), named exactly
-`<KIND> <repo> (<work>)`, KIND one of LEAD (the lead's own window, the tab row that includes the lead), WORKER (every
-worker and reviewer the lead starts), OTHER (anything else: probes, side tasks, agents the operator started that the lead
-connected). The lead's agent id is not part of a window name; it stays in the tab name (`worker <slice> <lead id>`) and
-the `ade.lead` label.
+Operator ruling 2026-11-25 (docs/workspace-layout.md): display names of workspaces, windows and tabs are human-facing UI labels ONLY —
+keep their beginnings clear and up to date (`LEAD <repo> (<work>)`, `WORKER <repo> (<work>)`, `OTHER <repo> (<work>)`,
+`worker <slice> [wt: ...]`), and NEVER use display names as a resource for metadata exchange between agents because a human may rename
+any workspace, window or tab at any time. Authoritative machine metadata lives in structured Paseo agent labels (`ade.lead`, `ade.box`,
+`ade.repo`, `ade.placement`, `ade.role`, `ade.chain`, `ade.retired`, `slice`, ...) and durable state records
+(`$ADE_WORKER_RUN_STATE/<lead>.windows.json`, `self-session/handoff-*.json`).
 
-The 2026-11-13 kinds MAIN, WORKERS and USER are still recognised by `parse` (`Name.box` maps them onto LEAD, WORKER and
-OTHER) and are renamed to the current kind when a launch reuses the window; `build` only makes the current kinds.
+Operator ruling 2026-11-14: per lead and repo at most three windows ("boxes"), named `<KIND> <repo> (<work>)`, KIND one of LEAD,
+WORKER or OTHER. The 2026-11-13 kinds MAIN, WORKERS and USER are still recognised by `parse` for display-name migration (`Name.box`
+maps them onto LEAD, WORKER and OTHER); `build` only makes the current kinds.
 
-Importable (no side effects): `build`, `parse`, `parse_legacy`, `migrated_name`, `repo_of`, `normalize_work`, `tab_name`,
-`KINDS`, `LEGACY_KINDS`, `BOX_OF`, `NAME_LIMIT`. Used by bin/ade-worker-run; the window tidy skill reuses them.
-
-Legacy forms recognised (`parse_legacy`): `workers <middle> <lead id>` and `WORKERS <middle> <lead id>` (the 2026-11-13
-morning scheme) and `MAIN <middle>` (no repo, no parentheses). `migrated_name` turns one into the current form.
+Importable (no side effects): `build`, `parse`, `parse_legacy`, `migrated_name`, `current_name`, `repo_of`, `normalize_work`,
+`tab_name`, `read_window_registry`, `write_window_registry`, `all_registered_windows`, `KINDS`, `LEGACY_KINDS`, `BOX_OF`,
+`NAME_LIMIT`, `WKS_RE`.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 from typing import NamedTuple
 
 KINDS = ("LEAD", "WORKER", "OTHER")
@@ -29,6 +31,7 @@ BOX_OF = {"LEAD": "LEAD", "WORKER": "WORKER", "OTHER": "OTHER", "MAIN": "LEAD", 
 NAME_LIMIT = 100  # docs/workspace-layout.md: keep a window or tab name under ~100 characters
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
 _NEW_RE = re.compile(rf"^({'|'.join(KINDS + LEGACY_KINDS)}) ({REPO_RE.pattern}) \((.+)\)$")
 _LEGACY_WORKERS_RE = re.compile(rf"^(workers|WORKERS) (.+) ({UUID_RE})$")
 _LEGACY_MAIN_RE = re.compile(r"^MAIN (.+)$")
@@ -118,10 +121,15 @@ def current_name(name: Name) -> str:
 TAB_PREFIX = {"LEAD": "worker", "WORKER": "worker", "OTHER": "other"}  # the first word of a tab name, by box
 
 
-def tab_name(box: str, slice_name: str, lead: str, worktree: str | None = None) -> str:
-    """`worker <slice> <lead id>`, with ` [wt: <worktree dir basename>]` when the launch names a worktree; `other ...` in the
-    OTHER box. The worktree part is a hint, so a name over NAME_LIMIT shortens it (with `~`) rather than failing."""
-    base = f"{TAB_PREFIX[box]} {slice_name} {lead}"
+def tab_name(box: str, slice_name: str, lead: str | None = None, worktree: str | None = None) -> str:
+    """Concise, human-understandable tab name: `worker <slice>` (or `other <slice>` in the OTHER box), with
+    ` [wt: <worktree dir basename>]` when the launch names a worktree.
+
+    Operator ruling 2026-11-25: lead ownership lives in the structured `ade.lead` label, never in the display tab name;
+    the optional `lead` parameter is accepted for call-site compatibility and ignored. The worktree part is a display hint,
+    so a name over NAME_LIMIT shortens it (with `~`) rather than failing."""
+    _ = lead  # ownership is carried by --label ade.lead=<lead>, not the tab title
+    base = f"{TAB_PREFIX[box]} {slice_name}"
     if not worktree:
         return base
     d = os.path.basename(os.path.realpath(worktree).rstrip("/")) or worktree
@@ -130,6 +138,100 @@ def tab_name(box: str, slice_name: str, lead: str, worktree: str | None = None) 
     if not d or room < 1:
         return base
     return f"{base} [wt: {d if len(d) <= room else d[:room - 1] + '~'}]"
+
+
+def normalize_window_entry(wks: str, raw: object) -> dict:
+    """Sanitize one structured window metadata record (backward-compatible; all fields optional via `.get`)."""
+    out: dict[str, str] = {"windowId": wks}
+    if not isinstance(raw, dict):
+        return out
+    raw_box = raw.get("box")
+    if isinstance(raw_box, str) and raw_box.strip().upper() in BOX_OF:
+        out["box"] = BOX_OF[raw_box.strip().upper()]
+    for key in ("repo", "lead", "cwd", "work"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            out[key] = val
+    return out
+
+
+def read_window_registry(path: Path) -> tuple[set[str], dict[str, dict]]:
+    """Read `<lead>.windows.json` -> `(window_ids, entries)`.
+
+    Older records with only `{"windows": [...]}` load cleanly with empty `entries`. Corrupt JSON,
+    a missing/invalid `"windows"` list, or a non-dict `"entries"` raises ValueError (callers fail closed).
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set(), {}
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("registry root must be an object")
+    ids = data["windows"]
+    if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
+        raise ValueError("bad window id")
+    id_set = set(ids)
+    raw_entries = data.get("entries")
+    if raw_entries is None:
+        return id_set, {}
+    if not isinstance(raw_entries, dict):
+        raise ValueError("bad entries map")
+    entries: dict[str, dict] = {}
+    for wks in id_set:
+        if wks in raw_entries:
+            if not isinstance(raw_entries[wks], dict):
+                raise ValueError(f"bad entry for {wks}")
+            entries[wks] = normalize_window_entry(wks, raw_entries[wks])
+    return id_set, entries
+
+
+def write_window_registry(path: Path, ids: set[str], entries: dict[str, dict] | None = None) -> None:
+    """Atomically write `<lead>.windows.json` with both `"windows"` (backward compatible) and structured `"entries"`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {"windows": sorted(ids)}
+    if entries:
+        clean_entries = {w: normalize_window_entry(w, entries[w]) for w in sorted(ids) if w in entries and entries[w]}
+        if clean_entries:
+            payload["entries"] = clean_entries
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def default_worker_run_state_dir() -> Path:
+    return Path(os.environ.get("ADE_WORKER_RUN_STATE") or Path.home() / ".local/state/ade/worker-run")
+
+
+def all_registered_windows(state_dir: Path | None = None) -> dict[str, dict]:
+    """Best-effort map of `workspaceId -> structured metadata` across all `<lead>.windows.json` files.
+
+    Used by read-only classifiers (such as `ade-pin-workspaces`) so a human-renamed WORKER or OTHER box keeps
+    its structured classification. Unreadable files are skipped (callers that mutate use `read_window_registry` directly).
+    """
+    base = state_dir or default_worker_run_state_dir()
+    if not base.is_dir():
+        return {}
+    uuid_pat = re.compile(UUID_RE)
+    out: dict[str, dict] = {}
+    for path in sorted(base.glob("*.windows.json")):
+        owner = path.name[:-len(".windows.json")]
+        if not uuid_pat.fullmatch(owner):
+            continue
+        try:
+            ids, entries = read_window_registry(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for wks in ids:
+            meta = dict(entries.get(wks) or {"windowId": wks})
+            meta.setdefault("lead", owner)
+            out.setdefault(wks, meta)
+    return out
 
 
 def _git(path: str, *argv: str) -> str:

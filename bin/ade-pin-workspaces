@@ -25,6 +25,7 @@ from pathlib import Path
 # the real directory so the installed symlink uses the same trusted client.
 sys.path.append(str(Path(__file__).resolve().parent))
 import ade_paseo_client as pc
+import ade_ws_names as wsn
 
 APP = "/Applications/Paseo.app/Contents"
 DEFAULT_HELPER = f"{APP}/Frameworks/Paseo Helper.app/Contents/MacOS/Paseo Helper"
@@ -66,12 +67,27 @@ def effective_name(workspace: dict) -> str:
     return name if isinstance(name, str) else ""
 
 
+def is_excluded_workspace(workspace: dict, registered: dict[str, dict]) -> bool:
+    """Skip WORKER boxes and RETIRED windows using structured window registry metadata first (2026-11-25 ruling),
+    falling back to legacy display-name prefixes only for unregistered windows."""
+    wid = workspace.get("id") or workspace.get("workspaceId")
+    meta = registered.get(wid) if isinstance(wid, str) else None
+    if isinstance(meta, dict):
+        box = meta.get("box")
+        if box == "WORKER":
+            return True
+        if box in ("LEAD", "OTHER"):
+            return False
+    return effective_name(workspace).startswith(("WORKER ", "WORKERS ", "RETIRED "))
+
+
 def pin_workspaces(client: pc.PaseoClient, *, check: bool) -> int:
+    registered = wsn.all_registered_windows()
     targets = [
         workspace
         for workspace in client.list_workspaces(include_pin_state=True)
         if not (workspace.get("background") or workspace.get("archivingAt") or workspace.get("archivedAt"))
-        and not effective_name(workspace).startswith(("WORKER ", "WORKERS ", "RETIRED "))
+        and not is_excluded_workspace(workspace, registered)
     ]
     todo = [workspace for workspace in targets if not workspace.get("pinnedAt")]
     if check:

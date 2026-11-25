@@ -64,7 +64,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-RETIRED_PREFIX = "RETIRED "
+RETIRED_PREFIX = "RETIRED "  # legacy-only display fallback for pre-2026-11-25 tabs (never inter-agent metadata)
+RETIRED_LABEL = "ade.retired"
+RETIRED_TO_LABEL = "ade.retired_to"
 DEFAULT_MIN_IDLE = 120.0
 LS_TIMEOUT = 60
 INSPECT_TIMEOUT = 30
@@ -230,30 +232,66 @@ def load_watcher(path: Path, active_paseo_home: Path | None = None) -> tuple[str
     return norm_target, None
 
 
+def _state_labels(aid: str) -> dict:
+    """Read structured labels from `$PASEO_HOME/agents/*/<aid>.json`, else {} (never raises)."""
+    if not isinstance(aid, str) or not UUID_RE.fullmatch(aid):
+        return {}
+    agents_dir = default_paseo_home() / "agents"
+    try:
+        for path in sorted(agents_dir.glob(f"*/{aid}.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            labels = data.get("labels") if isinstance(data, dict) else None
+            if isinstance(labels, dict):
+                return labels
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def is_retired_by_label(aid: str, payload: object = None) -> bool:
+    """True when structured `ade.retired=1` or `ade.retired_to` is present on payload or agent state file."""
+    candidates = []
+    if isinstance(payload, dict):
+        candidates.extend((payload.get("labels"), payload.get("Labels")))
+    candidates.append(_state_labels(aid))
+    for labels in candidates:
+        if not isinstance(labels, dict):
+            continue
+        if str(labels.get(RETIRED_LABEL) or "").strip().lower() in ("1", "true", "yes"):
+            return True
+        if isinstance(labels.get(RETIRED_TO_LABEL), str) and labels[RETIRED_TO_LABEL].strip():
+            return True
+    return False
+
+
 def parents_with_live_children(rows: list) -> set[str]:
-    """Return lowercase parent UUIDs referenced by any live non-RETIRED, non-baton-writer=1 child."""
+    """Return lowercase parent UUIDs referenced by any live non-retired, non-helper child."""
     parents: set[str] = set()
     for row in rows:
         if not isinstance(row, dict):
             continue
         if row.get("archived") is True or bool(row.get("archivedAt")):
             continue
-        name = row.get("name")
-        if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
+        row_id_raw = str(row.get("id") or "").strip()
+        row_id = row_id_raw.lower()
+        labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+        if not labels and UUID_RE.fullmatch(row_id):
+            labels = _state_labels(row_id)
+        if str(labels.get("baton-writer") or "") == "1":
             continue
-        labels = row.get("labels")
-        if isinstance(labels, dict):
-            if str(labels.get("baton-writer") or "") == "1":
-                continue
-            parent = labels.get("paseo.parent-agent-id")
-        else:
-            parent = None
+        if str(labels.get("ade.internal") or "").strip().lower() in ("1", "true", "yes"):
+            continue
+        if is_retired_by_label(row_id, row) or (UUID_RE.fullmatch(row_id) and handoff_successor(row_id) is not None):
+            continue
+        name = row.get("name")
+        if isinstance(name, str) and name.startswith(RETIRED_PREFIX):  # legacy fallback for pre-2026-11-25 tabs
+            continue
+        parent = labels.get("paseo.parent-agent-id")
         if not isinstance(parent, str) or not parent.strip():
             parent = row.get("parentAgentId")
         if not isinstance(parent, str):
             continue
         norm_parent = parent.strip().lower()
-        row_id = str(row.get("id") or "").strip().lower()
         if norm_parent and norm_parent != row_id:
             parents.add(norm_parent)
     return parents
@@ -378,6 +416,7 @@ def evaluate_inspect(
     by_handoff_list: str | None,
     min_idle: float,
     now: float,
+    by_label_list: bool = False,
 ) -> tuple[dict | None, str | None]:
     """Validate fresh `paseo agent inspect` payload. Returns `(plan_item, skip_reason)`."""
     if not isinstance(info, dict):
@@ -401,18 +440,21 @@ def evaluate_inspect(
     if age < min_idle:
         return None, "recently-active"
     inspect_name = info.get("Name")
-    inspect_by_name = isinstance(inspect_name, str) and inspect_name.startswith(RETIRED_PREFIX)
+    inspect_by_name = isinstance(inspect_name, str) and inspect_name.startswith(RETIRED_PREFIX)  # legacy display fallback
+    inspect_by_label = is_retired_by_label(aid, info)
     inspect_by_handoff = handoff_successor(aid)
-    if by_name_list and not by_handoff_list and not inspect_by_name and inspect_by_handoff is None:
+    if by_name_list and not by_handoff_list and not by_label_list and not inspect_by_name and not inspect_by_label and inspect_by_handoff is None:
         return None, "name-changed"
-    if not inspect_by_name and inspect_by_handoff is None:
+    if not inspect_by_name and not inspect_by_label and inspect_by_handoff is None:
         return None, "retirement-unproven"
     if inspect_by_name and inspect_by_handoff is not None:
         proof = "both"
-    elif inspect_by_name:
-        proof = "retired-name"
-    else:
+    elif inspect_by_handoff is not None:
         proof = "handoff-successor"
+    elif inspect_by_label:
+        proof = "retired-label"
+    else:
+        proof = "retired-name"
     return {
         "id": aid,
         "status": status,
@@ -486,7 +528,8 @@ def run_sweep(
             by_name = isinstance(raw_name, str) and raw_name.startswith(RETIRED_PREFIX)
             valid_uuid = isinstance(aid, str) and bool(UUID_RE.fullmatch(aid))
             by_handoff = handoff_successor(aid) if valid_uuid else None
-            if not by_name and by_handoff is None:
+            by_label = is_retired_by_label(aid, row) if valid_uuid else False
+            if not by_name and not by_label and by_handoff is None:
                 continue
             summary["candidates"] += 1
             if not valid_uuid:
@@ -515,7 +558,7 @@ def run_sweep(
                 summary["skipped"].append({"id": aid, "reason": "inspect-failed", "detail": ins_err})
                 continue
 
-            item, skip_reason = evaluate_inspect(aid, ins_data, by_name, by_handoff, min_idle, now_fn())
+            item, skip_reason = evaluate_inspect(aid, ins_data, by_name, by_handoff, min_idle, now_fn(), by_label_list=by_label)
             if skip_reason is not None or item is None:
                 summary["skipped"].append({"id": aid, "reason": skip_reason or "inspect-failed"})
                 continue

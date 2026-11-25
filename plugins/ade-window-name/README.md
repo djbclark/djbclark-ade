@@ -27,12 +27,11 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 2. **First agent only.** The agent must be the earliest-created (ties by id) non-archived, non-background agent in the window; an agent
    joining a window does not name it. A closed (not archived) first agent still counts as first. The agent list is read unpaged, so past
    the server's 200-agent default page an older agent could be missing (32 non-archived agents on 2026-11-14).
-3. **KIND** (2026-11-14: LEAD, WORKER, OTHER; the 2026-11-13 MAIN, WORKERS, USER are the old spellings). `WORKER` when the agent has a parent (`parentAgentId`) or an `ade.lead` label; otherwise `LEAD`. The `ade.placement` label
-   (`lead`|`main`, `worker`|`workers`, `other`|`user`) overrides; **`OTHER` is never guessed**: it is what a lead connects the operator's agents into (tidy skill).
-4. **`<repo>`** is the main checkout's name via git (a linked worktree `my-repo-x-wt` reads `my-repo`), else the directory's basename.
+3. **KIND** (2026-11-14: LEAD, WORKER, OTHER; 2026-11-25: read strictly from structured labels/fields, never display titles). `ade.box` (`LEAD`|`WORKER`|`OTHER`) overrides first, then `ade.placement` (`lead`|`main`, `worker`|`workers`, `other`|`user`), then `WORKER` when the agent has a parent (`parentAgentId`) or an `ade.lead` label; otherwise `LEAD`. **`OTHER` is never guessed**: it is what a lead connects the operator's agents into (tidy skill).
+4. **`<repo>`** is structured `ade.repo` when valid, else the main checkout's name via git (a linked worktree `my-repo-x-wt` reads `my-repo`), else the directory's basename.
    A name that is not a valid window-name part (a space in the directory) leaves the window alone.
-5. **`<work>`** is the agent's title, at most 50 characters at a word boundary, one line, no parentheses: a `worker <slice> <lead id>`
-   title reduces to the slice, `LEAD|MAIN <repo> <work>` (upper case, the tab names; also `other <slice> <lead id>` tabs) to the work, a leading `<repo> ` is dropped. No title
+5. **`<work>`** prefers structured `slice` label first, else the agent's display title, at most 50 characters at a word boundary, one line, no parentheses: a concise `worker <slice> [wt: ...]` or legacy `worker <slice> <lead id>`
+   title reduces to the slice, `LEAD|MAIN <repo> <work>` (upper case, the tab names; also `other <slice>` tabs) to the work, a leading `<repo> ` is dropped. No title
    yet: wait for the retry.
 6. **`bin/ade-worker-run` launches are skipped** (labels `slice` and `ade.lead`): it names its own windows right after the launch, and a
    plugin write landing between its read and its rename could otherwise win.

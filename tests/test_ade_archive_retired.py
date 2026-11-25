@@ -544,3 +544,41 @@ def test_ade_pin_sweep_runs_archive_retired_before_pin_interactive(tmp_path: Pat
         ["ade-pin-interactive"],
         ["ade-pin-workspaces", "pin"],
     ]
+
+
+def test_archives_human_renamed_agent_with_structured_retired_label(tmp_path: Path):
+    env = Env(tmp_path)
+    labeled_retired = env.add_agent(
+        uid(30),
+        "Daniel old custom tab",
+        status="idle",
+        labels={"ade.retired": "1", "ade.retired_to": uid(99)},
+    )
+    # Also ensure inspect carries structured labels via state file (as Paseo does when inspect omits labels).
+    st_dir = env.home / "agents" / "proj"
+    st_dir.mkdir(parents=True, exist_ok=True)
+    (st_dir / f"{labeled_retired}.json").write_text(
+        json.dumps({"id": labeled_retired, "labels": {"ade.retired": "1", "ade.retired_to": uid(99)}}),
+        encoding="utf-8",
+    )
+    # A retired child marked by label (renamed by human) must not block its parent.
+    parent = env.add_agent(uid(31), "Custom parent", status="idle", labels={"ade.retired": "1"})
+    (st_dir / f"{parent}.json").write_text(
+        json.dumps({"id": parent, "labels": {"ade.retired": "1"}}),
+        encoding="utf-8",
+    )
+    child = env.add_agent(
+        uid(32),
+        "My custom child tab",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent, "ade.retired": "1"},
+    )
+    (st_dir / f"{child}.json").write_text(
+        json.dumps({"id": child, "labels": {"paseo.parent-agent-id": parent, "ade.retired": "1"}}),
+        encoding="utf-8",
+    )
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert {x["id"] for x in s["archived"]} == {labeled_retired, parent, child}
+    assert all(x["proof"] == "retired-label" for x in s["archived"])

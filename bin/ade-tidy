@@ -301,21 +301,54 @@ def in_roots(cwd: str, roots: list[str]) -> bool:
     return any(c == r or c.startswith(r + os.sep) for r in roots)
 
 
+def _is_truthy_label(val) -> bool:
+    return str(val or "").strip().lower() in ("1", "true", "yes")
+
+
+def _box_from_labels(labels: dict | None) -> str | None:
+    if not isinstance(labels, dict):
+        return None
+    raw_box = str(labels.get("ade.box") or "").strip().upper()
+    if raw_box in ("LEAD", "WORKER", "OTHER"):
+        return raw_box
+    if raw_box in ("MAIN", "WORKERS", "USER"):
+        return {"MAIN": "LEAD", "WORKERS": "WORKER", "USER": "OTHER"}[raw_box]
+    raw_place = str(labels.get("ade.placement") or "").strip().lower()
+    return {"lead": "LEAD", "main": "LEAD", "worker": "WORKER", "workers": "WORKER", "other": "OTHER", "user": "OTHER"}.get(raw_place)
+
+
 def classify(agent: dict, st: dict | None, lead: str, lead_ids: set[str], foreign_main: bool = False,
              chain: set[str] | None = None) -> str:
+    """Classify an agent strictly from structured metadata first (2026-11-25 ruling).
+
+    Display names (`[Handoff writer]`, `LEAD`/`MAIN`) are consulted only as a legacy fallback when
+    no structured label/state record classifies the agent, never overriding structured labels.
+    """
     aid, name = agent["id"], str(agent.get("name") or "")
-    labels = (st or {}).get("labels") or {}
+    labels = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else (agent.get("labels") if isinstance(agent.get("labels"), dict) else {})
     owner = labels.get("ade.lead") if isinstance(labels, dict) else None
     if aid == lead:
         return "self"
-    if name.startswith("[Handoff writer]") or (st or {}).get("internal") is True:
+    if ((st or {}).get("internal") is True
+            or _is_truthy_label(labels.get("ade.internal"))
+            or str(labels.get("baton-writer") or "") == "1"
+            or name.startswith("[Handoff writer]")):  # legacy fallback for unlabelled pre-existing Baton helpers
         return "helper"
     if owner == lead or (owner and chain and owner in chain):  # a predecessor's worker in the same self-handoff chain is ours
         return "own-worker"
     if owner:
         return "other-worker"
-    if aid in lead_ids or foreign_main or re.match(r"(?i)(lead|main)\b", name):
-        return "lead"  # foreign_main: an unlabelled agent in another lead's MAIN window is not the operator's
+    structured_box = _box_from_labels(labels)
+    if (aid in lead_ids
+            or foreign_main
+            or bool(labels.get("ade.role"))
+            or bool(labels.get("ade.chain"))
+            or structured_box == "LEAD"):
+        return "lead"
+    if structured_box in ("WORKER", "OTHER"):
+        return "operator"
+    if re.match(r"(?i)(lead|main)\b", name):  # legacy fallback when no structured labels exist
+        return "lead"
     return "operator"
 
 
@@ -791,6 +824,18 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
                 if s and isinstance(s.get("labels"), dict) and s["labels"].get("ade.lead")}
     self_wks = (states.get(lead) or {}).get("workspaceId")
     chain = chain_of(lead)
+    # Windows structurally known to hold another lead (by ade.lead target or ade.role/ade.chain/ade.box=LEAD),
+    # regardless of whether a human renamed the window.
+    foreign_lead_wks = set()
+    for a in allrows:
+        st = states[a["id"]]
+        wks_a = st.get("workspaceId") if st and WKS_RE.fullmatch(str(st.get("workspaceId", ""))) else None
+        if not wks_a or wks_a == self_wks or a["id"] in chain:
+            continue
+        lbls = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else {}
+        if (a["id"] in lead_ids or lbls.get("ade.role") or lbls.get("ade.chain")
+                or _box_from_labels(lbls) == "LEAD"):
+            foreign_lead_wks.add(wks_a)
     permits = opts.permits or {}
     handled = set(filter(None, (opts.handled or "").split(",")))
     out = []
@@ -800,7 +845,10 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
         win = wmap.get(wks) if wks else None
         if not in_roots(a.get("cwd") or "", roots):  # by the agent's own directory only (a window's project is just its basename)
             continue
-        foreign_main = bool(win and wks != self_wks and LEAD_NAME_RE.match(str(win.get("name") or "")))
+        foreign_main = bool(wks and wks != self_wks and (
+            wks in foreign_lead_wks
+            or (win and LEAD_NAME_RE.match(str(win.get("name") or "")))  # legacy fallback for unlabelled foreign lead window
+        ))
         row = {"id": a["id"], "name": clean(a.get("name") or "", 120), "status": clean(a.get("status"), 20),
                "cwd": a.get("cwd"), "windowId": wks, "windowName": clean(win.get("name"), 120) if win else None,
                "class": classify(a, st, lead, lead_ids, foreign_main, chain), "slice": ((st or {}).get("labels") or {}).get("slice"),
@@ -898,19 +946,42 @@ def lock_for(lead: str) -> Locks:
     return Locks(lead)
 
 
-def read_registry(lead: str) -> set[str]:
-    """The window ids ade-worker-run recorded as this lead's (`<lead>.windows.json`). A missing file is an empty set; an
-    unreadable one raises Refused: ownership is unknown, so nothing is renamed or archived."""
+def read_registry_entries(lead: str) -> tuple[set[str], dict[str, dict]]:
+    """The window ids and structured entries ade-worker-run recorded as this lead's (`<lead>.windows.json`).
+    A missing file is empty; an unreadable one raises Refused: ownership is unknown, so nothing is renamed or archived."""
     path = worker_run_dir() / f"{lead}.windows.json"
+    names = names_mod()
     try:
-        ids = json.loads(path.read_text())["windows"]
+        if names is not None and hasattr(names, "read_window_registry"):
+            return names.read_window_registry(path)
+        data = json.loads(path.read_text())
+        ids = data["windows"]
         if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
             raise ValueError("bad window id")
-        return set(ids)
+        raw_entries = data.get("entries") or {}
+        if not isinstance(raw_entries, dict):
+            raise ValueError("bad entries")
+        return set(ids), {k: v for k, v in raw_entries.items() if k in ids and isinstance(v, dict)}
     except FileNotFoundError:
-        return set()
+        return set(), {}
     except (OSError, ValueError, KeyError, TypeError):
         raise Refused(f"the window ownership record {path} is unreadable: nothing is renamed or archived (fix or remove it by hand)")
+
+
+def read_registry(lead: str) -> set[str]:
+    """The window ids ade-worker-run recorded as this lead's (`<lead>.windows.json`)."""
+    return read_registry_entries(lead)[0]
+
+
+def chain_registry_entries(lead: str) -> dict[str, dict]:
+    """Merged structured window metadata across `lead` and its self-handoff chain (`lead` takes precedence)."""
+    merged: dict[str, dict] = {}
+    for x in sorted(chain_of(lead)):
+        _, ents = read_registry_entries(x)
+        for wks, entry in ents.items():
+            if x == lead or wks not in merged:
+                merged[wks] = entry
+    return merged
 
 
 def other_leads_windows(lead: str) -> dict[str, str]:
@@ -925,22 +996,49 @@ def other_leads_windows(lead: str) -> dict[str, str]:
     return out
 
 
-def register_window(lead: str, wks: str) -> None:
-    _write_registry(lead, read_registry(lead) | {wks})
+def register_window(lead: str, wks: str, *, box: str | None = None, repo: str | None = None,
+                    cwd: str | None = None, work: str | None = None) -> None:
+    ids, entries = read_registry_entries(lead)
+    if any(v is not None for v in (box, repo, cwd, work)) or wks in entries:
+        entry = dict(entries.get(wks) or {"windowId": wks})
+        entry["windowId"] = wks
+        entry["lead"] = lead
+        if box is not None:
+            entry["box"] = box
+        if repo is not None:
+            entry["repo"] = repo
+        if cwd is not None:
+            entry["cwd"] = cwd
+        if work is not None:
+            entry["work"] = work
+        entries[wks] = entry
+    _write_registry(lead, ids | {wks}, entries)
 
 
 def unregister_window(lead: str, wks: str) -> None:
-    _write_registry(lead, read_registry(lead) - {wks})
+    ids, entries = read_registry_entries(lead)
+    if wks in ids:
+        entries.pop(wks, None)
+        _write_registry(lead, ids - {wks}, entries)
 
 
-def _write_registry(lead: str, ids: set[str]) -> None:
+def _write_registry(lead: str, ids: set[str], entries: dict[str, dict] | None = None) -> None:
     """Atomic, in ade-worker-run's format (the caller holds the lead and global locks)."""
     path = worker_run_dir() / f"{lead}.windows.json"
+    names = names_mod()
+    if names is not None and hasattr(names, "write_window_registry"):
+        names.write_window_registry(path, ids, entries)
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {"windows": sorted(ids)}
+    if entries:
+        clean_entries = {w: entries[w] for w in sorted(ids) if w in entries and entries[w]}
+        if clean_entries:
+            payload["entries"] = clean_entries
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump({"windows": sorted(ids)}, fh)
+            json.dump(payload, fh, sort_keys=True)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -1025,6 +1123,7 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
     for r in rows:
         if r["windowId"]:
             by_win.setdefault(r["windowId"], []).append(r)
+    own_entries = chain_registry_entries(opts.lead_id) if getattr(opts, "lead_id", None) else {}
     work_over = {}
     for item in opts.work or []:
         k, _, v = item.partition("=")
@@ -1037,7 +1136,16 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
         agents = [r for r in by_win.get(wks, []) if r["class"] not in SKIP_CLASSES]
         if not (in_roots(w.get("cwd") or "", roots) or by_win.get(wks)):
             continue
+        w_entry = own_entries.get(wks) or {}
         kind = window_kind(agents)
+        # Prefer structured registry box or explicit worker labels when present (2026-11-25 ruling).
+        if kind != "LEAD":
+            if w_entry.get("box") in KINDS:
+                kind = w_entry["box"]
+            elif kind == "WORKER":
+                explicit_boxes = {_box_from_labels(r.get("labels")) for r in agents if _box_from_labels(r.get("labels"))}
+                if explicit_boxes == {"OTHER"}:
+                    kind = "OTHER"
         occupants = occupancy.get(wks, [])
         foreign = [a for a in occupants if a not in {r["id"] for r in by_win.get(wks, [])}]
         entry = {"windowId": wks, "name": clean(w.get("name"), 120), "cwd": w.get("cwd"), "kind": kind, "isolation": w.get("isolation"), "agents": [r["id"] for r in agents],
@@ -1065,9 +1173,10 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
         if any(r["class"] in ("other-worker", "lead") for r in by_win.get(wks, [])) or (legacy and legacy.lead not in (None, *chain_of(opts.lead_id))):
             out["notes"].append(f"{wks} holds another lead's agent(s) or carries another lead's id: not renamed")
             continue
-        if parsed or legacy:
-            kind = parsed.box if parsed else names.BOX_OF[legacy.kind]  # an existing name keeps its box (MAIN -> LEAD ...): only the repo/work part is fixed
+        if not w_entry.get("box") and (parsed or legacy):
+            kind = parsed.box if parsed else names.BOX_OF[legacy.kind]  # display fallback when no structured box exists
         work = work_over.get(kind) or (parsed.work if parsed else None) \
+            or w_entry.get("work") \
             or (names.normalize_work(legacy.middle, repo) if legacy else None) or derive_work(kind, agents, repo)
         if not work:
             out["notes"].append(f"{wks} ({kind}): no current-work text; pass --work {kind}=TEXT")
@@ -1083,8 +1192,43 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
 
 
 def is_main_name(name: str) -> bool:
-    """A LEAD window (or a 2026-11-13 MAIN one): never archived from here."""
+    """Legacy display-name fallback for a LEAD/MAIN window (never sole authority; see `is_lead_window`)."""
     return bool(LEAD_NAME_RE.match(name or ""))
+
+
+def structured_window_box(wks: str, lead: str, entries: dict[str, dict] | None = None) -> str | None:
+    """Resolve a window's box (`LEAD`, `WORKER`, `OTHER`) from explicit structured records and agent labels, else None."""
+    lead_state = state_file(lead)
+    if lead_state and lead_state.get("workspaceId") == wks:
+        return "LEAD"
+    entry = (entries or {}).get(wks)
+    if isinstance(entry, dict) and entry.get("box") in KINDS:
+        return entry["box"]
+    mine = chain_of(lead)
+    recs = [d for d in agent_state_files() if not d.get("_bad") and d.get("workspaceId") == wks]
+    if any(d.get("id") in mine for d in recs):
+        return "LEAD"
+    boxes: set[str] = set()
+    for d in recs:
+        labels = d.get("labels") if isinstance(d.get("labels"), dict) else {}
+        b = _box_from_labels(labels)
+        if b:
+            boxes.add(b)
+    if "LEAD" in boxes:
+        return "LEAD"
+    if len(boxes) == 1:
+        return next(iter(boxes))
+    return None
+
+
+def is_lead_window(wks: str, name: str, lead: str, entries: dict[str, dict] | None = None, kind: str | None = None) -> bool:
+    """True when `wks` is a LEAD window by structured metadata (lead's own window, registry, agent labels)
+    or legacy `LEAD`/`MAIN` display name. Never archived by ade-tidy even if a human renamed it."""
+    if kind == "LEAD":
+        return True
+    if structured_window_box(wks, lead, entries) == "LEAD":
+        return True
+    return is_main_name(name)
 
 
 def _ours_or_unknown(wks: str, nm: str, lead: str) -> bool:
@@ -1096,10 +1240,12 @@ def _ours_or_unknown(wks: str, nm: str, lead: str) -> bool:
 
 def extra_windows(wins: list[dict], occupancy: dict, opts, lead: str, names, archiving: set[str]) -> list[dict]:
     """Windows of this lead's chain beyond the three boxes: per (repo, box) every owned window but the keeper (most live agents;
-    ties: a current-form name, then the id), and an owned window whose name is outside the scheme (the lead's own LEAD window
-    excepted). Reported only; --apply archives those that are empty or finished (`archive_windows`), never another lead's."""
+    ties: a current-form name, then the id), and an owned window with neither a structured box nor a scheme name (the lead's own
+    LEAD window excepted). Uses structured registry/label metadata FIRST (2026-11-25 ruling), so a human-renamed WORKER or OTHER
+    box is still grouped under its true box and repo rather than falsely flagged as outside the scheme."""
     if names is None:
         return []
+    own_entries = chain_registry_entries(lead)
     groups: dict[tuple[str, str], list[dict]] = {}
     out = []
     for w in wins:
@@ -1107,14 +1253,20 @@ def extra_windows(wins: list[dict], occupancy: dict, opts, lead: str, names, arc
         if wks in (opts.other_windows or {}) or not _ours_or_unknown(wks, nm, lead):
             continue
         parsed, legacy = names.parse(nm), names.parse_legacy(nm)
-        box = parsed.box if parsed else (names.BOX_OF[legacy.kind] if legacy else None)
+        w_entry = own_entries.get(wks) or {}
+        # Structured box first (registry -> agent records -> live agent kind), display name only as legacy fallback.
+        box = (w_entry.get("box") if w_entry.get("box") in KINDS else None) \
+            or structured_window_box(wks, lead, own_entries) \
+            or (w.get("kind") if w.get("kind") in KINDS else None) \
+            or (parsed.box if parsed else (names.BOX_OF[legacy.kind] if legacy else None))
         if box is None:
-            if w.get("kind") != "LEAD":
+            if not is_lead_window(wks, nm, lead, own_entries, w.get("kind")):
                 out.append({"windowId": wks, "name": nm, "box": None, "live": len(occupancy.get(wks, [])), "why": "named outside the scheme"})
             continue
-        if box == "LEAD":
+        if box == "LEAD" or is_lead_window(wks, nm, lead, own_entries, w.get("kind")):
             continue  # a lead's own window; a successor's predecessor window is archived by the handoff, not here
-        groups.setdefault((parsed.repo if parsed else (names.repo_of(w["cwd"]) if w.get("cwd") else "?"), box), []).append(w)
+        repo_name = w_entry.get("repo") or (parsed.repo if parsed else None) or (names.repo_of(w["cwd"]) if w.get("cwd") else "?")
+        groups.setdefault((repo_name, box), []).append(w)
     for (repo_name, box), ws in sorted(groups.items()):
         if len(ws) < 2:
             continue
@@ -1181,9 +1333,10 @@ def plan(opts, lead: str, repo: str, roots: list[str]) -> dict:
     p["archive_windows"], p["empty_not_ours"] = [], []
     if unplaced:
         p["notes"].append(f"{len(unplaced)} live agent(s) have no workspaceId in a state file: no window is archived")
+    own_entries = chain_registry_entries(lead)
     for w in win["windows"]:
         wks, nm = w["windowId"], w.get("name") or ""
-        if is_main_name(nm) or w["kind"] == "LEAD" or any(r["class"] == "self" for r in mine if r["windowId"] == wks):
+        if is_lead_window(wks, nm, lead, own_entries, w["kind"]) or any(r["class"] == "self" for r in mine if r["windowId"] == wks):
             continue
         if [a for a in occupancy.get(wks, []) if a not in leaving]:
             continue  # someone stays in it
@@ -1458,7 +1611,13 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
             return rec("rename", r["windowId"], False, "registered to another lead: skipped")
         was_registered = r["windowId"] in read_registry(lead)
         if legacy_mine and not was_registered:  # ownership is recorded before the lead id leaves the name (ade-worker-run's order)
-            register_window(lead, r["windowId"])
+            names_m = names_mod()
+            parsed_to = names_m.parse(r["to"]) if names_m is not None else None
+            register_window(lead, r["windowId"],
+                            box=(parsed_to.box if parsed_to else "WORKER"),
+                            repo=(parsed_to.repo if parsed_to else repo),
+                            cwd=cur.get("cwd"),
+                            work=(parsed_to.work if parsed_to else None))
         rc, out, err = paseo(["workspace", "rename", r["windowId"], r["to"]])
         rec("rename", r["windowId"], rc == 0, r["to"] if rc == 0 else clean(err or out, 120))
         if rc != 0 and legacy_mine and not was_registered:
@@ -1553,8 +1712,8 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         if not valid_id(wks):
             return rec("archive-window", clean(wks, 60), False, "malformed id: skipped")
         cur = next((x for x in workspaces() if x["workspaceId"] == wks), None)
-        if not cur or is_main_name(cur.get("name") or ""):
-            return rec("archive-window", wks, False, "gone or MAIN: skipped")
+        if not cur or is_lead_window(wks, cur.get("name") or "", lead, chain_registry_entries(lead)):
+            return rec("archive-window", wks, False, "gone or LEAD: skipped")
         if cur.get("isolation") != "local":
             return rec("archive-window", wks, False, "not a local window: archiving would delete its worktree")
         if not window_is_ours(wks, cur.get("name") or "", lead):
@@ -1571,8 +1730,7 @@ def apply(p: dict, lead: str, repo: str, opts=None) -> list[dict]:
         rec("archive-window", wks, rc == 0, "" if rc == 0 else clean(err or out, 120))
         if rc == 0:
             for x in chain_of(lead):  # the window may be recorded under a replaced lead, as ade-worker-run archive-window handles
-                if wks in read_registry(x):
-                    _write_registry(x, read_registry(x) - {wks})
+                unregister_window(x, wks)
 
     for w in p["archive_windows"] if p.get("permits_ok") else []:
         attempt("archive-window", w["windowId"], lambda w=w: do_archive_window(w))

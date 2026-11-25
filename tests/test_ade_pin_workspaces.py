@@ -161,3 +161,37 @@ def test_unsupported_host_never_pins_default(pin, client, monkeypatch, capsys, h
     monkeypatch.setattr(pin.pc, "PaseoClient", lambda **kwargs: pytest.fail("unexpected daemon lookup"))
     assert pin.main(["pin"]) == 1
     assert error in capsys.readouterr().err
+
+
+def test_human_renamed_windows_use_structured_registry_metadata(pin, monkeypatch, tmp_path, capsys):
+    lead_id = "8cd86203-d33b-49db-abde-9baba52bcf61"
+    state_dir = tmp_path / "wr-state"
+    state_dir.mkdir()
+    pin.wsn.write_window_registry(
+        state_dir / f"{lead_id}.windows.json",
+        {"wks_w1", "wks_o1"},
+        {
+            "wks_w1": {"windowId": "wks_w1", "box": "WORKER", "repo": "djbclark-ade", "lead": lead_id},
+            "wks_o1": {"windowId": "wks_o1", "box": "OTHER", "repo": "djbclark-ade", "lead": lead_id},
+        },
+    )
+    monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(state_dir))
+
+    class Client:
+        calls = []
+
+        def list_workspaces(self, *, include_pin_state):
+            return [
+                {"id": "wks_w1", "title": "Daniel debugging Venice"},
+                {"id": "wks_o1", "title": "WORKER notes for Daniel"},
+                {"id": "wks_l1", "title": "My custom lead window"},
+            ]
+
+        def set_workspace_pinned(self, workspace_id):
+            self.calls.append(workspace_id)
+
+    inst = Client()
+    monkeypatch.setattr(pin.pc, "PaseoClient", lambda: inst)
+    assert pin.main(["pin"]) == 0
+    # wks_w1 is structurally WORKER so skipped despite custom human title; wks_o1 is structurally OTHER so pinned despite `WORKER ` title.
+    assert inst.calls == ["wks_o1", "wks_l1"]
