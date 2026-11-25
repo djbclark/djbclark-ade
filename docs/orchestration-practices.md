@@ -97,11 +97,12 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 5. **Output format:** the report shape, `CHANGED:` / `SKIPPED:` / `NOTES:`.
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
-8. **Names with ids (2026-10-23; strengthened by operator ruling 2026-11-23):** whenever a brief, reply, message, or report
-   references a Paseo agent or tab, **always** give all four fields: the **full agent ID** (UUID), **workspace ID** (`wks_…`),
-   **window name** (e.g. `WORKER <repo> (<work>)`), and **tab name** (e.g. `worker <slice> <lead agent id> [wt: <worktree>]`) —
-   never a bare short ID such as `5023c6fe`. A GUI rename makes a name alone unreliable, and a bare short ID is unreadable
-   and ambiguous (see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
+8. **Names with ids (2026-10-23; strengthened by operator rulings 2026-11-23, 2026-11-25):** whenever a brief, reply, message, or report
+   references a Paseo agent or tab, **always** give all four fields: **both the 7-char tab-tooltip prefix and full agent ID**
+   formatted as `<7-char> (<full-UUID>)` (e.g. `86df0a5 (86df0a5f-33ea-4365-999c-74ab63cc173a)`), **workspace ID** (`wks_…`),
+   **window name** (e.g. `WORKER <repo> (<work>)`), and **tab name** — never a bare short ID alone. A GUI rename makes a name
+   alone unreliable, a bare short ID is ambiguous, and including the 7-char prefix matches Paseo's tab tooltip directly
+   (see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`
    marker, the last line `DONE`, `BLOCKED: …` or `NO-REPORT: …`, and rule 22's push-on-completion
    `paseo send` (`done: <title>, <PR URL>` or status/report, with named ack; `bin/completion-notice`). Paste the filled contract into every Agent-tool
