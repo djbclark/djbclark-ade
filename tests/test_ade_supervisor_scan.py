@@ -404,6 +404,51 @@ def test_an_env_lead_that_keeps_naming_a_replaced_lead_is_told_once(tmp_path: Pa
     assert not (state / "lead").exists()                        # the environment owns the value: nothing rewritten
     log = (state / "supervisor.log").read_text()
     assert log.count("still names") == 1                        # the handoff is reported once, not 288 times a day
+    assert log.count("following the handoff") == 1
+
+
+def test_quiet_runs_do_not_repeat_redirect_or_still_names_lines(tmp_path: Path) -> None:
+    """With ADE_SUPERVISOR_LEAD naming a replaced lead, quiet runs log the redirect once and never spam (Carried 79)."""
+    bin_dir, home, state, sent = _harness(tmp_path, [])
+    (bin_dir / "ade_send_guard.py").unlink()
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced"}))',
+            "raise SystemExit(3)")
+    for _ in range(4):
+        assert _run(bin_dir, home) == 0
+    assert _messages(sent) == []
+    log = (state / "supervisor.log").read_text()
+    assert log.count("following the handoff") == 1              # written on first resolution, not every 300 s
+    assert log.count("still names") == 0                        # deferred until a notice is actually delivered
+
+    # When a finding later arrives and delivers to the successor, "still names" is logged once.
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1")]}))
+    assert _run(bin_dir, home) == 0
+    (bin_dir / "feed.json").write_text(json.dumps({"stuck": [_agent("a1"), _agent("a2", "anthropic")]}))
+    assert _run(bin_dir, home) == 0
+    log = (state / "supervisor.log").read_text()
+    assert log.count("following the handoff") == 1
+    assert log.count("still names") == 1
+    assert len(_messages(sent)) == 2
+
+
+def test_redirect_still_names_hint_waits_for_successful_delivery(tmp_path: Path) -> None:
+    """A failed send does not suppress the ADE_SUPERVISOR_LEAD 'still names' hint; it logs once delivery succeeds."""
+    bin_dir, home, state, sent = _harness(tmp_path, [_agent("a1")], paseo_rc=2)
+    (bin_dir / "ade_send_guard.py").unlink()
+    _script(bin_dir / "ade_send_guard.py", "#!/usr/bin/env python3", "import json",
+            'print(json.dumps({"action": "redirect", "target": "SUCCESSOR-ID", "reason": "replaced"}))',
+            "raise SystemExit(3)")
+    assert _run(bin_dir, home) == 0
+    log = (state / "supervisor.log").read_text()
+    assert log.count("following the handoff") == 1
+    assert log.count("still names") == 0
+
+    _paseo(bin_dir, tmp_path, sent, rc=5)
+    assert _run(bin_dir, home) == 0
+    log = (state / "supervisor.log").read_text()
+    assert log.count("following the handoff") == 1
+    assert log.count("still names") == 1
 
 
 def test_a_refused_lead_and_a_failed_send_are_separate_causes(tmp_path: Path) -> None:

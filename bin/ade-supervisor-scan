@@ -77,20 +77,30 @@ guard_reason="$(field reason)"
 send_to=""
 refused=""
 marker=""
+env_hint_marker=""
 case "$guard_rc" in
     0) send_to="$LEAD" ;;
     3) case "$guard_target" in
            ''|-*|*[!A-Za-z0-9._:-]*) refused="the replacement lead id \"$guard_target\" is unusable" ;;
            *) send_to="$guard_target"
-              marker="$STATE_DIR/.redirect-noted.$(printf '%s' "$LEAD---$send_to" | tr -c 'A-Za-z0-9._-' '_')"
+              redirect_slug="$(printf '%s' "$LEAD---$send_to" | tr -c 'A-Za-z0-9._-' '_')"
+              marker="$STATE_DIR/.redirect-noted.$redirect_slug"
+              if [ "$lead_from_env" -eq 1 ]; then
+                  env_hint_marker="$STATE_DIR/.redirect-env-noted.$redirect_slug"
+              fi
+              # Record the redirect notice on first resolution so quiet runs do not repeat it
+              # every 300 s (Carried 79); the ADE_SUPERVISOR_LEAD "still names" hint stays gated
+              # on an actual delivery below so it is not repeated on quiet runs and retries if
+              # the first send fails.
               if [ ! -f "$marker" ]; then
                   printf '%s ade-supervisor-scan: lead %s was replaced; following the handoff to %s (%s)\n' \
                       "$(now)" "$LEAD" "$send_to" "$guard_reason" >>"$LOG"
-                  if [ "$lead_from_env" -eq 1 ]; then
-                      printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD still names %s; update it to %s\n' \
-                          "$(now)" "$LEAD" "$send_to" >>"$LOG"
+                  if [ "$lead_from_env" -eq 0 ]; then
+                      if printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"; then
+                          : >"$marker"
+                      fi
                   else
-                      printf '%s\n' "$send_to" >"$STATE_DIR/.lead.$$" && mv -f "$STATE_DIR/.lead.$$" "$STATE_DIR/lead"
+                      : >"$marker"
                   fi
               fi
               ;;
@@ -234,7 +244,11 @@ elif [ -n "$msg" ] && [ -n "$send_to" ]; then
         printf '%s ade-supervisor-scan: send to %s failed (exit %s)\n' "$(now)" "$send_to" "$rc" >>"$LOG"
     else
         delivered=1
-        [ -n "${marker:-}" ] && : >"$marker"      # the handoff is only reported once the notice reached it
+        if [ -n "${env_hint_marker:-}" ] && [ ! -f "$env_hint_marker" ]; then
+            printf '%s ade-supervisor-scan: ADE_SUPERVISOR_LEAD still names %s; update it to %s\n' \
+                "$(now)" "$LEAD" "$send_to" >>"$LOG"
+            : >"$env_hint_marker"
+        fi
     fi
 fi
 

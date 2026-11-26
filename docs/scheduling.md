@@ -76,8 +76,14 @@ output goes to stderr.
 
 The supervisor sends at most one message per run with new findings. Store its current lead
 ID on the first line of `~/.local/state/djbclark-ade/supervisor/lead`. Manual invocations can
-also use `ADE_SUPERVISOR_LEAD`. The supervisor follows a completed self-handoff and updates the
-lead file. The sweep's launchd logs are `~/.local/state/djbclark-ade/agent-sweep/sweep.out` and
+also use `ADE_SUPERVISOR_LEAD`. The supervisor follows a completed self-handoff, updates the
+lead file, and logs the redirect once on first resolution (deferring the `ADE_SUPERVISOR_LEAD`
+"still names" hint until a notice is actually delivered so quiet runs add no per-tick lines).
+`bin/ade-pi-stuck` reads both `available` and schema-1.8 `unavailable` pools (including named
+`opencode:go` and `clinepass:default` sub-accounts) and falls back to reading
+`~/.cache/aiuse/snapshots/latest.json` (overridable via `AIUSE_SNAPSHOT`) marked stale if
+`aiuse --available --json` times out under load (`ADE_PI_STUCK_AIUSE_TIMEOUT`, default `30` s).
+The sweep's launchd logs are `~/.local/state/djbclark-ade/agent-sweep/sweep.out` and
 `sweep.err`; supervisor detail still goes to `supervisor/supervisor.log` under the same state root.
 
 #### macOS cutover
