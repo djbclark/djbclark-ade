@@ -494,3 +494,52 @@ def test_the_plan_names_only_pi_agents_and_carries_their_family(tmp_path: Path) 
     plan = json.loads(_plan_lines(state)[0].split("(dry-run) ", 1)[1])["plan"]
     assert [e["id"] for e in plan] == ["p1"] and plan[0]["family"] == "pi"
     assert "k1" not in (state / "supervisor.log").read_text().split("re-handoff plan", 1)[1].split("\n", 1)[0]
+
+
+def test_live_rehandoff_executor_drives_cross_agent_handoff_and_skips_non_pi(tmp_path: Path) -> None:
+    """bin/ade-supervisor-rehandoff invokes ade-self-session --predecessor only for planned Pi agents,
+    cleans up temp checkpoints, and returns non-zero if a planned re-handoff fails."""
+    import importlib.machinery
+    import importlib.util
+    import subprocess
+
+    spec = importlib.util.spec_from_loader(
+        "rehandoff",
+        importlib.machinery.SourceFileLoader("rehandoff", str(REPO / "bin" / "ade-supervisor-rehandoff")),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+
+    calls: list[list[str]] = []
+    seen_checkpoints: list[Path] = []
+
+    def fake_run(argv, capture_output, text):
+        calls.append(argv)
+        cp = Path(argv[argv.index("--checkpoint") + 1])
+        seen_checkpoints.append(cp)
+        assert cp.exists() and (cp.stat().st_mode & 0o777) == 0o600
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    plan = tmp_path / "rehandoff-plan.json"
+    plan.write_text(json.dumps({
+        "mode": "live",
+        "plan": [
+            {"id": "agent-pi", "family": "pi", "account": "openai", "alternative": "pi/opencode-go/x", "action": "would-rehandoff"},
+            {"id": "agent-codex", "family": "codex", "account": "codex", "alternative": "x", "action": "would-rehandoff"},
+            {"id": "agent-no-alt", "family": "pi", "account": "anthropic", "action": "no-healthy-alternative"},
+        ],
+    }), encoding="utf-8")
+
+    assert mod.rehandoff(plan, runner=fake_run) == 0
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[1:3] == ["handoff", "--checkpoint"]
+    assert argv[argv.index("--predecessor") + 1] == "agent-pi"
+    assert not seen_checkpoints[0].exists()
+
+    def failing_run(argv, capture_output, text):
+        return subprocess.CompletedProcess(argv, 1, "", "blocked")
+
+    assert mod.rehandoff(plan, runner=failing_run) == 1
+

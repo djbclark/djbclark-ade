@@ -1,29 +1,97 @@
 #!/usr/bin/env python3
-"""The live re-handoff step a supervisor scan would call. NOT YET BUILT: it refuses rather than guess.
+"""Drive cross-agent re-handoffs for planned stuck Pi agents from a supervisor scan plan.
 
-ade-self-session handoff takes a checkpoint file and a --route-kind and lets the router choose the successor pool. It
-has no --agent or --target, so a re-handoff cannot simply name the stuck agent and the alternative ade-pi-stuck
-picked. Doing it correctly means writing a per-agent checkpoint and driving handoff, then accept, verify-turn and
-finish, with the failed pool excluded. That is Carried 70's remaining work.
-
-Until it is built, this exits non-zero and moves nothing, so the scan logs the failure and no agent is archived or
-relaunched on a guess. The plan file is read only to confirm it is the plan the scan wrote.
+Reads the JSON plan written by ``bin/ade-supervisor-scan`` (``ADE_SUPERVISOR_REHANDOFF=live``),
+writes a bounded nonsecret per-agent checkpoint (mode 0600, cleaned up after launch), and calls
+``bin/ade-self-session handoff --checkpoint FILE --predecessor ID --route-kind code --quiesced``
+for each Pi entry marked ``action == "would-rehandoff"``. Entries with no healthy alternative
+or non-Pi families are left untouched. No agent is archived directly here: retirement waits
+for successor acknowledgement, first-real-turn verification, and ``finish``.
 
     ade-supervisor-rehandoff PLAN.json
 """
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
+def rehandoff(plan_path: Path, runner=None) -> int:
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"ade-supervisor-rehandoff: unreadable plan {plan_path}: {exc}", file=sys.stderr)
+        return 1
+    entries = plan.get("plan") if isinstance(plan, dict) else None
+    if not isinstance(entries, list):
+        print("ade-supervisor-rehandoff: plan has no entry list; nothing moved")
+        return 0
+    run = runner or subprocess.run
+    session = str(Path(__file__).with_name("ade-self-session"))
+    moved = 0
+    failed = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        agent = entry.get("id")
+        family = entry.get("family")
+        if family is not None and family != "pi":
+            print(f"ade-supervisor-rehandoff: skipping non-pi {agent} ({family})")
+            continue
+        if entry.get("action") != "would-rehandoff" or not isinstance(agent, str) or not agent:
+            print(f"ade-supervisor-rehandoff: leaving {agent} (no healthy alternative)")
+            continue
+        note = (
+            f"Re-handoff {agent} off exhausted account {entry.get('account')} "
+            f"toward {entry.get('alternative')}.\n"
+        )
+        checkpoint = None
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as fh:
+                os.chmod(fh.name, 0o600)
+                fh.write(note)
+                checkpoint = fh.name
+            result = run(
+                [
+                    session,
+                    "handoff",
+                    "--checkpoint",
+                    checkpoint,
+                    "--predecessor",
+                    agent,
+                    "--route-kind",
+                    "code",
+                    "--quiesced",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        finally:
+            if checkpoint:
+                try:
+                    os.unlink(checkpoint)
+                except OSError:
+                    pass
+        if result.returncode == 0:
+            moved += 1
+            print(f"ade-supervisor-rehandoff: re-handed {agent} ({entry.get('account')})")
+        else:
+            failed += 1
+            print(f"ade-supervisor-rehandoff: {agent} not moved ({result.returncode})")
+    print(f"ade-supervisor-rehandoff: {moved} re-handed, {failed} failed, {len(entries) - moved - failed} left")
+    return 1 if failed else 0
+
+
 def main(plan_path: Path) -> int:
-    plan = json.loads(plan_path.read_text())
-    count = len(plan.get("plan") or []) if isinstance(plan, dict) else 0
-    print(f"ade-supervisor-rehandoff: live re-handoff is not built; {count} planned agent(s) left where they are")
-    return 1
+    return rehandoff(plan_path)
 
 
 if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("usage: ade-supervisor-rehandoff PLAN.json", file=sys.stderr)
+        sys.exit(2)
     sys.exit(main(Path(sys.argv[1])))

@@ -889,10 +889,39 @@ class Service:
                 }
         return None
 
+    def _can_act_for_predecessor(self, record) -> bool:
+        """True when the caller is the predecessor or (for cross-agent handoffs) the recorded requester, never the successor."""
+        actor = self.actor()
+        if actor == record.get('successor'):
+            return False
+        if actor == record.get('predecessor'):
+            return True
+        return bool(record.get('cross_agent')) and actor == record.get('requested_by')
+
+    def _predecessor_workspace(self, predecessor: str, source: dict) -> tuple[str | None, str]:
+        """Resolve a cross-agent target predecessor's workspace without reading the caller's PASEO_WORKSPACE_ID."""
+        for key in ('WorkspaceId', 'workspaceId'):
+            raw = source.get(key)
+            if isinstance(raw, str) and raw:
+                ws = workspace_ident(raw)
+                return (ws, 'existing') if self.workspace_exists(ws) else (ws, 'new-local')
+        try:
+            for path in sorted((self.home / 'agents').glob(f'*/{ident(predecessor)}.json')):
+                data = json.loads(read_regular(path, 262144))
+                raw = data.get('workspaceId') if isinstance(data, dict) else None
+                if isinstance(raw, str) and raw:
+                    ws = workspace_ident(raw)
+                    return (ws, 'existing') if self.workspace_exists(ws) else (ws, 'new-local')
+        except (OSError, ValueError, SessionError, AttributeError, RecursionError):
+            pass
+        return None, 'new-local'
+
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
                 requested_title=None, requested_role=None, route_kind=None, requested_provider=None,
-                allow_scarce_pool=False):
-        predecessor = self.actor()
+                allow_scarce_pool=False, predecessor=None):
+        requester = self.actor()
+        predecessor = requester if predecessor is None else ident(predecessor)
+        cross_agent = predecessor != requester
         role_for = _coord().role_for
         CoordinationError = _coord().CoordinationError
         if role_for(predecessor) is not None:
@@ -913,6 +942,8 @@ class Service:
                     and existing.get('home') == str(self.home) and existing.get('kind') == 'handoff'
                     and existing.get('predecessor') == predecessor and existing.get('successor') is None
                     and isinstance(existing.get('native_error'), dict)):
+                if not self._can_act_for_predecessor(existing):
+                    raise SessionError('only predecessor or cross-agent requester may replace a refused handoff')
                 if explicit_provider is not None and existing.get('route_kind') is not None:
                     raise SessionError('--provider cannot be combined with a routed handoff retry')
                 # Replace only when the token's label lists no agent: a probe that fails or finds one keeps the record.
@@ -929,6 +960,8 @@ class Service:
             if isinstance(existing, dict) and existing.get('status') == 'retry-ready':
                 if existing.get('home') != str(self.home) or existing.get('predecessor') != predecessor:
                     raise SessionError('retry identity mismatch')
+                if not self._can_act_for_predecessor(existing):
+                    raise SessionError('only predecessor or cross-agent requester may complete a retry')
                 if explicit_provider is not None:
                     raise SessionError('--provider cannot be combined with a routed handoff retry')
                 retry_history = existing.get('attempts', [])
@@ -955,8 +988,9 @@ class Service:
             if not quiesced:
                 raise SessionError('finish other writes/jobs and attest --quiesced first')
             source = self.inspect(predecessor)
+            allowed_statuses = ('idle', 'running', 'error') if cross_agent else ('idle', 'running')
             if (source.get('Archived') is not False or source.get('PendingPermissions') != []
-                    or source.get('Status') not in ('idle', 'running')):
+                    or source.get('Status') not in allowed_statuses):
                 raise SessionError('predecessor archived or permission state unresolved')
             cwd = source.get('Cwd')
             if not isinstance(cwd, str) or not Path(cwd).is_absolute():
@@ -964,14 +998,17 @@ class Service:
             if (not isinstance(source.get('Provider'), str) or not source['Provider']
                     or not isinstance(source.get('Model'), str) or source['Model'] in ('', '-', 'default')):
                 raise SessionError('concrete predecessor provider/model unavailable')
-            workspace = self.env.get('PASEO_WORKSPACE_ID')
-            if workspace is None:
-                workspace = self._recovered_paseo_env().get('PASEO_WORKSPACE_ID', '')
-            workspace = workspace_ident(workspace)
-            # 2026-11-14: the predecessor's workspace had been removed, `agent run --workspace`
-            # answered WORKSPACE_NOT_FOUND and the helper hid it. Decided: a successor is a new
-            # lead in its own placement, so a vanished workspace is replaced, not a reason to refuse.
-            placement = 'existing' if self.workspace_exists(workspace) else 'new-local'
+            if cross_agent:
+                workspace, placement = self._predecessor_workspace(predecessor, source)
+            else:
+                workspace = self.env.get('PASEO_WORKSPACE_ID')
+                if workspace is None:
+                    workspace = self._recovered_paseo_env().get('PASEO_WORKSPACE_ID', '')
+                workspace = workspace_ident(workspace)
+                # 2026-11-14: the predecessor's workspace had been removed, `agent run --workspace`
+                # answered WORKSPACE_NOT_FOUND and the helper hid it. Decided: a successor is a new
+                # lead in its own placement, so a vanished workspace is replaced, not a reason to refuse.
+                placement = 'existing' if self.workspace_exists(workspace) else 'new-local'
             route = self.route_successor(route_kind, excluded, cwd) if route_kind else None
             launch_source = source
             auto_route = None
@@ -1053,7 +1090,8 @@ class Service:
             token = str(uuid.uuid4())
             preserved, sha = self.checkpoint(checkpoint, token=token)
             record = {'schema_version': 1, 'kind': 'handoff', 'token': token, 'identity': identity,
-                      'predecessor': predecessor, 'successor': None, 'home': str(self.home),
+                      'predecessor': predecessor, 'requested_by': requester, 'cross_agent': cross_agent,
+                      'successor': None, 'home': str(self.home),
                       'cwd': cwd, 'workspace': workspace, 'workspace_placement': placement,
                       'provider': launch_source['Provider'],
                       'model': launch_source['Model'], 'thinking': thinking, 'mode_plan': plan, 'head': self.git_head(cwd),
@@ -1103,10 +1141,11 @@ class Service:
                 'If any check fails, preserve both sessions and report it.'
             )
             if route:
+                verifier = 'The predecessor (or cross-agent requester)' if cross_agent else 'The predecessor'
                 prompt += (' This handoff requires FIRST-REAL-TURN evidence. accept only records your ack; '
                            'after it, use a read-only tool to inspect the checkpoint, then end this turn with '
                            'a substantive next-action summary. Do not run finish yet or write project files. '
-                           'The predecessor must run verify-turn after you become idle; only then may it '
+                           f'{verifier} must run verify-turn after you become idle; only then may it '
                            'ask you to finish. A failed verification retains the predecessor.')
             try:
                 thinking_args = ('--thinking', thinking) if thinking else ()
@@ -1315,8 +1354,8 @@ class Service:
         with self.transaction(self.load_record(path)) as (target, record):
             if not record or record.get('home') != str(self.home):
                 raise SessionError('transaction unavailable on this daemon home')
-            if self.actor() != record['predecessor']:
-                raise SessionError('only predecessor reconciles an ambiguous creation')
+            if not self._can_act_for_predecessor(record):
+                raise SessionError('only predecessor or cross-agent requester reconciles an ambiguous creation')
             if record['status'] != 'creation-unknown':
                 return record
             rows = self.native('agent', 'ls', '-a', '-g', '--label', 'ade.handoff=' + record['token'])
@@ -1484,8 +1523,8 @@ class Service:
     def verify_turn(self, path):
         """External verification: a successor cannot prove idle inside its own turn."""
         with self.transaction(self.load_record(path)) as (target, record):
-            if not record or record.get('home') != str(self.home) or self.actor() != record['predecessor']:
-                raise SessionError('only recorded predecessor verifies the first real turn')
+            if not record or record.get('home') != str(self.home) or not self._can_act_for_predecessor(record):
+                raise SessionError('only recorded predecessor or cross-agent requester verifies the first real turn')
             if record.get('status') not in ('awaiting-ack', 'ack-pending-turn', 'acknowledged') or not record.get('requires_first_turn'):
                 raise SessionError('routed successor required before first-turn verification')
             if record['status'] == 'ack-pending-turn' and not record.get('ack'):
@@ -1528,8 +1567,8 @@ class Service:
     def retry(self, path):
         """Failed candidates retain a visible history; unknown creation is never replayed."""
         with self.transaction(self.load_record(path)) as (target, record):
-            if not record or record.get('home') != str(self.home) or self.actor() != record['predecessor']:
-                raise SessionError('only predecessor retries a failed first turn')
+            if not record or record.get('home') != str(self.home) or not self._can_act_for_predecessor(record):
+                raise SessionError('only predecessor or cross-agent requester retries a failed first turn')
             if record.get('status') != 'first-turn-failed' or not record.get('route_kind') or not record.get('pool'):
                 raise SessionError('only a routed failed first turn may be retried')
             failed = self.inspect(record['successor'])
@@ -1543,7 +1582,8 @@ class Service:
             record['status'] = 'retry-ready'
             self.save(target, record)
             checkpoint = Path(record['checkpoint'])
-        return self.handoff(checkpoint, quiesced=True)
+            target_predecessor = record['predecessor']
+        return self.handoff(checkpoint, quiesced=True, predecessor=target_predecessor)
 
     def head_drift(self, record):
         """None while HEAD is the recorded head; {'to', 'commits', 'more'} when it moved forward; else SessionError.

@@ -71,7 +71,7 @@ performs it itself, including successor launch; no operator typing is required.
 Finish other writes/background jobs and prepare the briefing, then:
 
 ```
-bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
+bin/ade-self-session handoff --checkpoint /absolute/path/brief.md --quiesced [--predecessor AGENT_ID] [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ```
 
 `--quiesced` attests that other jobs/writes are finished. A running predecessor
@@ -84,6 +84,21 @@ mode. It never silently falls back to Always Ask. Unsupported modeless/control
 providers are blocked rather than assigned an invented mode. An explicit
 `--mode plan|read-only|dontAsk` is retained only when the actual catalog supports
 it; this is for operator-requested restrictive work, not the ordinary default.
+
+**Cross-agent / supervisor re-handoff (`--predecessor AGENT_ID`, Carried 70/103).**
+When a stuck agent (for example a Pi agent in `Status: error` on an exhausted pool)
+cannot run `handoff` itself, a supervisor or lead may pass `--predecessor AGENT_ID`
+to re-hand that target agent instead of the caller. The transaction record stores
+`predecessor` (the target agent), `requested_by` (the calling actor) and
+`cross_agent: true` (always `false` on an ordinary self-handoff). Cross-agent
+handoffs accept a target predecessor in `idle`, `running`, or `error` status (still
+requiring `Archived: false` and `PendingPermissions: []`), never inherit the
+caller's `PASEO_WORKSPACE_ID` (resolving the target's own workspace from its
+inspect snapshot or `<paseo-home>/agents/*/<predecessor>.json`, else creating a
+`new-local` workspace), and authorize the recorded `requested_by` actor (in
+addition to `predecessor`, never `successor`) to run `reconcile`, `verify-turn`,
+and `retry`. The successor still performs `accept` and `finish` itself; no agent
+is archived directly by `handoff` or `bin/ade-supervisor-rehandoff`.
 
 **Cross-provider override (`--provider PROVIDER/MODEL`, 2026-11-23).** When the
 operator authorizes a handoff to a different provider or model (for example
@@ -598,14 +613,15 @@ permissions and first real turn instead of claiming a selectable YOLO mode.
 
 For this path, `accept` only writes `ack-pending-turn`. The successor must perform
 read-only checkpoint work after its ack, produce a substantive final response,
-and end the turn. The predecessor then runs `verify-turn --record FILE`. Only a
+and end the turn. The predecessor (or, for a cross-agent `--predecessor` handoff,
+the recorded `requested_by` actor; never the successor) then runs `verify-turn --record FILE`. Only a
 successful post-ack terminal Pi assistant message, generated output, matching
 session identity and a fresh idle runtime readback produces `acknowledged`.
 `finish` refuses before that proof. No peer redirect or claim transfer occurs
 from the provisional ack. Legacy same-provider handoffs retain their existing
 contract; they do not acquire a first-turn guarantee by this change.
 
-Before acknowledgement, the predecessor may also run `verify-turn` to inspect
+Before acknowledgement, the predecessor (or recorded cross-agent requester) may also run `verify-turn` to inspect
 failure-only evidence. After checking entry IDs/parents, non-decreasing timestamps,
 message objects and supported metadata fields, an error in the latest applicable
 Pi message records `first-turn-failed` and permits retry.

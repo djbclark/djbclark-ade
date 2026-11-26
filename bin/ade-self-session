@@ -1,7 +1,7 @@
 #!/usr/bin/env -S python3 -I
 """Explicit native self-session operations (local daemon only).
 
-ade-self-session handoff --checkpoint FILE --quiesced [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
+ade-self-session handoff --checkpoint FILE --quiesced [--predecessor AGENT_ID] [--provider PROVIDER/MODEL] [--allow-scarce-pool] [--thinking LEVEL] [--title TEXT] [--role ROLE]
 ade-self-session compact --checkpoint FILE --request-id TOKEN
 ade-self-session status|reconcile --record FILE
 ade-self-session finish --record FILE [--stable S] [--wait-timeout S] [--poll S]
@@ -42,6 +42,7 @@ def main():
             q.add_argument('--title', help='successor title; default: the predecessor\'s own name (a lead keeps its name through every handoff)')
             q.add_argument('--role', help='ade.role label for the successor; default: the one the predecessor\'s handoff record carried (Paseo\'s CLI cannot read labels back, so a chain\'s first handoff names it here)')
             q.add_argument('--route-kind', choices=('code', 'judgment', 'research', 'bulk', 'mechanical'), help='explicit routed Pi successor; requires post-ack first-real-turn verification')
+            q.add_argument('--predecessor', help='re-hand this agent instead of the caller (a cross-agent / supervisor re-handoff); default: the caller')
             q.add_argument('--quiesced', action='store_true', help='attest other jobs/writes finished; successor waits for retirement')
         else:
             q.add_argument('--request-id', required=True, help='reuse on retry; new ID only for a deliberately new request')
@@ -67,7 +68,8 @@ def main():
                                      requested_thinking=a.thinking, requested_title=a.title,
                                      requested_role=a.role, route_kind=a.route_kind,
                                      requested_provider=a.provider,
-                                     allow_scarce_pool=a.allow_scarce_pool)
+                                     allow_scarce_pool=a.allow_scarce_pool,
+                                     predecessor=a.predecessor)
         elif a.command == 'appoint':
             result = service.appoint(a.record, appointed=a.appointed, pool=a.pool,
                                      operator_appointed=a.operator_appointed, quiesced=a.quiesced)
