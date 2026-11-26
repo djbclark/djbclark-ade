@@ -42,6 +42,7 @@ Each doc carries its own summary.
 | [docs/jj-vs-paseo-worktrees.md](docs/jj-vs-paseo-worktrees.md) | design (2026-11-10): jj vs Paseo worktrees post-CoW claims; recommendation defer / guarded pilot only |
 | [docs/fork-picks.md](docs/fork-picks.md) | `config/fork-picks.toml` + `bin/ade-fork-picks` (2026-11-22): registry of desired cherry-picks into our patched fork builds (schema, `list`/`apply`/`mark`/`check-upstream`, exit codes, the release-alert hook); a local build aid, separate from the fork-maintenance foundation |
 | [docs/workspace-layout.md](docs/workspace-layout.md) | naming: project / window / tab; windows `<KIND> <repo> (<work>)` (LEAD / WORKER / OTHER, 2026-11-14) and concise `worker <slice> [wt: <worktree>]` tabs are **human UI labels only, never metadata** (operator ruling 2026-11-25: structured labels `ade.lead`/`ade.box`/`ade.repo`/`ade.retired` + `.windows.json` entries + handoff records are sole authority; human renames never break tooling) |
+| [docs/paseo-workspace-setup.md](docs/paseo-workspace-setup.md) | evaluation (2026-11-26, Carried #125): Paseo `paseo.json` workspace setup, lifecycle hooks, auto-terminals, service ports, and proxy URLs vs `git worktree add`/`ade_claims`/`ports.yml`/`bgrun`/RAM/trust; verdict: skip `worktree.setup`/`teardown`/`terminals` across our repos; selective on-demand `scripts` (`type: "service"`) with ephemeral `findFreePort()` only for owned multi-worktree web/HTTP apps |
 | [docs/scheduling.md](docs/scheduling.md) | `bin/ade-sched` (2026-11-04): a launchd plist as a launchd agent, systemd user timer or cron; judgment jobs are Paseo schedules |
 | [docs/gates.md](docs/gates.md) | the frontier allowance, `config/ade.toml [gates.frontier]` (trimmed 2026-11-07: the Claude quota gates went with the quota guard) |
 | [docs/upstream-review-gate.md](docs/upstream-review-gate.md) | `claude/hooks/upstream_review_gate.py` (2026-11-12): denies `gh`/`git push`/Jira writes to CFEngine upstream (`cfengine`, `NorthernTechHQ`) only; target resolution, limits, registration |
@@ -157,8 +158,8 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
 
 9. **All development happens in an exclusively claimed task workspace, never in a shared checkout** (operator, 2026-10-25; Paseo
    wording 2026-11-07). Every source edit, stage, commit, build, test and one-line docs or queue change, in every repo, happens in
-   a linked worktree created from a recorded base: a Paseo worktree (`paseo run --new-workspace worktree …`; `.worktreeinclude`
-   lists the ignored files copied into it, none for this repo) or `git worktree add -b NAME ~/src/djbclark-ade-NAME-wt
+   a linked worktree created from a recorded base: a Paseo worktree (`paseo run --new-workspace worktree …`; Paseo copies
+   `paseo.json` only, while `.worktreeinclude` is read by Claude Code and `ade_fork_controller.py`, empty for this repo) or `git worktree add -b NAME ~/src/djbclark-ade-NAME-wt
    origin/master`; push there, remove the worktree after the merge. `~/src/<repo>` is a reference and integration checkout: it
    may sit on another session's branch or carry its uncommitted edits (2026-10-24: three sessions collided; 2026-10-25: an
    unrelated session's edit sat in this checkout's tree), so nothing is edited or committed there. **One writer at a time per
