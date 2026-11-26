@@ -170,7 +170,7 @@ transport = "remote-http"
 url = "https://mcp.bezalel.sh/mcp"
 owner = "remote:bezalel"
 state = "external-app"
-auth = { kind = "bearer", keys = ["Authorization", "MCP_BEZALEL_API_KEY"], store = "client-literal-pending-2c" }
+auth = { kind = "bearer", keys = ["Authorization", "MCP_BEZALEL_API_KEY"], store = "sudo-secretspec" }
 capabilities = [
   "health",
   "finance",
@@ -190,7 +190,7 @@ instead = "for recent photos/screenshots: adb pull from the Titan 2 (site-privat
 footprint_label = "0"
 doc = "docs/mcp-on-demand.md#8-bezalel"
 risk = "personal health/finance/email/iMessage connectors; ~1.5k instruction tokens in Claude Code"
-notes = "Denied in Claude Code (~79 tools). Google Photos Library API returns only app-created items since 2025-03-31 (docs/mcp-on-demand.md §4); Hermes uses env ref MCP_BEZALEL_API_KEY, Codex literal pending Phase 2c."
+notes = "Denied in Claude Code (~79 tools). Google Photos Library API returns only app-created items since 2025-03-31 (docs/mcp-on-demand.md §4); Hermes reads env ref MCP_BEZALEL_API_KEY and Codex resolves it via sudo-secretspec http_headers_helper (Phase 2c live 2026-11-26)."
 
 [server.measured]
 footprint_mb = 0
@@ -288,12 +288,12 @@ transport = "remote-http"
 url = "https://mcp.exa.ai/mcp"
 owner = "remote:exa"
 state = "shared-safe"
-auth = { kind = "header", keys = ["x-api-key", "MCP_EXA_API_KEY"], store = "client-literal-pending-2c" }
+auth = { kind = "header", keys = ["x-api-key", "EXA_API_KEY"], store = "sudo-secretspec" }
 capabilities = ["web-search"]
 expected = { codex = "user", cursor-agent = "user" }
 footprint_label = "0"
 doc = "docs/mcp-on-demand.md#114-phase-2c-keys-to-sudo-secretspec-no-rotation"
-notes = "Remote Exa web search; header literal migration to sudo-secretspec pending Phase 2c."
+notes = "Remote Exa web search; header key migrated to sudo-secretspec env ref EXA_API_KEY in Cursor and OpenCode (Phase 2c live 2026-11-26)."
 
 [server.measured]
 footprint_mb = 0
@@ -324,12 +324,12 @@ transport = "remote-http"
 url = "https://mcp.jina.ai/v1"
 owner = "remote:jina"
 state = "shared-safe"
-auth = { kind = "bearer", keys = ["Authorization", "MCP_JINA_API_KEY"], store = "client-literal-pending-2c" }
+auth = { kind = "bearer", keys = ["Authorization", "JINA_API_KEY"], store = "sudo-secretspec" }
 capabilities = ["web-search", "reader"]
 expected = { codex = "user", cursor-agent = "user" }
 footprint_label = "0"
 doc = "docs/mcp-on-demand.md#114-phase-2c-keys-to-sudo-secretspec-no-rotation"
-notes = "Remote Jina search and reader; Authorization literal migration to sudo-secretspec pending Phase 2c."
+notes = "Remote Jina search and reader; Authorization bearer header migrated to sudo-secretspec env ref JINA_API_KEY in Cursor and OpenCode (Phase 2c live 2026-11-26)."
 
 [server.measured]
 footprint_mb = 0
