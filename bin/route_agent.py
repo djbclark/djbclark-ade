@@ -1355,6 +1355,13 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                     "resets_at": w.get("resets_at"),
                     "window_minutes": w.get("window_minutes"),
                 }
+            elif rem_val is None and worst is None and not bind.get("resets_at") and _reset_passed(w.get("resets_at")):
+                # keep the passed reset timestamp so `quota_nudge.py --reset` still sees which pool refilled (Carried 83)
+                bind = {
+                    "pace_ratio": w.get("pace_ratio"),
+                    "resets_at": w.get("resets_at"),
+                    "window_minutes": w.get("window_minutes"),
+                }
             per_key[key] = (worst, detail, sublimits, bind)
 
         if not per_key:
@@ -1376,8 +1383,10 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
                 rem = _pct(pw.get("headroom_percent"))
                 if rem is None:
                     rem = _pct(pw.get("remaining_percent"))
-                if pw.get("state") == "exhausted" or pw.get("measurement_frozen") is True:
+                if pw.get("measurement_frozen") is True:
                     rem = 0.0
+                elif pw.get("state") == "exhausted" or (rem is not None and rem == 0):
+                    rem = None if _reset_passed(pw.get("resets_at")) else 0.0
                 elif is_old:
                     rem = None
                 detail[pw.get("label") or parent] = rem
@@ -1387,34 +1396,47 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         for key, (worst, detail, sublimits, bind) in per_key.items():
             prior = providers.get(key) or {}
             prior_rem = prior.get("remaining")
+            acct_worst = worst
             # the age belongs to the entry whose reading `remaining` and the bind fields come from
             entry_age = acct_age
-            if key in providers and (prior_rem is None) != (worst is None):
-                # exactly one account has no usable reading (stale, expired or windowless): the pool is only as fresh as
-                # its oldest age, whichever account was folded first, so the frontier gate's age test (judged_guard_block)
-                # sees a pool of two accounts, one older than the stale limit, as old in either order. It does not close
-                # an expired/windowless second account with a fresh age, or three accounts (queue Carried 84).
+            if key in providers and (prior_rem is None) != (acct_worst is None):
+                # one account has no usable reading (stale, expired or windowless): keep the pool's oldest age
+                # whichever account was folded first, and preserve UNMEASURED_WINDOW: None below so `plenty_remaining`
+                # and `claude_quota_state` fail closed across all multi-account mixes (Carried 84).
                 ages = [a for a in (prior.get("age_s"), acct_age) if a is not None]
                 entry_age = max(ages) if ages else None
-            if prior_rem is not None and worst is not None:
-                if prior_rem < worst:
+            if prior_rem is not None and acct_worst is not None:
+                if prior_rem < acct_worst:
                     # several accounts: the tightest wins, keep its bind fields and its age
                     worst = prior_rem
                     bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                       "window_minutes")}
                     entry_age = prior.get("age_s")
                 # else keep this account's bind (already set for `worst`)
-            elif prior_rem is not None and worst is None:
+            elif prior_rem is not None and acct_worst is None:
                 worst = prior_rem
                 bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                   "window_minutes")}
+            elif prior_rem is None and acct_worst is None and not bind.get("resets_at") and prior.get("resets_at"):
+                bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
+                                                  "window_minutes")}
             key_provider[key] = name
+            merged_windows = _merge_windows(prior.get("windows"), detail)
+            if key in providers and (
+                prior_rem is None or acct_worst is None
+                or any(v is None for v in (prior.get("windows") or {}).values())
+                or any(v is None for v in detail.values())
+            ):
+                # Several accounts of one pool where at least one account/window has no usable reading:
+                # mark UNMEASURED_WINDOW: None so `_fold_paseo`'s `_merge_caps` cannot overwrite a
+                # named window back to a number and re-open the frontier/plenty gate (Carried 84).
+                merged_windows = {**merged_windows, UNMEASURED_WINDOW: None}
             providers[key] = {
                 "remaining": None if worst is None else round(float(worst), 1),
                 # several accounts: every account's windows and model sublimits survive; per window the tighter known
                 # reading, a window either account could not measure stays None (`_merge_windows`); sublimits keep
                 # known-beats-unknown
-                "windows": _merge_windows(prior.get("windows"), detail),
+                "windows": merged_windows,
                 "sublimits": _merge_caps(prior.get("sublimits"), sublimits),
                 "age_s": entry_age,
                 "billing_kind": acct.get("billing_kind"),
@@ -2068,19 +2090,118 @@ def paseo_agent_rows() -> tuple[list[Any] | None, str]:
     return result
 
 
+_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_ACTIVITY_FIELDS = ("lastActivityAt", "updatedAt", "lastUserMessageAt", "last_activity_at", "updated_at")
+
+
+def _row_uses_provider(row: dict[str, Any], provider: str) -> bool:
+    """True when a Paseo agent row can spend `provider`: a segment of `provider` (`antigravity/..`,
+    `pi/antigravity/..`), or Pi's `pi/ade/auto` dynamic router when checking `antigravity` (Carried 101a)."""
+    raw = str(row.get("provider") or "").strip()
+    parts = [p for p in raw.split("/") if p]
+    if provider in parts:
+        return True
+    if provider == "antigravity" and (
+        (len(parts) >= 3 and parts[0] == "pi" and parts[1] == "ade"
+         and (parts[2] == "auto" or parts[2].startswith(("auto:", "auto-"))))
+        or (parts == ["pi"] and str(row.get("model") or "").strip().startswith("ade/auto"))
+    ):
+        return True
+    return False
+
+
+def _parse_activity_age_s(value: Any, *, now: datetime) -> float:
+    """Age in seconds of an activity timestamp (ISO-8601 or relative string); 0.0 when unparseable or future (cautious)."""
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return 0.0
+        if _AGENT_AGE_RE.match(s):
+            return _agent_age_floor_s(s)
+        try:
+            stamp = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                return 0.0
+            age = (now - stamp.astimezone(UTC)).total_seconds()
+            return max(0.0, age) if math.isfinite(age) else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+    return 0.0
+
+
+def _paseo_agent_state_record(agent_id: Any) -> dict[str, Any] | None:
+    """Read Paseo's on-disk agent metadata (`$PASEO_HOME/agents/*/<id>.json`) for lastActivityAt/updatedAt."""
+    import stat
+
+    if not isinstance(agent_id, str) or not _AGENT_ID_RE.fullmatch(agent_id):
+        return None
+    if os.environ.get("ROUTE_AGENT_PASEO_LS_JSON") and not os.environ.get("PASEO_HOME"):
+        return None
+    agents_dir = Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo") / "agents"
+    if not agents_dir.is_dir() or agents_dir.is_symlink():
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+    for p in sorted(agents_dir.glob(f"*/{agent_id}.json")):
+        if p.parent.is_symlink() or p.is_symlink():
+            return None
+        try:
+            fd = os.open(p, flags)
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                max_bytes = 2 * 1024 * 1024
+                if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+                    return None
+                raw = fh.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    return None
+                data = json.loads(raw)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def _agent_activity_age_s(row: dict[str, Any], *, now: datetime) -> float | None:
+    """Smallest (most recent) known activity age in seconds for a Paseo agent row, or None when unavailable.
+
+    Checks activity timestamps on the row itself first, then Paseo's local agent state file. Any present but
+    unparseable field reads as 0.0 (fail closed: treat as just active)."""
+    ages: list[float] = []
+    for key in _ACTIVITY_FIELDS:
+        if key in row and row[key] is not None:
+            ages.append(_parse_activity_age_s(row[key], now=now))
+    if ages:
+        return min(ages)
+    rec = _paseo_agent_state_record(row.get("id"))
+    if rec is None:
+        return None
+    for key in _ACTIVITY_FIELDS:
+        if key in rec and rec[key] is not None:
+            ages.append(_parse_activity_age_s(rec[key], now=now))
+    return min(ages) if ages else None
+
+
 def _provider_busy_since(provider: str, age_s: float) -> bool:
-    """Is any Paseo agent on `provider` (a segment of its `provider` path: `antigravity/..`, `pi/antigravity/..`) live, or
-    created within the last `age_s` seconds (since a reading that old was taken)? True when the list cannot be read.
+    """Is any Paseo agent on `provider` (a segment of its `provider` path: `antigravity/..`, `pi/antigravity/..`,
+    plus `pi/ade/auto` for `antigravity`) live, created within `age_s`, or active/re-tasked since the reading?
+    True when the list cannot be read, or when an idle agent has no readable activity timestamp (fail closed, Carried 101).
     `created` has only coarse relative units, so it is judged by its smallest possible age (a possible dispatch counts)."""
     rows, _ = paseo_agent_rows()
     if rows is None:
         return True
+    now = datetime.now(UTC)
     for row in rows:
         if not isinstance(row, dict):
             return True
-        if provider not in str(row.get("provider") or "").split("/"):
+        if not _row_uses_provider(row, provider):
             continue
-        if row.get("status") not in ("closed", "idle") or _agent_age_floor_s(row.get("created")) <= age_s:
+        status = row.get("status")
+        if status not in ("closed", "idle") or _agent_age_floor_s(row.get("created")) <= age_s:
+            return True
+        act_age = _agent_activity_age_s(row, now=now)
+        if act_age is not None and act_age <= age_s:
+            return True
+        if status == "idle" and act_age is None:
             return True
     return False
 
@@ -2236,10 +2357,10 @@ def load_snapshot(bypass_memo: bool = False) -> tuple[dict[str, Any], float | No
 
 def claude_quota_state(now: datetime | None = None) -> dict[str, Any]:
     """The Claude pool's reading for the frontier allowance (ade_gates.read_guard_state, judged_guard_block): the merged
-    snapshot's `claude` entry as {checked_at, source, remaining (the tightest window), fable_left (the Fable sublimit),
-    windows, unknown}. `checked_at` is now minus that pool's own reading age (else the snapshot's age); `unknown` says why
-    there is no reading (nothing reports claude, or only a Paseo report that is not `available`): the gate fails closed on
-    it, on a reading older than 30 minutes and on a missing window percentage."""
+    snapshot's `claude` entry as {checked_at, source, remaining (plenty_remaining: None if any account/window is unmeasured —
+    Carried 84), fable_left (the Fable sublimit), windows, unknown}. `checked_at` is now minus that pool's own reading age
+    (else the snapshot's age); `unknown` says why there is no reading (nothing reports claude, or only a Paseo report that is
+    not `available`): the gate fails closed on it, on a reading older than 30 minutes and on a missing window percentage."""
     now = now or datetime.now(UTC)
     saved = (QuotaSource.kind, QuotaSource.detail, QuotaSource.fallback_reason, QuotaSource.paseo, QuotaSource.pools)
     try:
@@ -2255,7 +2376,7 @@ def claude_quota_state(now: datetime | None = None) -> dict[str, Any]:
     pool_age = _clean_age(info.get("age_s"))
     pool_age = pool_age if pool_age is not None else age
     checked = None if pool_age is None else ade_gates.iso(now - timedelta(seconds=pool_age))
-    return {"checked_at": checked, "source": source, "remaining": info.get("remaining"),
+    return {"checked_at": checked, "source": source, "remaining": plenty_remaining(info),
             "fable_left": (info.get("sublimits") or {}).get("fable"), "windows": dict(info.get("windows") or {}),
             "unknown": info.get("unknown"), "paseo_unknown": info.get("paseo_unknown")}
 
