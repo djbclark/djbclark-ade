@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""mcp-find: look up which MCP server provides a capability or integration (read-only).
+
+Usage:
+    bin/mcp-find <capability|text> [--client NAME] [--registry PATH] [--json]
+
+Reads config/mcp-registry.toml only: no network calls, no config writes, never opens
+client MCP configs or reads secrets.
+
+Match order (case-insensitive):
+    1. exact capability tag
+    2. capability tag prefix
+    3. substring of id, capabilities, notes, instead, on_demand, or risk
+
+Exit codes: 0 at least one match; 1 no match; 2 bad arguments or unreadable/invalid registry.
+Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+BIN = Path(__file__).resolve().parent
+REPO = BIN.parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_client_wiring as cw  # noqa: E402
+
+CLIENT_ALIASES = {
+    "cursor": "cursor-agent",
+    "antigravity": "gemini",
+}
+
+
+def detect_client(environ: Mapping[str, str] | None = None) -> str | None:
+    """Best-effort client detection from session environment variables."""
+    env = os.environ if environ is None else environ
+    paseo_provider = (env.get("PASEO_PROVIDER") or "").strip().lower()
+    if paseo_provider:
+        base = paseo_provider.split("/", 1)[0]
+        if base.startswith("claude"):
+            return "claude"
+        if base.startswith("codex"):
+            return "codex"
+        if base in ("cursor", "cursor-agent"):
+            return "cursor-agent"
+        if base == "hermes":
+            return "hermes"
+        if base == "pi":
+            return "pi"
+        if base in ("gemini", "antigravity"):
+            return "gemini"
+    if any(env.get(k) for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID")):
+        return "claude"
+    if any(env.get(k) for k in ("CODEX_THREAD_ID", "CODEX_SANDBOX", "CODEX_MANAGED_BY_NPM")):
+        return "codex"
+    if any(env.get(k) for k in ("CURSOR_AGENT", "CURSOR_TRACE_ID")):
+        return "cursor-agent"
+    if any(env.get(k) for k in ("HERMES_SESSION_ID", "HERMES_AGENT")):
+        return "hermes"
+    if any(env.get(k) for k in ("PI_CODING_AGENT_DIR", "PI_SESSION_ID")):
+        return "pi"
+    if any(env.get(k) for k in ("GEMINI_CLI", "ANTIGRAVITY_AGENT")):
+        return "gemini"
+    return None
+
+
+def normalize_client(client: str | None) -> str | None:
+    if client is None:
+        return None
+    c = client.strip().lower()
+    if not c:
+        return None
+    return CLIENT_ALIASES.get(c, c)
+
+
+def classify_match(row: dict[str, Any], query: str) -> tuple[int, str] | None:
+    """Return (rank, tier_name) or None. Lower rank wins."""
+    q = query.strip().lower()
+    if not q:
+        return None
+    caps = [c.lower() for c in row.get("capabilities") or []]
+    if any(c == q for c in caps):
+        return 1, "exact_capability"
+    if any(c.startswith(q) for c in caps):
+        return 2, "prefix_capability"
+    haystacks = [
+        str(row.get("id") or "").lower(),
+        *caps,
+        str(row.get("notes") or "").lower(),
+        str(row.get("instead") or "").lower(),
+        str(row.get("on_demand") or "").lower(),
+        str(row.get("risk") or "").lower(),
+    ]
+    if any(q in h for h in haystacks):
+        return 3, "substring"
+    return None
+
+
+def reachability_verdict(row: dict[str, Any], client: str) -> str:
+    """Return a concise reachability verdict for `client`."""
+    expected: dict[str, str] = row.get("expected") or {}
+    state = expected.get(client)
+    transport = row.get("transport")
+    others = [c for c, st in expected.items() if c != client and st in ("user", "user-lazy")]
+
+    if state == "user":
+        return "callable"
+    if state == "user-lazy":
+        return "callable (lazy: spawns on first call)"
+    if state and state.startswith("project:"):
+        return f"callable (project scope: {state[len('project:'):]})"
+    if state == "on-demand":
+        hint = row.get("on_demand") or f"attach {row['id']} for this session"
+        return f"on-demand: {hint}"
+    if state == "denied":
+        if others:
+            return f"denied: ask the operator (available in {', '.join(others)})"
+        return "denied: ask the operator"
+
+    # state == "absent" or client omitted from expected
+    if transport == "injected":
+        return "callable (injected by Paseo in Paseo-launched sessions)"
+    if row.get("id") == "claude-ai-connectors" and client == "claude":
+        return "callable (claude.ai account connector)"
+    if others:
+        return f"absent in this client: use {', '.join(others)}"
+    if row.get("instead"):
+        return f"absent in this client: use {row['instead']}"
+    if row.get("on_demand"):
+        return f"absent in this client: on-demand: {row['on_demand']}"
+    return "absent in this client"
+
+
+def find_matches(rows: list[dict[str, Any]], query: str, client: str | None = None) -> list[dict[str, Any]]:
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for idx, row in enumerate(rows):
+        hit = classify_match(row, query)
+        if hit is None:
+            continue
+        rank, tier = hit
+        item: dict[str, Any] = {
+            "id": row["id"],
+            "match_tier": tier,
+            "transport": row["transport"],
+            "owner": row["owner"],
+            "state": row["state"],
+            "capabilities": list(row["capabilities"]),
+            "expected": dict(row.get("expected") or {}),
+        }
+        if client is not None:
+            item["verdict"] = reachability_verdict(row, client)
+        for opt in ("on_demand", "instead", "notes", "doc", "risk"):
+            if row.get(opt):
+                item[opt] = row[opt]
+        ranked.append((rank, idx, item))
+    ranked.sort(key=lambda t: (t[0], t[1]))
+    return [item for _, _, item in ranked]
+
+
+def format_text(matches: list[dict[str, Any]], client: str | None) -> str:
+    lines: list[str] = []
+    for m in matches:
+        caps = ", ".join(m["capabilities"])
+        expected = m["expected"]
+        if expected:
+            cli_summary = "  ".join(f"{c}: {st}" for c, st in expected.items())
+        elif m["transport"] == "injected":
+            cli_summary = "(injected by Paseo)"
+        else:
+            cli_summary = "(managed outside local client configs)"
+        lines.append(f"{m['id']:<18} {m['transport']:<12} caps: {caps}")
+        lines.append(f"{'':18} clients: {cli_summary}")
+        if client is not None and "verdict" in m:
+            lines.append(f"{'':18} verdict ({client}): {m['verdict']}")
+        if m.get("on_demand"):
+            lines.append(f"{'':18} on-demand: {m['on_demand']}")
+        if m.get("notes"):
+            lines.append(f"{'':18} note: {m['notes']}")
+        if m.get("instead"):
+            lines.append(f"{'':18} instead: {m['instead']}")
+        if m.get("risk"):
+            lines.append(f"{'':18} risk: {m['risk']}")
+        if m.get("doc"):
+            lines.append(f"{'':18} doc: {m['doc']}")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="mcp-find", description=__doc__.splitlines()[0])
+    ap.add_argument("query", help="capability tag or text to search for")
+    ap.add_argument("--client", default=None, help="calling client id (default: auto-detected from environment)")
+    ap.add_argument("--registry", type=Path, default=REPO / "config" / "mcp-registry.toml", help="path to mcp-registry.toml")
+    ap.add_argument("--json", action="store_true", help="emit structured JSON")
+    args = ap.parse_args(argv)
+
+    query = args.query.strip()
+    if not query:
+        print("mcp-find: query must not be empty", file=sys.stderr)
+        return 2
+
+    if args.client is not None:
+        client = normalize_client(args.client)
+        if client is None or not cw.SAFE_ID.match(client):
+            print(f"mcp-find: invalid --client id {args.client!r}", file=sys.stderr)
+            return 2
+    else:
+        client = detect_client()
+        if client is not None and not cw.SAFE_ID.match(client):
+            print(f"mcp-find: invalid detected client id {client!r}", file=sys.stderr)
+            return 2
+
+    try:
+        rows = cw.load_registry(args.registry)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        print(f"mcp-find: invalid registry {args.registry}: {exc}", file=sys.stderr)
+        return 2
+
+    matches = find_matches(rows, query, client=client)
+    if args.json:
+        json.dump({"query": query, "client": client, "matches": matches}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0 if matches else 1
+
+    if not matches:
+        print(f"mcp-find: no server matches {query!r}", file=sys.stderr)
+        return 1
+
+    sys.stdout.write(format_text(matches, client=client))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

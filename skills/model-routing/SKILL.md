@@ -19,7 +19,7 @@ reasons behind the rules are in `docs/model-routing.md`; this skill is the metho
 **The policy numbers live in one place: `config/ade.toml`, printed by
 `bin/route_agent.py policy --md`** (services × kinds with each rank and suggested `--model [--effort]`, the pools
 with their Paseo provider and billing, the gates and caps, the lead's model). Run it; copy no rank, model id or
-threshold from this file or any other.
+threshold from this file or any other. Need an MCP capability across clients? Run `bin/mcp-find <capability>` (`skills/mcp-find/SKILL.md`, `config/mcp-registry.toml`) instead of reading client configs.
 
 Native `paseo run` accepts brief text as one final positional argv item. Read a saved brief into that item with a subprocess argv list; never pass `--prompt-file`, which native Paseo does not support. `ade-worker-run --no-footer` uses the same native argument shape.
 

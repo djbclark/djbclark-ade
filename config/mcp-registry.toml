@@ -1,0 +1,514 @@
+# Canonical MCP server registry for this machine (docs/mcp-on-demand.md §2.2).
+#
+# Read by:
+#   - `ade-install doctor` (bin/ade_client_wiring.py): observe-only drift checks against `expected`
+#   - `bin/mcp-find`: read-only capability lookup across clients
+#   - `bin/mcp-registry --md`: generates the inventory table in docs/mcp-on-demand.md §2.1
+#
+# Rules:
+#   - `id` matches the client config key.
+#   - `auth.keys` holds key NAMES only, never raw secret values.
+#   - `expected` maps TUI ids from bin/skill-everywhere to:
+#     user | user-lazy | on-demand | denied | absent | project:<path>
+#   - `[server.measured]` holds tool-measured footprint and 30-day usage snapshots.
+
+schema_version = 1
+
+[[server]]
+id = "basic-memory"
+transport = "local-http"
+url = "http://127.0.0.1:18796/mcp"
+owner = "launchd:com.djbclark.basic-memory-mcp"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["notes", "memory", "knowledge-base"]
+expected = { claude = "user", codex = "user", cursor-agent = "user", hermes = "user" }
+doc = "docs/mcp-servers.md#roster"
+notes = "Shared loopback daemon; default project is main. One process serves every client."
+
+[server.measured]
+footprint_mb = 619
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 32, claude_sessions = 22, codex_calls = 2, codex_sessions = 1 }
+
+[[server]]
+id = "firecrawl"
+transport = "local-http"
+url = "http://127.0.0.1:18804/mcp"
+owner = "launchd:com.djbclark.firecrawl-mcp"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "sudo-secretspec" }
+capabilities = ["web-search", "scrape", "crawl", "map", "developer-search"]
+expected = { claude = "user", codex = "user", cursor-agent = "user" }
+doc = "docs/mcp-servers.md#firecrawl-developer-search-2026-10-24"
+notes = "Shared loopback router to self-hosted Hyades Firecrawl; no local auth (Hyades-side secrets live in sudo-secretspec)."
+
+[server.measured]
+footprint_mb = 85
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 1822, claude_sessions = 149, codex_calls = 495, codex_sessions = 30 }
+
+[[server]]
+id = "graft"
+transport = "stdio"
+command = "graft"
+args = ["mcp"]
+owner = "per-session"
+state = "per-repo"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["code-graph", "code-search"]
+expected = { claude = "absent", codex = "absent" }
+instead = "graft CLI (graft ask, graft grep, graft callers, graft skeleton)"
+doc = "docs/mcp-servers.md#roster"
+notes = "Removed from Claude and Codex user scope in Phase 2a (saved ~3.3 GB across sessions); doctor warns if it returns. Repo .mcp.json is neutralised by disabledMcpjsonServers."
+
+[server.measured]
+footprint_mb = 46
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 3, claude_sessions = 2, codex_calls = 1, codex_sessions = 1 }
+
+[[server]]
+id = "chrome-devtools"
+transport = "stdio"
+command = "npx"
+args = [
+  "-y",
+  "chrome-devtools-mcp@latest",
+  "--autoConnect",
+  "--no-usage-statistics",
+  "--no-performance-crux",
+  "--redact-network-headers",
+]
+lazy_wrapper = "~/.local/libexec/ade/mcp-lazy"
+lazy_idle_seconds = 600
+owner = "per-session"
+state = "per-session"
+auth = { kind = "dialog", keys = [], store = "none" }
+capabilities = ["browser", "chrome", "devtools", "screenshot"]
+expected = { claude = "user-lazy", codex = "user-lazy" }
+on_demand = "ade-worker-run --mcp chrome-devtools (also lazy-wrapped in Claude and Codex user scope)"
+doc = "docs/mcp-servers.md#chrome-devtools-mcp-added-2026-11-16"
+risk = "operator browser session: cookies, logged-in tabs (docs/mcp-servers.md Security 1-5)"
+notes = "Wrapped in ~/.local/libexec/ade/mcp-lazy in Claude and Codex (Phase 2b part 2, PR #990): zero child process until first tool call, idle-reaped after 600 s. Chrome shows an Allow dialog on each real start."
+
+[server.measured]
+footprint_mb = 119
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 4, claude_sessions = 1, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "rfab"
+transport = "stdio"
+command = "ade-mcp-rfab"
+args = []
+owner = "per-session"
+state = "per-session"
+auth = { kind = "env", keys = ["RFAB_API_KEY"], store = "sudo-secretspec" }
+capabilities = ["image-generation", "video-generation", "game-art", "media", "sprites"]
+expected = { claude = "on-demand", codex = "on-demand" }
+on_demand = "ade-worker-run --mcp rfab (or claude --mcp-config '{\"mcpServers\":{\"rfab\":{\"type\":\"stdio\",\"command\":\"ade-mcp-rfab\",\"args\":[]}}}')"
+doc = "docs/mcp-servers.md#reality-fabricator-on-demand-added-2026-11-25"
+risk = "paid external media API; attach only on explicit operator request; send only art prompts and approved public references (docs/rfab-api.md)"
+notes = "Explicit per-task attachment only; bridge resolves RFAB_API_KEY in memory via sudo-secretspec and exits after 300 s idle."
+
+[[server]]
+id = "beeper"
+transport = "local-http"
+url = "http://127.0.0.1:23373/v0/mcp"
+owner = "app:Beeper Desktop"
+state = "external-app"
+auth = { kind = "oauth", keys = [], store = "client-oauth" }
+capabilities = ["chat", "messaging", "discord", "signal", "whatsapp", "telegram", "slack", "google-messages"]
+expected = { claude = "user", codex = "user", cursor-agent = "user" }
+footprint_label = "in-app"
+doc = "docs/mcp-servers.md#beeper-re-registered-and-oauth-limit-2026-11-14"
+notes = "Served by Beeper Desktop while running; OAuth approval is operator-only. No iMessage bridge in the 2026-08-23 get_accounts list."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 45, claude_sessions = 3, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "warpbuild"
+transport = "remote-http"
+url = "https://mcp.warpbuild.com/mcp"
+owner = "remote:warpbuild"
+state = "shared-safe"
+auth = { kind = "oauth", keys = [], store = "client-oauth" }
+capabilities = ["ci", "github-actions-runners"]
+expected = { claude = "user", codex = "user" }
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Remote WarpBuild CI runner MCP; WarpBuild runners are fallback-only."
+
+[server.measured]
+footprint_mb = 0
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 18, claude_sessions = 5, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "extrabar"
+transport = "stdio"
+command = "/Applications/ExtraBar.app/Contents/Helpers/extrabar-mcp"
+args = []
+owner = "app:ExtraBar.app"
+state = "external-app"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["macos-menubar"]
+expected = { claude = "user", codex = "user", cursor-agent = "user" }
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Thin stdio helper for ExtraBar.app menu-bar control."
+
+[server.measured]
+footprint_mb = 5
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "bezalel"
+transport = "remote-http"
+url = "https://mcp.bezalel.sh/mcp"
+owner = "remote:bezalel"
+state = "external-app"
+auth = { kind = "bearer", keys = ["Authorization", "MCP_BEZALEL_API_KEY"], store = "client-literal-pending-2c" }
+capabilities = [
+  "health",
+  "finance",
+  "cards",
+  "email",
+  "imessage",
+  "chat",
+  "memory",
+  "skills",
+  "computer",
+  "sandbox",
+  "connectors",
+  "photos:app-created-only",
+]
+expected = { claude = "denied", codex = "user", hermes = "user" }
+instead = "for recent photos/screenshots: adb pull from the Titan 2 (site-private memory reference_phone_screenshots_via_adb.md)"
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#8-bezalel"
+risk = "personal health/finance/email/iMessage connectors; ~1.5k instruction tokens in Claude Code"
+notes = "Denied in Claude Code (~79 tools). Google Photos Library API returns only app-created items since 2025-03-31 (docs/mcp-on-demand.md §4); Hermes uses env ref MCP_BEZALEL_API_KEY, Codex literal pending Phase 2c."
+
+[server.measured]
+footprint_mb = 0
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "hermes"
+transport = "local-http"
+url = "http://127.0.0.1:18790/mcp"
+owner = "launchd:com.djbclark.hermes-mcp-bridge"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["messaging", "telegram", "discord", "approvals"]
+expected = { codex = "user" }
+footprint_label = "shared"
+doc = "docs/mcp-servers.md#hermes-added-2026-08-23"
+notes = "Shared loopback bridge to Hermes messaging gateway and approval queue."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 1, claude_sessions = 1, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "siyuan"
+transport = "local-http"
+url = "http://127.0.0.1:6806/mcp"
+owner = "app:SiYuan"
+state = "external-app"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["notes", "pkm"]
+expected = { claude = "denied", codex = "user", hermes = "user" }
+footprint_label = "in-app"
+doc = "docs/mcp-servers.md#siyuan-added-2026-10-12"
+notes = "Served by SiYuan app kernel while running (loopback-only, open). Denied in Claude Code."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "crawl4ai"
+transport = "local-http"
+url = "http://127.0.0.1:18798/mcp"
+owner = "launchd:shared_mcp"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["scrape", "crawl", "headless-browser"]
+expected = { codex = "user", cursor-agent = "user" }
+footprint_label = "shared"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Shared loopback Crawl4AI server."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "arxiv"
+transport = "local-http"
+url = "http://127.0.0.1:18800/mcp/"
+owner = "launchd:shared_mcp"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["papers", "arxiv"]
+expected = { codex = "user", hermes = "user" }
+footprint_label = "shared"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Shared loopback arXiv paper search/download server."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 4, claude_sessions = 1, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "paper-search"
+transport = "local-http"
+url = "http://127.0.0.1:18802/mcp"
+owner = "launchd:shared_mcp"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["papers", "scholar"]
+expected = { claude = "denied", codex = "user", hermes = "user" }
+footprint_label = "shared"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Shared loopback mcp-proxy over stdio scholarly search server; denied in Claude Code."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "exa"
+transport = "remote-http"
+url = "https://mcp.exa.ai/mcp"
+owner = "remote:exa"
+state = "shared-safe"
+auth = { kind = "header", keys = ["x-api-key", "MCP_EXA_API_KEY"], store = "client-literal-pending-2c" }
+capabilities = ["web-search"]
+expected = { codex = "user", cursor-agent = "user" }
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#114-phase-2c-keys-to-sudo-secretspec-no-rotation"
+notes = "Remote Exa web search; header literal migration to sudo-secretspec pending Phase 2c."
+
+[server.measured]
+footprint_mb = 0
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "parallel-search"
+transport = "remote-http"
+url = "https://search.parallel.ai/mcp"
+owner = "remote:parallel"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["web-search"]
+expected = { codex = "user", cursor-agent = "user" }
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Remote Parallel web search endpoint."
+
+[server.measured]
+footprint_mb = 0
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 23, claude_sessions = 12, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "jina"
+transport = "remote-http"
+url = "https://mcp.jina.ai/v1"
+owner = "remote:jina"
+state = "shared-safe"
+auth = { kind = "bearer", keys = ["Authorization", "MCP_JINA_API_KEY"], store = "client-literal-pending-2c" }
+capabilities = ["web-search", "reader"]
+expected = { codex = "user", cursor-agent = "user" }
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#114-phase-2c-keys-to-sudo-secretspec-no-rotation"
+notes = "Remote Jina search and reader; Authorization literal migration to sudo-secretspec pending Phase 2c."
+
+[server.measured]
+footprint_mb = 0
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 7, claude_sessions = 4, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "aws-mcp"
+transport = "stdio"
+command = "~/.local/bin/mcp-proxy-for-aws"
+args = ["https://aws-mcp.us-east-1.api.aws/mcp", "--metadata", "INSTALL_SOURCE=aws-cli"]
+owner = "per-session"
+state = "shared-safe"
+auth = { kind = "env", keys = ["AWS_MCP_PROXY_PROFILES"], store = "none" }
+capabilities = ["aws", "cloud"]
+expected = { codex = "user", cursor-agent = "user" }
+footprint_label = "small, per session"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Local stdio proxy forwarding to AWS remote MCP using configured AWS profiles."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "ghost-os"
+transport = "stdio"
+command = "/opt/homebrew/bin/ghost"
+args = ["mcp"]
+owner = "per-session"
+state = "per-session"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["macos-ui", "computer-use"]
+expected = { claude = "denied", codex = "user" }
+doc = "docs/mcp-servers.md#roster"
+notes = "macOS UI automation via accessibility tree and vision; denied in Claude Code."
+
+[server.measured]
+footprint_mb = 3
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "cua-driver"
+transport = "stdio"
+command = "~/.local/bin/cua-driver"
+args = ["mcp"]
+owner = "per-session"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["macos-ui", "computer-use"]
+expected = { claude = "denied", codex = "user" }
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Thin stdio client to cua-driver daemon for macOS UI automation; denied in Claude Code."
+
+[server.measured]
+footprint_mb = 6
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "cow"
+transport = "stdio"
+command = "cow"
+args = ["mcp"]
+owner = "per-session"
+state = "shared-safe"
+auth = { kind = "none", keys = [], store = "none" }
+capabilities = ["cow", "worktrees"]
+expected = { codex = "user" }
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Copy-on-write worktree helper MCP server."
+
+[server.measured]
+footprint_mb = 2
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 0, codex_sessions = 0 }
+
+[[server]]
+id = "node_repl"
+transport = "stdio"
+command = "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl"
+args = []
+owner = "app:ChatGPT.app"
+state = "per-session"
+auth = { kind = "env", keys = [], store = "app-env" }
+capabilities = ["js-repl"]
+expected = { codex = "user" }
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Bundled ChatGPT/Codex Node REPL MCP server."
+
+[server.measured]
+footprint_mb = 6
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 0, claude_sessions = 0, codex_calls = 2, codex_sessions = 1 }
+
+[[server]]
+id = "computer-use"
+transport = "stdio"
+command = "SkyComputerUseClient"
+args = ["mcp"]
+owner = "app:Codex"
+state = "per-session"
+auth = { kind = "env", keys = [], store = "app-env" }
+capabilities = ["computer-use"]
+expected = { codex = "on-demand" }
+on_demand = "codex -c mcp_servers.computer-use.enabled=true"
+footprint_label = "off"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Codex bundled computer-use server; disabled (enabled = false) in ~/.codex/config.toml."
+
+[[server]]
+id = "cua_repl"
+transport = "stdio"
+command = "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+args = []
+owner = "app:ChatGPT.app"
+state = "per-session"
+auth = { kind = "env", keys = [], store = "app-env" }
+capabilities = ["computer-use", "js-repl"]
+expected = { codex = "on-demand" }
+on_demand = "codex -c mcp_servers.cua_repl.enabled=true"
+footprint_label = "off"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "ChatGPT bundled CUA REPL server; disabled (enabled = false) in ~/.codex/config.toml."
+
+[[server]]
+id = "fieldy"
+transport = "remote-http"
+url = "https://api.fieldy.ai/mcp"
+owner = "remote:fieldy"
+state = "external-app"
+auth = { kind = "oauth", keys = [], store = "client-oauth" }
+capabilities = ["wearable-notes"]
+expected = { hermes = "on-demand" }
+on_demand = "enable fieldy in ~/.hermes/config.yaml"
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Remote Fieldy wearable notes MCP; disabled (enabled: false) in Hermes."
+
+[[server]]
+id = "cloudflare"
+transport = "remote-http"
+url = "https://mcp.cloudflare.com/mcp"
+owner = "remote:cloudflare"
+state = "shared-safe"
+auth = { kind = "oauth", keys = [], store = "client-oauth" }
+capabilities = ["cloudflare"]
+expected = { hermes = "on-demand" }
+on_demand = "enable cloudflare in ~/.hermes/config.yaml"
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Remote Cloudflare MCP; disabled (enabled: false) in Hermes."
+
+[[server]]
+id = "claude-ai-connectors"
+transport = "remote-http"
+url = "https://claude.ai"
+owner = "remote:claude.ai"
+state = "external-app"
+auth = { kind = "oauth", keys = [], store = "client-oauth" }
+capabilities = ["email", "gmail", "library-docs", "context7"]
+expected = {}
+footprint_label = "0"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Managed on claude.ai account (not in ~/.claude.json): Gmail and Context7 active in Claude Code; Drive, Calendar, Firecrawl and 9 others denied via deniedMcpServers."
+
+[[server]]
+id = "paseo"
+transport = "injected"
+owner = "daemon:paseo"
+state = "external-app"
+auth = { kind = "none", keys = [], store = "paseo" }
+capabilities = ["agents", "workspaces", "schedules", "browser"]
+expected = {}
+footprint_label = "daemon"
+doc = "docs/mcp-on-demand.md#21-todays-inventory"
+notes = "Injected by the Paseo daemon into agents it launches (not configured in client MCP files)."
+
+[server.measured]
+measured_at = "2026-11-21"
+usage_30d = { claude_calls = 224, claude_sessions = 34, codex_calls = 1, codex_sessions = 1 }
