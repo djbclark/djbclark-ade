@@ -150,3 +150,17 @@ def test_clear_rejects_profile_options_without_writing(tmp_path, monkeypatch, ca
         assert exc.value.code == 2
         assert "require --set-profile" in capsys.readouterr().err
         assert path.read_text() == original
+
+
+def test_reset_reminder_reports_passed_resets_at_and_available_at(capsys):
+    now = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+    quota = {
+        "claude": {"remaining": None, "resets_at": "2026-11-26T10:00:00Z"},
+        "codex": {"remaining": None, "available_at": "2026-11-26T11:30:00Z"},
+        "cursor": {"remaining": 20.0, "resets_at": "2026-11-27T10:00:00Z"},
+    }
+    nudge.print_reset_reminder(quota, now=now)
+    out = capsys.readouterr().out
+    assert "claude: window reset 2026-11-26T10:00:00Z" in out
+    assert "codex: window reset 2026-11-26T11:30:00Z" in out
+    assert "cursor" not in out

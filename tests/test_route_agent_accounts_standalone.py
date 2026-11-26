@@ -165,6 +165,141 @@ def test_a_pool_with_no_unmeasured_account_takes_its_age_from_the_oldest_when_on
     assert pool["remaining"] == 20 and pool["age_s"] == 90
 
 
+def _claude_state_from_accounts(tmp_path, accounts, paseo_rows=None):
+    import json
+    from datetime import UTC, datetime
+
+    snap = tmp_path / "latest.json"
+    snap.write_text(json.dumps({
+        "snapshot": {"accounts": accounts},
+        "collected_at": datetime.now(UTC).isoformat(),
+    }))
+    env = {"AIUSE_SNAPSHOT": str(snap), "ROUTE_AGENT_AIUSE": "off", "ROUTE_AGENT_PASEO": "off"}
+    if paseo_rows is not None:
+        pfile = tmp_path / "paseo.json"
+        pfile.write_text(json.dumps(paseo_rows))
+        env["ROUTE_AGENT_PASEO"] = "on"
+        env["ROUTE_AGENT_PASEO_USAGE_JSON"] = str(pfile)
+    old_env = {k: os.environ.get(k) for k in ("AIUSE_SNAPSHOT", "ROUTE_AGENT_AIUSE", "ROUTE_AGENT_AIUSE_JSON",
+                                               "ROUTE_AGENT_PASEO", "ROUTE_AGENT_PASEO_USAGE_JSON")}
+    try:
+        os.environ.pop("ROUTE_AGENT_AIUSE_JSON", None)
+        os.environ.update(env)
+        return r.claude_quota_state()
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@pytest.mark.parametrize("bad_kind,bad_acct", [
+    ("expired", {"provider": "claude", "age_seconds": 30, "reading_expired": True,
+                 "windows": [_window("weekly", 80), _fable(60, "2099-01-01T00:00:00+00:00")]}),
+    ("windowless", {"provider": "claude", "age_seconds": 30, "windows": []}),
+    ("errored", {"provider": "claude", "age_seconds": 30, "error": "auth expired"}),
+])
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+def test_claude_quota_state_fails_closed_when_second_account_has_no_usable_reading(tmp_path, bad_kind, bad_acct, order):
+    """Carried #84 (adversary R2-M1 on PR #834): claude_quota_state must fail closed whenever any Claude
+    account is expired, windowless, or errored, even with a fresh age_seconds and in either account order."""
+    from datetime import UTC, datetime
+    import ade_gates
+
+    fresh = {"provider": "claude", "age_seconds": 30,
+             "windows": [_window("weekly", 70), _fable(60, "2099-01-01T00:00:00+00:00")]}
+    accts = [[fresh, bad_acct][i] for i in order]
+    state = _claude_state_from_accounts(tmp_path, accts)
+    assert state["remaining"] is None, (bad_kind, order, state)
+    gate = {**ade_gates.FRONTIER_DEFAULTS, "frontier1_judged": 1.0}
+    block = ade_gates.judged_guard_block(state, gate, datetime.now(UTC))
+    assert block is not None and "no window percentage" in block, (bad_kind, order, block, state)
+
+
+@pytest.mark.parametrize("order", list(itertools.permutations(["fresh70", "stale", "fresh40"])))
+def test_claude_quota_state_fails_closed_for_three_account_fresh_stale_fresh_in_all_orders(tmp_path, order):
+    """Carried #84: three-account mix (fresh70, stale, fresh40) must fail closed in all 6 orders."""
+    from datetime import UTC, datetime
+    import ade_gates
+
+    by_name = {
+        "fresh70": {"provider": "claude", "age_seconds": 30,
+                    "windows": [_window("weekly", 70), _fable(60, "2099-01-01T00:00:00+00:00")]},
+        "stale": {"provider": "claude", "age_seconds": 99999,
+                  "windows": [_window("weekly", 80), _fable(60, "2099-01-01T00:00:00+00:00")]},
+        "fresh40": {"provider": "claude", "age_seconds": 30,
+                    "windows": [_window("weekly", 40), _fable(60, "2099-01-01T00:00:00+00:00")]},
+    }
+    state = _claude_state_from_accounts(tmp_path, [by_name[k] for k in order])
+    assert state["remaining"] is None, (order, state)
+    gate = {**ade_gates.FRONTIER_DEFAULTS, "frontier1_judged": 1.0}
+    assert ade_gates.judged_guard_block(state, gate, datetime.now(UTC)) is not None
+
+
+def test_claude_quota_state_stays_closed_when_paseo_overlays_multi_account_expired_reading(tmp_path):
+    """Multi-account UNMEASURED_WINDOW marker survives _fold_paseo's _merge_caps overlay."""
+    from datetime import UTC, datetime
+    import ade_gates
+
+    now = datetime.now(UTC)
+    fresh = {"provider": "claude", "age_seconds": 30,
+             "windows": [_window("weekly", 70), _fable(60, "2099-01-01T00:00:00+00:00")]}
+    expired = {"provider": "claude", "age_seconds": 30, "reading_expired": True,
+               "windows": [_window("weekly", 80), _fable(60, "2099-01-01T00:00:00+00:00")]}
+    paseo = [{"sourceId": "claude", "id": "claude:default", "fetchedAt": now.isoformat(),
+              "report": {"status": "available", "windows": [
+                  {"id": "weekly", "label": "weekly", "usedPct": 30, "remainingPct": 70}]}}]
+    state = _claude_state_from_accounts(tmp_path, [fresh, expired], paseo_rows=paseo)
+    assert state["remaining"] is None
+    gate = {**ade_gates.FRONTIER_DEFAULTS, "frontier1_judged": 1.0}
+    block = ade_gates.judged_guard_block(state, gate, now)
+    assert block is not None and "no window percentage" in block, (block, state)
+
+
+def test_claude_quota_state_opens_when_all_accounts_are_fresh(tmp_path):
+    """Carried #84: all-fresh multi-account Claude readings keep opening the frontier gate on the tighter one."""
+    from datetime import UTC, datetime
+    import ade_gates
+
+    a1 = {"provider": "claude", "age_seconds": 30,
+          "windows": [_window("weekly", 70), _fable(60, "2099-01-01T00:00:00+00:00")]}
+    a2 = {"provider": "claude", "age_seconds": 30,
+          "windows": [_window("weekly", 40), _fable(50, "2099-01-01T00:00:00+00:00")]}
+    state = _claude_state_from_accounts(tmp_path, [a1, a2])
+    assert state["remaining"] == 40.0 and state["fable_left"] == 50.0 and state["unknown"] is None
+    gate = {**ade_gates.FRONTIER_DEFAULTS, "frontier1_judged": 1.0}
+    assert ade_gates.judged_guard_block(state, gate, datetime.now(UTC)) is None
+
+
+def test_past_reset_exhausted_window_preserves_resets_at_and_handles_shared_parent(capsys):
+    """Carried #83 residual fixes: an exhausted window whose reset passed keeps resets_at for
+    quota_nudge --reset, and an exhausted shared_pool_family parent whose reset passed reads None."""
+    import quota_nudge
+
+    past = "2020-01-01T00:00:00+00:00"
+    acct = {"provider": "claude", "age_seconds": 60, "windows": [
+        {"label": "weekly", "pool_family": "default", "remaining_percent": 0.0,
+         "headroom_percent": 0.0, "state": "exhausted", "resets_at": past},
+    ]}
+    pools = r._providers_from_accounts([acct], 60)
+    assert pools["claude"]["remaining"] is None
+    assert pools["claude"]["resets_at"] == past
+    quota_nudge.print_reset_reminder(pools)
+    out = capsys.readouterr().out
+    assert "claude: window reset 2020-01-01T00:00:00+00:00" in out
+
+    shared_acct = {"provider": "claude", "age_seconds": 60, "windows": [
+        {"label": "parent", "pool_family": "parent_fam", "remaining_percent": 0.0,
+         "headroom_percent": 0.0, "state": "exhausted", "resets_at": past},
+        {"label": "child", "pool_family": "default", "shared_pool_family": "parent_fam",
+         "remaining_percent": 80.0, "headroom_percent": 80.0, "state": "ok"},
+    ]}
+    shared_pools = r._providers_from_accounts([shared_acct], 60)
+    assert shared_pools["claude"]["windows"]["parent"] is None
+    assert r.plenty_remaining(shared_pools["claude"]) is None
+
+
 def _standalone(tmp_path, *args):
     """bin/route_agent.py copied alone into an empty directory: no ade_config, ade_gates, model_tiers or config/."""
     lone = tmp_path / "lone"

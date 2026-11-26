@@ -130,7 +130,7 @@ def print_reminder(quota):
             print(f"    operator profile: {p['name']} until {p['until']} (advisory only)")
 
 
-def print_reset_reminder(quota):
+def print_reset_reminder(quota, *, now=None):
     """Name every pool whose binding window has already refilled since its reading.
 
     A 0% (or tight) reading that predates the window's reset is stale, not exhausted: this is the
@@ -141,9 +141,9 @@ def print_reset_reminder(quota):
     for pool, info in (quota or {}).items():
         if not isinstance(info, dict):
             continue
-        resets = info.get("resets_at")
+        resets = info.get("resets_at") or info.get("available_at")
         try:
-            if resets and route_agent.hours_to_reset(resets) == 0.0:
+            if resets and route_agent.hours_to_reset(resets, now=now) == 0.0:
                 refilled.append((pool, resets))
         except (ValueError, TypeError):
             continue

@@ -2554,8 +2554,8 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         return quota
 
     @staticmethod
-    def agent(provider="antigravity/gemini-4-argon-high", created="3 hours ago", status="closed"):
-        return {"id": "a1", "provider": provider, "created": created, "status": status}
+    def agent(provider="antigravity/gemini-4-argon-high", created="3 hours ago", status="closed", **extra):
+        return {"id": "a1", "provider": provider, "created": created, "status": status, **extra}
 
     def test_a_stale_pool_inside_the_query_gate_keeps_its_reading(self):
         quota = self.stale_argon_quota(age_seconds=700.0)
@@ -2612,12 +2612,52 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         self.assertIsNone(quota["antigravity-argon"]["remaining"])
 
     def test_agents_that_cannot_have_spent_the_reading_do_not_block_the_reuse(self):
+        old_iso = (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
         agents = [self.agent(created="12 minutes ago"),                      # 720 s > 700 s: before the reading
-                  self.agent(status="idle", created="3 days ago"),
+                  self.agent(status="idle", created="3 days ago", lastActivityAt=old_iso),
+                  self.agent(provider="pi/ade/auto", created="3 hours ago", status="closed"),
                   self.agent(provider="codex/gpt-6-astra", status="running", created="just now"),
                   self.agent(provider="cursor/composer-2.5", created="1 minute ago")]
         quota = self.stale_argon_quota(age_seconds=700.0, agents=agents)
         self.assertEqual(quota["antigravity-argon"]["remaining"], 100.0)
+
+    def test_pi_ade_auto_and_retasked_idle_agents_block_antigravity_stale_reuse(self):
+        """Carried #101 (PR 864 re-review lows): pi/ade/auto counts as an antigravity user, and an idle agent
+        re-tasked since the reading (or lacking readable lastActivityAt) fails closed and blocks stale reuse."""
+        recent_iso = (datetime.now(UTC) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old_iso = (datetime.now(UTC) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        for name, agents in {
+                "pi-ade-auto-running": [self.agent(provider="pi/ade/auto", status="running", created="2 days ago")],
+                "pi-ade-auto-closed-recent": [self.agent(provider="pi/ade/auto", status="closed", created="3 minutes ago")],
+                "pi-ade-auto-retasked-idle": [self.agent(provider="pi/ade/auto", status="idle", created="3 days ago", lastActivityAt=recent_iso)],
+                "idle-retasked-iso": [self.agent(status="idle", created="3 days ago", lastActivityAt=recent_iso)],
+                "idle-retasked-relative": [self.agent(status="idle", created="3 days ago", updatedAt="5 minutes ago")],
+                "idle-missing-activity-fails-closed": [self.agent(status="idle", created="3 days ago")],
+                "idle-unparseable-activity-fails-closed": [self.agent(status="idle", created="3 days ago", lastActivityAt="bogus")],
+                "closed-recent-activity": [self.agent(status="closed", created="3 days ago", lastActivityAt=recent_iso)],
+        }.items():
+            quota = self.stale_argon_quota(age_seconds=700.0, agents=agents)
+            self.assertIsNone(quota["antigravity-argon"]["remaining"], name)
+        # On-disk Paseo agent state file ($PASEO_HOME/agents/<proj>/<id>.json) resolves idle agents cleanly.
+        paseo_home = Path(self.tmp.name) / "paseo-home-101"
+        proj = paseo_home / "agents" / "Users-djbclark-src-djbclark-ade"
+        proj.mkdir(parents=True)
+        (proj / "idle-old.json").write_text(json.dumps({"id": "idle-old", "lastActivityAt": old_iso}))
+        (proj / "idle-new.json").write_text(json.dumps({"id": "idle-new", "lastActivityAt": recent_iso}))
+        (proj / "idle-bad.json").write_text("{not-json")
+        quota_old = self.stale_argon_quota(
+            age_seconds=700.0,
+            agents=[{"id": "idle-old", "provider": "antigravity/gemini-4-neon", "status": "idle", "created": "3 days ago"}],
+            ls_env={"PASEO_HOME": str(paseo_home)},
+        )
+        self.assertEqual(quota_old["antigravity-argon"]["remaining"], 100.0)
+        for bad_id in ("idle-new", "idle-bad", "idle-missing"):
+            quota_bad = self.stale_argon_quota(
+                age_seconds=700.0,
+                agents=[{"id": bad_id, "provider": "antigravity/gemini-4-neon", "status": "idle", "created": "3 days ago"}],
+                ls_env={"PASEO_HOME": str(paseo_home)},
+            )
+            self.assertIsNone(quota_bad["antigravity-argon"]["remaining"], bad_id)
 
     def test_an_unreadable_agent_list_fails_closed(self):
         for env in ({"ROUTE_AGENT_PASEO_LS_JSON": "/nonexistent/ls.json"}, {"ROUTE_AGENT_PASEO_LS_JSON": ""}):
