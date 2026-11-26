@@ -1396,30 +1396,34 @@ def _providers_from_accounts(accounts: list[Any], age: float | None) -> dict[str
         for key, (worst, detail, sublimits, bind) in per_key.items():
             prior = providers.get(key) or {}
             prior_rem = prior.get("remaining")
+            acct_worst = worst
             # the age belongs to the entry whose reading `remaining` and the bind fields come from
             entry_age = acct_age
-            if key in providers and (prior_rem is None) != (worst is None):
+            if key in providers and (prior_rem is None) != (acct_worst is None):
                 # one account has no usable reading (stale, expired or windowless): keep the pool's oldest age
                 # whichever account was folded first, and preserve UNMEASURED_WINDOW: None below so `plenty_remaining`
                 # and `claude_quota_state` fail closed across all multi-account mixes (Carried 84).
                 ages = [a for a in (prior.get("age_s"), acct_age) if a is not None]
                 entry_age = max(ages) if ages else None
-            if prior_rem is not None and worst is not None:
-                if prior_rem < worst:
+            if prior_rem is not None and acct_worst is not None:
+                if prior_rem < acct_worst:
                     # several accounts: the tightest wins, keep its bind fields and its age
                     worst = prior_rem
                     bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                       "window_minutes")}
                     entry_age = prior.get("age_s")
                 # else keep this account's bind (already set for `worst`)
-            elif prior_rem is not None and worst is None:
+            elif prior_rem is not None and acct_worst is None:
                 worst = prior_rem
+                bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
+                                                  "window_minutes")}
+            elif prior_rem is None and acct_worst is None and not bind.get("resets_at") and prior.get("resets_at"):
                 bind = {k: prior.get(k) for k in ("pace_ratio", "resets_at",
                                                   "window_minutes")}
             key_provider[key] = name
             merged_windows = _merge_windows(prior.get("windows"), detail)
             if key in providers and (
-                prior_rem is None or worst is None
+                prior_rem is None or acct_worst is None
                 or any(v is None for v in (prior.get("windows") or {}).values())
                 or any(v is None for v in detail.values())
             ):
@@ -2098,7 +2102,8 @@ def _row_uses_provider(row: dict[str, Any], provider: str) -> bool:
     if provider in parts:
         return True
     if provider == "antigravity" and (
-        parts[:3] == ["pi", "ade", "auto"]
+        (len(parts) >= 3 and parts[0] == "pi" and parts[1] == "ade"
+         and (parts[2] == "auto" or parts[2].startswith(("auto:", "auto-"))))
         or (parts == ["pi"] and str(row.get("model") or "").strip().startswith("ade/auto"))
     ):
         return True
@@ -2143,9 +2148,13 @@ def _paseo_agent_state_record(agent_id: Any) -> dict[str, Any] | None:
             fd = os.open(p, flags)
             with os.fdopen(fd, "rb") as fh:
                 st = os.fstat(fh.fileno())
-                if not stat.S_ISREG(st.st_mode) or st.st_size > 2 * 1024 * 1024:
+                max_bytes = 2 * 1024 * 1024
+                if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
                     return None
-                data = json.loads(fh.read())
+                raw = fh.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    return None
+                data = json.loads(raw)
         except (OSError, ValueError):
             return None
         return data if isinstance(data, dict) else None

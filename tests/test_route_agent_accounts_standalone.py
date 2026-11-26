@@ -197,6 +197,11 @@ def _claude_state_from_accounts(tmp_path, accounts, paseo_rows=None):
 @pytest.mark.parametrize("bad_kind,bad_acct", [
     ("expired", {"provider": "claude", "age_seconds": 30, "reading_expired": True,
                  "windows": [_window("weekly", 80), _fable(60, "2099-01-01T00:00:00+00:00")]}),
+    ("sublimit_only", {"provider": "claude", "age_seconds": 30,
+                       "windows": [{"label": "Fable", "pool_family": "fable", "quota_scope": "model_sublimit",
+                                    "max_share_of_parent_percent": 50, "headroom_percent": 60,
+                                    "remaining_percent": 60, "state": "ok",
+                                    "resets_at": "2099-01-01T00:00:00+00:00"}]}),
     ("windowless", {"provider": "claude", "age_seconds": 30, "windows": []}),
     ("errored", {"provider": "claude", "age_seconds": 30, "error": "auth expired"}),
 ])

@@ -2012,7 +2012,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
         env = {"ROUTE_AGENT_OMP_READY": "0", **env}
         clean = {k: v for k, v in os.environ.items()
                  if k not in ("AIUSE_SNAPSHOT", "ROUTE_AGENT_AIUSE_JSON", "ROUTE_AGENT_AIUSE",
-                              "ROUTE_AGENT_AIUSE_BIN")}
+                              "ROUTE_AGENT_AIUSE_BIN", "PASEO_HOME")}
         with mock.patch.dict(os.environ, {**clean, **env}, clear=True), \
                 mock.patch.object(r, "_read_snapshot_file",
                                   return_value=(self.accounts, 60.0)), \
@@ -2639,7 +2639,7 @@ class TestQuotaFromAiuseAvailable(unittest.TestCase):
             quota = self.stale_argon_quota(age_seconds=700.0, agents=agents)
             self.assertIsNone(quota["antigravity-argon"]["remaining"], name)
         # On-disk Paseo agent state file ($PASEO_HOME/agents/<proj>/<id>.json) resolves idle agents cleanly.
-        paseo_home = Path(self.tmp.name) / "paseo-home-101"
+        paseo_home = self.tmp / "paseo-home-101"
         proj = paseo_home / "agents" / "Users-djbclark-src-djbclark-ade"
         proj.mkdir(parents=True)
         (proj / "idle-old.json").write_text(json.dumps({"id": "idle-old", "lastActivityAt": old_iso}))
