@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""mcp-registry: validate config/mcp-registry.toml and render the docs/mcp-on-demand.md §2.1 table.
+
+Usage:
+    bin/mcp-registry --md [--registry PATH]
+    bin/mcp-registry --check [--registry PATH] [--doc PATH] [--root DIR]
+    bin/mcp-registry --json [--registry PATH]
+
+Read-only: never contacts the network, never edits any client config, never reads secrets.
+Exit codes: 0 ok / in sync; 1 --check found doc drift; 2 bad arguments, invalid registry, or missing markers.
+Stdlib only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+BIN = Path(__file__).resolve().parent
+REPO = BIN.parent
+if str(BIN) not in sys.path:
+    sys.path.insert(0, str(BIN))
+
+import ade_client_wiring as cw  # noqa: E402
+
+START = "<!-- mcp-registry:start -->"
+END = "<!-- mcp-registry:end -->"
+TABLE_CLIENTS: tuple[tuple[str, str], ...] = (
+    ("claude", "C"),
+    ("codex", "X"),
+    ("cursor-agent", "U"),
+    ("hermes", "H"),
+)
+STATE_LABELS = {
+    "user": "user",
+    "user-lazy": "lazy",
+    "on-demand": "on-demand",
+    "denied": "denied",
+    "absent": "absent",
+}
+
+
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _format_endpoint(row: dict[str, Any]) -> str:
+    transport = row["transport"]
+    owner = row["owner"]
+    if transport == "local-http":
+        p = urlsplit(row["url"])
+        ep = f"{p.hostname}:{p.port}{p.path}" if p.port else f"{p.hostname}{p.path}"
+        return f"local `{ep}` ({owner})"
+    if transport == "remote-http":
+        p = urlsplit(row["url"])
+        ep = f"{p.hostname}{p.path}"
+        return f"remote `{ep}` ({owner})"
+    if transport == "stdio":
+        args = row.get("args", [])
+        shown_args = " ".join(args[:2]) + (" …" if len(args) > 2 else "")
+        cmd = row["command"] + (f" {shown_args}" if shown_args else "")
+        return f"stdio `{cmd}` ({owner})"
+    return f"injected ({owner})"
+
+
+def _format_footprint(row: dict[str, Any]) -> str:
+    if row.get("footprint_label"):
+        return str(row["footprint_label"])
+    measured = row.get("measured") or {}
+    mb = measured.get("footprint_mb")
+    if isinstance(mb, (int, float)) and not isinstance(mb, bool):
+        if mb == 0:
+            return "0"
+        suffix = " per session" if row["state"] in ("per-session", "per-repo") else ", shared"
+        if row["transport"] == "stdio" and "user-lazy" in (row.get("expected") or {}).values():
+            suffix = " on call (lazy)"
+        return f"{mb:g} MB{suffix}"
+    return "—"
+
+
+def _format_auth(row: dict[str, Any]) -> str:
+    auth = row["auth"]
+    kind = auth["kind"]
+    keys = auth.get("keys") or []
+    store = auth.get("store", "none")
+    if kind == "none":
+        if store == "sudo-secretspec":
+            return "none locally (remote in sudo-secretspec)"
+        if store == "paseo":
+            return "Paseo"
+        return "none"
+    parts = [kind]
+    if keys:
+        parts.append(", ".join(f"`{k}`" for k in keys))
+    if store not in ("none", "client-oauth"):
+        parts.append(f"({store})")
+    return " ".join(parts)
+
+
+def _format_client_cell(row: dict[str, Any], tui: str) -> str:
+    exp = (row.get("expected") or {}).get(tui)
+    if not exp:
+        if row["transport"] == "injected" and tui in ("claude", "codex"):
+            return "(Paseo)"
+        return ""
+    if exp in STATE_LABELS:
+        return STATE_LABELS[exp]
+    if exp.startswith("project:"):
+        return f"proj `{exp[len('project:'):]}`"
+    return exp
+
+
+def render_markdown(rows: list[dict[str, Any]]) -> str:
+    headers = ["Server", "Transport (endpoint / owner)", "Footprint", "Auth (key names only)", "Capabilities"]
+    headers += [col for _, col in TABLE_CLIENTS]
+    lines = [
+        START,
+        "| " + " | ".join(headers) + " |",
+        "|" + "|".join(["---"] * len(headers)) + "|",
+    ]
+    for row in rows:
+        caps = ", ".join(row["capabilities"])
+        cells = [
+            f"`{row['id']}`",
+            _cell(_format_endpoint(row)),
+            _cell(_format_footprint(row)),
+            _cell(_format_auth(row)),
+            _cell(caps),
+        ]
+        cells += [_cell(_format_client_cell(row, tui)) for tui, _ in TABLE_CLIENTS]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines.append(END)
+    return "\n".join(lines) + "\n"
+
+
+def extract_block(text: str) -> str | None:
+    a = text.find(START)
+    b = text.find(END, a + 1 if a >= 0 else 0)
+    if a < 0 or b < 0:
+        return None
+    b += len(END)
+    if text[b:b + 1] == "\n":
+        b += 1
+    return text[a:b]
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="mcp-registry", description=__doc__.splitlines()[0])
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--md", action="store_true", help="render the markdown inventory table for docs/mcp-on-demand.md §2.1")
+    mode.add_argument("--check", action="store_true", help="validate registry and verify docs/mcp-on-demand.md §2.1 table is in sync")
+    mode.add_argument("--json", action="store_true", help="print validated registry rows as JSON")
+    ap.add_argument("--registry", type=Path, default=REPO / "config" / "mcp-registry.toml", help="path to mcp-registry.toml")
+    ap.add_argument("--doc", type=Path, default=REPO / "docs" / "mcp-on-demand.md", help="path to docs/mcp-on-demand.md for --check")
+    ap.add_argument("--root", type=Path, default=REPO, help="repo root containing bin/skill-everywhere for TUI roster validation")
+    args = ap.parse_args(argv)
+
+    tuis: list[str] | None = None
+    if (args.root / "bin" / "skill-everywhere").is_file():
+        try:
+            tuis = cw.tui_roster(args.root)
+        except (OSError, ValueError) as exc:
+            print(f"mcp-registry: cannot read TUI roster: {exc}", file=sys.stderr)
+            return 2
+
+    try:
+        rows = cw.load_registry(args.registry, tuis=tuis)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        print(f"mcp-registry: invalid registry {args.registry}: {exc}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        json.dump({"schema_version": cw.SCHEMA_VERSION, "servers": rows}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+
+    rendered = render_markdown(rows)
+    if args.check:
+        try:
+            doc_text = args.doc.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"mcp-registry: cannot read {args.doc}: {exc}", file=sys.stderr)
+            return 2
+        current = extract_block(doc_text)
+        if current is None:
+            print(f"mcp-registry: {args.doc} has no {START} ... {END} markers", file=sys.stderr)
+            return 2
+        if current != rendered:
+            print(f"mcp-registry: {args.doc} table differs from `bin/mcp-registry --md`", file=sys.stderr)
+            return 1
+        return 0
+
+    # Default or --md
+    sys.stdout.write(rendered)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

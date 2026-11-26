@@ -2025,8 +2025,8 @@ def observe_client_wiring(
 ) -> list[Observation]:
     """Advisory check that every current TUI has the shared MCP servers and skills.
 
-    TUI roster: the ``targets`` table of ``bin/skill-everywhere``. MCP roster:
-    ``config/mcp-clients.toml``. Skills: ``skill-everywhere --check --all`` (read-only).
+    TUI roster: the ``targets`` table of ``bin/skill-everywhere``. MCP registry:
+    ``config/mcp-registry.toml``. Skills: ``skill-everywhere --check --all`` (read-only).
     Both roster and script absent (fixture catalogs) returns ``[]``; exactly one of them is an error. Statuses: ok, warn
     (a gap, with the exact fix in the detail, never run), unknown (TUI with no
     readable MCP config / not installed; never fails), error (unreadable roster or

@@ -3,22 +3,25 @@
 Two checks per TUI, both report-only (standing order 11: no client config is
 ever edited, no fix command is ever run; the fix is printed):
 
-* MCP: each shared server in ``config/mcp-clients.toml`` (the machine-readable
-  mirror of docs/mcp-servers.md) x each client it lists. The client's config
-  FILE is read for key names and the URL only (``~/.claude.json`` user-scope
-  ``mcpServers``; ``~/.codex/config.toml`` ``[mcp_servers.<id>]``;
-  ``~/.cursor/mcp.json`` ``mcpServers``; ``~/.hermes/config.yaml``
-  ``mcp_servers``). A TUI with no file-readable MCP config is ``unknown`` with
-  the reason, never a failure.
+* MCP: each server in ``config/mcp-registry.toml`` x each client in its
+  ``expected`` map (``user``, ``user-lazy``, ``on-demand``, ``denied``,
+  ``absent``, ``project:<path>``). The client's config FILE is read for key
+  names, command/args, enabled flag and URL only (``~/.claude.json`` user/project
+  ``mcpServers`` + ``~/.claude/settings.json`` ``deniedMcpServers``;
+  ``~/.codex/config.toml`` ``[mcp_servers.<id>]``; ``~/.cursor/mcp.json``
+  ``mcpServers``; ``~/.hermes/config.yaml`` ``mcp_servers``). Never prints
+  ``env``, ``headers``, ``http_headers`` or raw secret values. A TUI with no
+  file-readable MCP config is ``unknown`` with the reason, never a failure.
 * Skills: ``bin/skill-everywhere --check --all`` is run (it is read-only) and
   its per-TUI states are mapped to ok / missing / dangling / elsewhere.
 
 The TUI roster is not listed here: it is the ``targets`` table inside
 ``bin/skill-everywhere`` (docs/skill-everywhere.md), the one place that knows
-which TUIs are current. The MCP roster's ``clients`` must be a subset of it.
+which TUIs are current. The MCP registry's ``expected`` keys must be a subset
+of it.
 
-Statuses: ok | warn | unknown | error. ``error`` = an unreadable roster or client
-config, or exactly one of the roster / ``bin/skill-everywhere`` present.
+Statuses: ok | warn | unknown | error. ``error`` = an unreadable registry or
+client config, or exactly one of the registry / ``bin/skill-everywhere`` present.
 """
 from __future__ import annotations
 
@@ -47,11 +50,28 @@ SKILL_ENV_HOME_RELATIVE = ("OPS_ROOT", "CODEX_HOME", "HERMES_HOME")
 MAX_STDERR_ROWS = 200  # distinct stderr lines kept; the rest are counted, not dropped silently
 MAX_DETAIL_LINES = 12
 
+SCHEMA_VERSION = 1
+DEFAULT_LAZY_WRAPPER = "~/.local/libexec/ade/mcp-lazy"
+DEFAULT_LAZY_IDLE_SECONDS = 600
+
 SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 SAFE_URL = re.compile(r"https?://[A-Za-z0-9.:/_-]+\Z")
-SAFE_ARG = re.compile(r"[-A-Za-z0-9@][A-Za-z0-9@._=:/-]*\Z")  # one stdio argv word; no shell metacharacters
+SAFE_CMD = re.compile(r"[A-Za-z0-9/_~.-][A-Za-z0-9/_~.-]*\Z")
+SAFE_ARG = re.compile(r"[-A-Za-z0-9@~/_][A-Za-z0-9@._=:/~-]*\Z")  # one stdio argv word; no shell metacharacters
+SAFE_AUTH_KEY = re.compile(r"[A-Za-z0-9_.:-]{1,64}\Z")
+FORBIDDEN_SERVER_KEYS = frozenset({"env", "headers", "http_headers", "env_http_headers", "token", "api_key"})
+
+VALID_TRANSPORTS = frozenset({"stdio", "local-http", "remote-http", "injected"})
+VALID_STATES = frozenset({"per-session", "per-repo", "shared-safe", "external-app"})
+VALID_AUTH_KINDS = frozenset({"none", "oauth", "bearer", "header", "env", "dialog"})
+VALID_AUTH_STORES = frozenset({
+    "none", "sudo-secretspec", "client-oauth", "client-literal-pending-2c", "app-env", "paseo",
+})
+VALID_EXPECTED_EXACT = frozenset({"user", "user-lazy", "on-demand", "denied", "absent"})
+
 CLAUDE_HTTP_TYPES = ("http", "streamable-http")  # alias accepted by Claude Code
 CLAUDE_STDIO_TYPES = (None, "stdio")  # an entry without type is read as stdio
+FILE_TUIS = frozenset({"claude", "codex", "cursor-agent", "hermes"})
 
 # (kind, id, status, detail)
 Row = tuple[str, str, str, str]
@@ -60,6 +80,7 @@ Runner = Callable[[list[str], dict[str, str]], "subprocess.CompletedProcess[str]
 # TUIs whose MCP config is not a file this machine can read, and why.
 NO_MCP_FILE = {
     "pi": "Pi is not a separate MCP client here (docs/mcp-servers.md)",
+    "gemini": "Gemini / Antigravity MCP config is not checked by doctor here",
     "grokbot": "Grok Bot runs on its own Linux box; its MCP config is not on this machine",
 }
 
@@ -78,14 +99,50 @@ def tui_roster(root: Path) -> list[str]:
     return ids
 
 
-# ---------------------------------------------------------------- MCP roster
+# ---------------------------------------------------------------- MCP registry
 
 def default_roster_path(root: Path) -> Path:
-    return root / "config" / "mcp-clients.toml"
+    return root / "config" / "mcp-registry.toml"
 
 
-def load_roster(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any]]:
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+def _validate_expected_value(sid: str, client: str, state: Any, transport: str) -> None:
+    if not isinstance(state, str) or not state:
+        raise ValueError(f"server {sid}: expected[{client!r}] must be a non-empty string")
+    if state in VALID_EXPECTED_EXACT:
+        if state == "user-lazy" and transport != "stdio":
+            raise ValueError(f"server {sid}: expected[{client!r}]='user-lazy' requires transport='stdio'")
+        return
+    if state.startswith("project:"):
+        proj = state[len("project:"):]
+        if not proj or any(ord(ch) < 32 for ch in proj):
+            raise ValueError(f"server {sid}: expected[{client!r}] has invalid project path {proj!r}")
+        return
+    raise ValueError(
+        f"server {sid}: expected[{client!r}]={state!r} must be one of "
+        f"{sorted(VALID_EXPECTED_EXACT)} or 'project:<path>'"
+    )
+
+
+def _validate_auth(sid: str, auth: Any) -> None:
+    if not isinstance(auth, dict):
+        raise ValueError(f"server {sid}: auth must be a table")
+    kind = auth.get("kind")
+    keys = auth.get("keys")
+    store = auth.get("store")
+    if kind not in VALID_AUTH_KINDS:
+        raise ValueError(f"server {sid}: auth.kind {kind!r} must be in {sorted(VALID_AUTH_KINDS)}")
+    if not isinstance(keys, list) or any(not isinstance(k, str) or not SAFE_AUTH_KEY.match(k) for k in keys):
+        raise ValueError(f"server {sid}: auth.keys must be a list of key names only (no spaces or values)")
+    if store not in VALID_AUTH_STORES:
+        raise ValueError(f"server {sid}: auth.store {store!r} must be in {sorted(VALID_AUTH_STORES)}")
+
+
+def validate_registry(data: Any, tuis: list[str] | None = None) -> list[dict[str, Any]]:
+    if not isinstance(data, dict):
+        raise ValueError("registry root must be a TOML table")
+    ver = data.get("schema_version")
+    if isinstance(ver, bool) or ver != SCHEMA_VERSION:
+        raise ValueError(f"unsupported schema_version {ver!r} (expected {SCHEMA_VERSION})")
     rows = data.get("server")
     if not isinstance(rows, list) or not rows:
         raise ValueError("no [[server]] rows")
@@ -93,29 +150,84 @@ def load_roster(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("[[server]] row is not a table")
-        sid, url, clients = row.get("id"), row.get("url"), row.get("clients")
+        sid = row.get("id")
         if not isinstance(sid, str) or not SAFE_ID.match(sid) or sid in seen:
             raise ValueError(f"bad or duplicate server id {sid!r}")
         seen.add(sid)
-        if "command" in row:
-            # A stdio server: `command` + `args`, no url.
-            cmd, args = row.get("command"), row.get("args", [])
+        bad_secret_keys = FORBIDDEN_SERVER_KEYS.intersection(row.keys())
+        if bad_secret_keys:
+            raise ValueError(f"server {sid}: forbidden secret-bearing field(s) {sorted(bad_secret_keys)}")
+        transport = row.get("transport")
+        if transport not in VALID_TRANSPORTS:
+            raise ValueError(f"server {sid}: transport {transport!r} must be in {sorted(VALID_TRANSPORTS)}")
+        if transport == "stdio":
             if "url" in row:
-                raise ValueError(f"server {sid}: give url or command, not both")
-            if not isinstance(cmd, str) or not SAFE_ID.match(cmd):
-                raise ValueError(f"server {sid}: command must be one plain word")
+                raise ValueError(f"server {sid}: stdio server must not set url")
+            cmd, args = row.get("command"), row.get("args", [])
+            if not isinstance(cmd, str) or not SAFE_CMD.match(cmd) or ".." in cmd.split("/"):
+                raise ValueError(f"server {sid}: command must be a safe executable word or path")
             if not isinstance(args, list) or any(not isinstance(a, str) or not SAFE_ARG.match(a) for a in args):
-                raise ValueError(f"server {sid}: args must be a list of plain words (letters, digits, @ . _ = : / -)")
-        elif not isinstance(url, str) or not SAFE_URL.match(url):
-            raise ValueError(f"server {sid}: url must be plain http(s) (letters, digits, . : / _ -)")
-        if not isinstance(clients, list) or not clients or any(
-                not isinstance(c, str) or not SAFE_ID.match(c) for c in clients):
-            raise ValueError(f"server {sid}: clients must be a non-empty list of TUI ids")
-        if "command" in row and any(c not in ("claude", "codex") for c in clients):
-            raise ValueError(f"server {sid}: stdio checks support only claude and codex clients")
-        if tuis is not None and (bad := [c for c in clients if c not in tuis]):
-            raise ValueError(f"server {sid}: client(s) {bad} not in the skill-everywhere roster {tuis}")
+                raise ValueError(f"server {sid}: args must be a list of plain words (no whitespace or shell metachars)")
+            if "lazy_wrapper" in row:
+                lw = row["lazy_wrapper"]
+                if not isinstance(lw, str) or not SAFE_CMD.match(lw) or ".." in lw.split("/"):
+                    raise ValueError(f"server {sid}: lazy_wrapper must be a safe path")
+            if "lazy_idle_seconds" in row:
+                idle = row["lazy_idle_seconds"]
+                if isinstance(idle, bool) or not isinstance(idle, int) or idle < 0:
+                    raise ValueError(f"server {sid}: lazy_idle_seconds must be a non-negative int")
+        elif transport in ("local-http", "remote-http"):
+            if "command" in row:
+                raise ValueError(f"server {sid}: HTTP server must not set command")
+            url = row.get("url")
+            if not isinstance(url, str) or not SAFE_URL.match(url):
+                raise ValueError(f"server {sid}: url must be plain http(s) (letters, digits, . : / _ -)")
+        else:  # injected
+            if "url" in row or "command" in row:
+                raise ValueError(f"server {sid}: injected server must not set url or command")
+        owner = row.get("owner")
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError(f"server {sid}: owner must be a non-empty string")
+        state = row.get("state")
+        if state not in VALID_STATES:
+            raise ValueError(f"server {sid}: state {state!r} must be in {sorted(VALID_STATES)}")
+        _validate_auth(sid, row.get("auth"))
+        caps = row.get("capabilities")
+        if not isinstance(caps, list) or not caps or any(
+                not isinstance(c, str) or not c.strip() or any(ord(ch) < 32 for ch in c) for c in caps):
+            raise ValueError(f"server {sid}: capabilities must be a non-empty list of printable strings")
+        expected = row.get("expected")
+        if not isinstance(expected, dict):
+            raise ValueError(f"server {sid}: expected must be a table of client -> state")
+        for client, exp_state in expected.items():
+            if not isinstance(client, str) or not SAFE_ID.match(client):
+                raise ValueError(f"server {sid}: bad client id {client!r} in expected")
+            if tuis is not None and client not in tuis:
+                raise ValueError(f"server {sid}: client {client!r} not in the skill-everywhere roster {tuis}")
+            _validate_expected_value(sid, client, exp_state, transport)
+        for opt_str in ("doc", "risk", "notes", "on_demand", "instead", "footprint_label"):
+            if opt_str in row and not isinstance(row[opt_str], str):
+                raise ValueError(f"server {sid}: {opt_str} must be a string")
+        if "measured" in row and not isinstance(row["measured"], dict):
+            raise ValueError(f"server {sid}: measured must be a table")
     return rows
+
+
+def load_registry(path: Path, tuis: list[str] | None = None) -> list[dict[str, Any]]:
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    return validate_registry(data, tuis=tuis)
+
+
+# Backward-compatible alias used by tests and callers.
+load_roster = load_registry
+
+
+def _expand_home(raw: str, home: Path) -> str:
+    if raw == "~":
+        return str(home)
+    if raw.startswith("~/"):
+        return str(home / raw[2:])
+    return raw
 
 
 def safe_url(url: Any, want: str) -> str:
@@ -149,13 +261,40 @@ def fix_add(tui: str, sid: str, url: str) -> str:
     return f"add {sid}: url: {url} under mcp_servers in ~/.hermes/config.yaml"
 
 
-def fix_swap(tui: str, sid: str, url: str) -> str:
+def fix_remove(tui: str, sid: str) -> str:
     q = shlex.quote
     if tui == "claude":
-        return f"claude mcp remove --scope user {q(sid)} && {fix_add(tui, sid, url)}"
+        return f"claude mcp remove --scope user {q(sid)}"
     if tui == "codex":
-        return f"codex mcp remove {q(sid)} && {fix_add(tui, sid, url)}"
+        return f"codex mcp remove {q(sid)}"
+    if tui == "cursor-agent":
+        return f'remove "{sid}" from mcpServers in ~/.cursor/mcp.json'
+    return f"remove {sid} from mcp_servers in ~/.hermes/config.yaml"
+
+
+def fix_swap(tui: str, sid: str, url: str) -> str:
+    if tui in ("claude", "codex"):
+        return f"{fix_remove(tui, sid)} && {fix_add(tui, sid, url)}"
     return f"correct the {sid} entry: " + fix_add(tui, sid, url)
+
+
+def _fix_stdio_add(tui: str, sid: str, cmd: str, args: list[str]) -> str:
+    q = shlex.quote
+    want = " ".join([q(cmd), *(q(a) for a in args)])
+    if tui == "claude":
+        return f"claude mcp add --scope user {q(sid)} -- {want}"
+    if tui == "codex":
+        return f"codex mcp add {q(sid)} -- {want}"
+    if tui == "cursor-agent":
+        return f'set "{sid}": {{"command": "{cmd}", "args": {json.dumps(args)}}} under mcpServers in ~/.cursor/mcp.json'
+    return f"set {sid} command={cmd} under mcp_servers in ~/.hermes/config.yaml"
+
+
+def _fix_stdio_swap(tui: str, sid: str, cmd: str, args: list[str]) -> str:
+    add = _fix_stdio_add(tui, sid, cmd, args)
+    if tui in ("claude", "codex"):
+        return f"{fix_remove(tui, sid)} && {add}"
+    return f"correct the {sid} entry: {add}"
 
 
 # Loaders return (path, servers-dict-or-None-when-file-absent).
@@ -166,6 +305,37 @@ def _load_claude(home: Path) -> tuple[Path, dict[str, Any] | None]:
     data = json.loads(path.read_text(encoding="utf-8"))
     servers = data.get("mcpServers") if isinstance(data, dict) else None
     return path, servers if isinstance(servers, dict) else {}
+
+
+def _load_claude_extra(home: Path) -> tuple[dict[str, dict[str, Any]], set[str], str | None]:
+    """(projects_mcp, denied_set, settings_error) from ~/.claude.json and ~/.claude/settings.json."""
+    projects_mcp: dict[str, dict[str, Any]] = {}
+    claude_path = home / ".claude.json"
+    if claude_path.is_file():
+        data = json.loads(claude_path.read_text(encoding="utf-8"))
+        projs = data.get("projects") if isinstance(data, dict) else None
+        if isinstance(projs, dict):
+            for proj_path, pdata in projs.items():
+                if isinstance(proj_path, str) and isinstance(pdata, dict):
+                    ms = pdata.get("mcpServers")
+                    if isinstance(ms, dict):
+                        projects_mcp[proj_path] = ms
+    denied: set[str] = set()
+    settings_path = home / ".claude" / "settings.json"
+    if not settings_path.is_file():
+        return projects_mcp, denied, None
+    try:
+        sdata = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError) as e:
+        return projects_mcp, denied, f"claude settings unreadable: {type(e).__name__}"
+    raw_denied = sdata.get("deniedMcpServers") if isinstance(sdata, dict) else None
+    if isinstance(raw_denied, list):
+        for item in raw_denied:
+            if isinstance(item, str):
+                denied.add(item)
+            elif isinstance(item, dict) and isinstance(item.get("serverName"), str):
+                denied.add(item["serverName"])
+    return projects_mcp, denied, None
 
 
 def _load_codex(home: Path) -> tuple[Path, dict[str, Any] | None]:
@@ -203,31 +373,110 @@ _LOADERS: dict[str, Callable[[Path], tuple[Path, dict[str, Any] | None]]] = {
 }
 
 
-def _judge_stdio(tui: str, sid: str, cmd: str, args: list[str], entry: Any) -> tuple[str, str]:
-    """Claude Code/Codex stdio entry; ``_judge``'s states plus ``wrong-command``."""
+def _judge_stdio(tui: str, sid: str, cmd: str, args: list[str], entry: Any, *, home: Path) -> tuple[str, str]:
+    """Stdio entry check; states: ok | missing | wrong-type | disabled | wrong-command."""
     q = shlex.quote
+    expanded_cmd = _expand_home(cmd, home)
     want = " ".join([q(cmd), *(q(a) for a in args)])
-    client = "claude mcp" if tui == "claude" else "codex mcp"
-    scope = " --scope user" if tui == "claude" else ""
-    add = f"{client} add{scope} {q(sid)} -- {want}"
-    swap = f"{client} remove{scope} {q(sid)} && {add}"
+    add = _fix_stdio_add(tui, sid, cmd, args)
+    swap = _fix_stdio_swap(tui, sid, cmd, args)
     if entry is None:
         return "missing", f"not registered; run: {add}"
     if not isinstance(entry, dict):
         return "wrong-type", f"entry is not a table/object; run: {swap}"
-    if entry.get("type") not in CLAUDE_STDIO_TYPES:
+    if tui == "claude" and entry.get("type") not in CLAUDE_STDIO_TYPES:
         t = entry.get("type")
         shown = repr(t) if isinstance(t, str) and len(t) <= 32 else "<odd>"
         return "wrong-type", f"entry type is {shown}, want 'stdio'; run: {swap}"
-    if tui == "codex" and "url" in entry:
+    if tui in ("codex", "cursor-agent") and "url" in entry:
         return "wrong-type", f"entry has url, want a stdio command; run: {swap}"
     if entry.get("enabled") is False:
         return "disabled", f"present but enabled = false; set enabled = true for {sid}"
-    if entry.get("command") != cmd or entry.get("args", []) != args:
-        # Command and args only: never print env or other keys (they can hold secrets).
+    got_cmd = entry.get("command")
+    raw_args = entry.get("args")
+    got_args = [] if raw_args is None else raw_args
+    cmd_ok = isinstance(got_cmd, str) and (got_cmd == expanded_cmd or got_cmd == cmd)
+    if not cmd_ok or not isinstance(got_args, list) or got_args != args:
+        # Command and args only: never print env or differing args (they can hold secrets).
         note = "; the entry has env, re-add it" if "env" in entry and entry["env"] else ""
-        return "wrong-command", f"command or args differ from the roster{note}; run: {swap}"
+        return "wrong-command", f"command or args differ from the registry{note}; run: {swap}"
     return "ok", f"registered: {want}"
+
+
+def _lazy_id_matches(before_sep: list[Any], sid: str) -> bool:
+    """Return True if `--id <sid>` or `--id=<sid>` appears exactly once in mcp-lazy args before `--`."""
+    if not all(isinstance(tok, str) for tok in before_sep):
+        return False
+    ids: list[str] = []
+    i = 0
+    while i < len(before_sep):
+        tok = before_sep[i]
+        if tok == "--id":
+            if i + 1 >= len(before_sep):
+                return False
+            ids.append(before_sep[i + 1])
+            i += 2
+            continue
+        if tok.startswith("--id="):
+            ids.append(tok[len("--id="):])
+        i += 1
+    return ids == [sid]
+
+
+def _judge_stdio_lazy(
+    tui: str,
+    sid: str,
+    cmd: str,
+    args: list[str],
+    entry: Any,
+    *,
+    home: Path,
+    wrapper: str = DEFAULT_LAZY_WRAPPER,
+    idle_seconds: int = DEFAULT_LAZY_IDLE_SECONDS,
+) -> tuple[str, str]:
+    """Validate a `user-lazy` stdio entry wrapped in `mcp-lazy`."""
+    expanded_wrapper = _expand_home(wrapper, home)
+    expanded_cmd = _expand_home(cmd, home)
+    example_child = expanded_cmd if os.path.isabs(expanded_cmd) else f"/opt/homebrew/bin/{cmd}"
+    lazy_args = ["--id", sid, "--idle", str(idle_seconds), "--", example_child, *args]
+    add = _fix_stdio_add(tui, sid, wrapper, lazy_args)
+    swap = _fix_stdio_swap(tui, sid, wrapper, lazy_args)
+    if entry is None:
+        return "missing", f"not registered (expected lazy wrapper); run: {add}"
+    if not isinstance(entry, dict):
+        return "wrong-type", f"entry is not a table/object; run: {swap}"
+    if tui == "claude" and entry.get("type") not in CLAUDE_STDIO_TYPES:
+        t = entry.get("type")
+        shown = repr(t) if isinstance(t, str) and len(t) <= 32 else "<odd>"
+        return "wrong-type", f"entry type is {shown}, want 'stdio'; run: {swap}"
+    if tui in ("codex", "cursor-agent") and "url" in entry:
+        return "wrong-type", f"entry has url, want a lazy stdio wrapper; run: {swap}"
+    if entry.get("enabled") is False:
+        return "disabled", f"present but enabled = false; set enabled = true for {sid}"
+    got_cmd = entry.get("command")
+    got_args = entry.get("args")
+    note = "; the entry has env, re-add it" if "env" in entry and entry["env"] else ""
+    if got_cmd not in (expanded_wrapper, wrapper):
+        if isinstance(got_cmd, str) and (got_cmd == expanded_cmd or got_cmd == cmd or Path(got_cmd).name == Path(cmd).name):
+            return "unwrapped", f"registered directly without mcp-lazy wrapper{note}; run: {swap}"
+        return "wrong-command", f"command is not {wrapper}{note}; run: {swap}"
+    if not isinstance(got_args, list) or "--" not in got_args:
+        return "wrong-command", f"mcp-lazy args missing '--' separator{note}; run: {swap}"
+    sep = got_args.index("--")
+    before, after = got_args[:sep], got_args[sep + 1:]
+    if not _lazy_id_matches(before, sid):
+        return "wrong-command", f"mcp-lazy args missing '--id {sid}'{note}; run: {swap}"
+    if not after or not isinstance(after[0], str):
+        return "wrong-command", f"mcp-lazy args missing wrapped child command{note}; run: {swap}"
+    child_cmd, child_args = after[0], after[1:]
+    if not os.path.isabs(child_cmd) or ".." in child_cmd.split("/"):
+        return "wrong-command", f"mcp-lazy wrapped child command must be an absolute path without '..'{note}; run: {swap}"
+    child_matches = (
+        child_cmd == expanded_cmd if os.path.isabs(expanded_cmd) else Path(child_cmd).name == cmd
+    )
+    if not child_matches or child_args != args:
+        return "wrong-command", f"mcp-lazy wrapped command or args differ from the registry{note}; run: {swap}"
+    return "ok", f"registered (lazy): {wrapper} --id {sid} -- {cmd}"
 
 
 def _judge(tui: str, sid: str, want: str, entry: Any) -> tuple[str, str]:
@@ -251,12 +500,57 @@ def _judge(tui: str, sid: str, want: str, entry: Any) -> tuple[str, str]:
     return "ok", f"registered at {want}"
 
 
+def _judge_absent(tui: str, sid: str, entry: Any) -> tuple[str, str]:
+    if entry is None:
+        return "ok", "absent from user scope (expected)"
+    return "drift", f"expected absent, but present in user scope; run: {fix_remove(tui, sid)}"
+
+
+def _judge_on_demand(tui: str, sid: str, entry: Any) -> tuple[str, str]:
+    if entry is None:
+        return "ok", "on-demand (absent from user scope)"
+    if isinstance(entry, dict) and entry.get("enabled") is False:
+        return "ok", "on-demand (disabled in user scope)"
+    return "drift", f"expected on-demand, but active in user scope; run: {fix_remove(tui, sid)}"
+
+
+def _judge_denied(
+    tui: str,
+    sid: str,
+    entry: Any,
+    *,
+    claude_denied: set[str],
+    claude_settings_error: str | None,
+) -> tuple[str, str]:
+    if tui == "claude":
+        if claude_settings_error is not None:
+            return "error", claude_settings_error
+        if sid in claude_denied:
+            if entry is not None:
+                return "ok", "denied in ~/.claude/settings.json (overrides ~/.claude.json entry)"
+            return "ok", "denied in ~/.claude/settings.json"
+        if entry is not None:
+            return (
+                "drift",
+                f'expected denied, but active in user scope and not in deniedMcpServers; '
+                f'add {{"serverName": "{sid}"}} to ~/.claude/settings.json and run: {fix_remove(tui, sid)}',
+            )
+        return (
+            "drift",
+            f'not listed in deniedMcpServers in ~/.claude/settings.json; '
+            f'add {{"serverName": "{sid}"}} to deniedMcpServers',
+        )
+    if entry is None or (isinstance(entry, dict) and entry.get("enabled") is False):
+        return "ok", "denied (absent/disabled in user scope)"
+    return "drift", f"expected denied, but active in user scope; run: {fix_remove(tui, sid)}"
+
+
 def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) -> dict[str, list[Row]]:
-    """Per TUI, one row per marked server (``mcp`` kind; status ok|warn|unknown|error).
-    Reads at most four config files; writes nothing."""
+    """Per TUI, one row per expected server (``mcp`` kind; status ok|warn|unknown|error).
+    Reads at most five config files; writes nothing."""
     out: dict[str, list[Row]] = {t: [] for t in tuis}
     for tui in tuis:
-        wanted = [r for r in roster if tui in r["clients"]]
+        wanted = [r for r in roster if tui in r.get("expected", {})]
         if not wanted:
             continue
         loader = _LOADERS.get(tui)
@@ -276,11 +570,78 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
                 out[tui].append(("mcp", f"{tui}/*", "error", f"{tui} MCP config unreadable: YAMLError"))
                 continue
             raise
+        claude_projects: dict[str, dict[str, Any]] = {}
+        claude_denied: set[str] = set()
+        claude_settings_error: str | None = None
+        if tui == "claude":
+            claude_projects, claude_denied, claude_settings_error = _load_claude_extra(home)
+
         for r in wanted:
             sid = r["id"]
-            if "command" in r:
-                state, detail = _judge_stdio(tui, sid, r["command"], r.get("args", []),
-                                             servers.get(sid) if servers is not None else None)
+            exp = r["expected"][tui]
+            entry = servers.get(sid) if servers is not None else None
+
+            if exp == "absent":
+                state, detail = _judge_absent(tui, sid, entry)
+                out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
+                                 detail if state == "ok" else f"{state}: {detail}"))
+                continue
+
+            if exp == "on-demand":
+                state, detail = _judge_on_demand(tui, sid, entry)
+                out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
+                                 detail if state == "ok" else f"{state}: {detail}"))
+                continue
+
+            if exp == "denied":
+                state, detail = _judge_denied(
+                    tui, sid, entry,
+                    claude_denied=claude_denied,
+                    claude_settings_error=claude_settings_error,
+                )
+                status = "ok" if state == "ok" else ("error" if state == "error" else "warn")
+                out[tui].append(("mcp", f"{tui}/{sid}", status,
+                                 detail if status in ("ok", "error") else f"{state}: {detail}"))
+                continue
+
+            if exp.startswith("project:"):
+                proj_raw = exp[len("project:"):]
+                if tui != "claude":
+                    out[tui].append(("mcp", f"{tui}/{sid}", "unknown",
+                                     f"project-scoped MCP ({proj_raw}) is not checked for {tui}"))
+                    continue
+                proj_path = _expand_home(proj_raw, home)
+                proj_entry = claude_projects.get(proj_path, {}).get(sid)
+                if r["transport"] == "stdio":
+                    state, detail = _judge_stdio(tui, sid, r["command"], r.get("args", []), proj_entry, home=home)
+                else:
+                    state, detail = _judge(tui, sid, r["url"], proj_entry)
+                if servers is None:
+                    detail = f"{path} absent (TUI not set up?); {detail}"
+                out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
+                                 f"project {proj_raw}: {detail}" if state == "ok" else f"{state} (project {proj_raw}): {detail}"))
+                continue
+
+            if exp == "user-lazy":
+                state, detail = _judge_stdio_lazy(
+                    tui,
+                    sid,
+                    r["command"],
+                    r.get("args", []),
+                    entry,
+                    home=home,
+                    wrapper=r.get("lazy_wrapper", DEFAULT_LAZY_WRAPPER),
+                    idle_seconds=r.get("lazy_idle_seconds", DEFAULT_LAZY_IDLE_SECONDS),
+                )
+                if servers is None:
+                    detail = f"{path} absent (TUI not set up?); {detail}"
+                out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
+                                 detail if state == "ok" else f"{state}: {detail}"))
+                continue
+
+            # exp == "user"
+            if r["transport"] == "stdio":
+                state, detail = _judge_stdio(tui, sid, r["command"], r.get("args", []), entry, home=home)
                 if servers is None:
                     detail = f"{path} absent (TUI not set up?); {detail}"
                 out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
@@ -291,7 +652,7 @@ def observe_mcp(roster: list[dict[str, Any]], tuis: list[str], *, home: Path) ->
                 out[tui].append(("mcp", f"{tui}/{sid}", "warn",
                                  f"missing: {path} absent (TUI not set up?); {fix_add(tui, sid, want)}"))
                 continue
-            state, detail = _judge(tui, sid, want, servers.get(sid))
+            state, detail = _judge(tui, sid, want, entry)
             out[tui].append(("mcp", f"{tui}/{sid}", "ok" if state == "ok" else "warn",
                              detail if state == "ok" else f"{state}: {detail}"))
     return out
@@ -310,7 +671,7 @@ def classify_skill_state(state: str) -> str:
     """ok | unknown | missing | dangling | elsewhere | other. Copy-target rows carry a
     trailing ``(<dest>)`` (``copied (/x)``), stripped first."""
     state = re.sub(r" \(.*\)$", "", state)
-    if state == "linked" or state.startswith("via ") or state == "copied":
+    if state in ("linked", "copied", "present") or state.startswith("via "):
         return "ok"
     if state.startswith("not installed"):
         return "unknown"
@@ -452,7 +813,7 @@ def observe(
     runner: Runner | None = None,
 ) -> list[Row]:
     """All rows: per TUI one ``tui`` summary then its ``mcp``/``skill`` detail rows
-    (non-ok only, plus ok MCP rows), then global rows. ``[]`` when both the roster and
+    (non-ok only, plus ok MCP rows), then global rows. ``[]`` when both the registry and
     skill-everywhere are absent (fixture catalogs); exactly one of them is an error row."""
     path = roster_path if roster_path is not None else default_roster_path(root)
     has_script = root.joinpath(*SKILL_SCRIPT).is_file()
@@ -465,7 +826,7 @@ def observe(
     home_dir = home if home is not None else Path.home()
     try:
         tuis = tui_roster(root)
-        roster = load_roster(path, tuis)
+        roster = load_registry(path, tuis)
     except (OSError, ValueError, UnicodeDecodeError) as e:
         return [("tui", "roster", "error", f"TUI/MCP roster unreadable ({path}): {e}")]
     mcp = observe_mcp(roster, tuis, home=home_dir)
@@ -497,3 +858,12 @@ def observe(
         rows.extend(r for r in det if r[2] != "unknown" and (r[0] == "mcp" or r[2] != "ok"))
     rows.extend(glob)
     return rows
+
+
+if __name__ == "__main__":
+    import sys
+
+    root_dir = Path(__file__).resolve().parent.parent
+    for kind, rid, st, detail in observe(root_dir):
+        print(f"{kind:<5} {rid:<28} {st:<7} {detail}")
+    sys.exit(0)
