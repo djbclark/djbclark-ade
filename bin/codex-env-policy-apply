@@ -6,7 +6,9 @@
 Dry run by default: prints a unified diff of the policy span ONLY (the policy tables and the comment block above
 them, old against new), never a line of any neighbouring table. Only the template's own exact lines, table headers and
 the fixed literals `inherit = "core|all|none"` and `ignore_default_excludes = true|false` print; every other
-assignment line (including its key), operator comment and continuation line is hidden; in a sub-table every assignment line is hidden. Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
+assignment line (including its key), operator comment and continuation line is hidden; in a sub-table every assignment line is hidden.
+When `--allow-set-keys` permits explicit-set changes, it also prints the `set` key NAMES added, removed, or changed
+(never values) after the diff. Touches nothing but the policy tables and the comment block just above them: Codex's own [projects.*],
 [hooks.state.*], [marketplaces.*] and every other byte stay as they are. With --write: nothing at all happens when
 the merged text equals the file (no backup, no temp file, mtime unchanged); otherwise it refuses if TARGET changed
 since it was read (Codex rewrites it), creates TARGET.bak-<UTC time>-env-policy with mode 0600 (O_EXCL), writes a
@@ -148,6 +150,11 @@ def main(argv):
     shown_old = safe_view(old[c:d], template_lines)
     shown_new = safe_view(block, template_lines)
     sys.stdout.writelines(difflib.unified_diff(shown_old.splitlines(1), shown_new.splitlines(1), "live policy span", "new policy span"))
+    if diff:
+        print(f"explicit set changes in [{POLICY}.set] (values not shown):")
+        for k in diff:
+            tag = "add" if k not in oset else ("remove" if k not in nset else "change")
+            print(f"  {tag}: {k}")
     if not a.write:
         return 0
     now = os.stat(target)

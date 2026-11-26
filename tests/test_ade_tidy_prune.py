@@ -73,7 +73,10 @@ print("\\n".join(rows))
 '''
 
 
-SUP, DAEMON = 39999, 40000   # the Paseo supervisor (named in paseo.pid) and its `Paseo Daemon` child
+# Synthetic PIDs must stay strictly above Linux PID_MAX_LIMIT (4,194,304) and macOS PID_MAX (99,999).
+# Otherwise a subprocess running `ade-tidy prune` on a busy CI runner can get `os.getpid() in (SUP, DAEMON)`,
+# causing `own_tree()` to walk down to PROV/KID and mark the fake orphan as `own-tree` (Carried #94, PR #849 flake).
+SUP, DAEMON = 9_039_999, 9_040_000   # the Paseo supervisor (named in paseo.pid) and its `Paseo Daemon` child
 
 
 def uid(n: int) -> str:
@@ -439,7 +442,7 @@ def test_exclude_added_between_plan_and_archive_is_honoured(env, mod, monkeypatc
 SESS = "0c7d97fa-06a1-4694-a660-eff3aa173b1f"
 FLAGS = "--output-format stream-json --verbose --input-format stream-json --thinking adaptive --model opus"
 T0 = "Fri Nov 13 05:39:40 2026"
-PROV, KID = 4000101, 4000102
+PROV, KID = 9_040_101, 9_040_102
 
 
 def psl(pid, ppid, cmd, lstart=T0, rss=129200):
@@ -489,22 +492,34 @@ def test_observe_reports_the_orphan_and_never_kills(env):
     aid = orphan_world(env)
     s = env.go()
     (o,) = s["orphans"]
-    assert (o["pid"], o["ppid"], o["agent"], o["session"], o["rss_kb"]) == (PROV, 40000, aid, SESS, 129200)
+    assert (o["pid"], o["ppid"], o["agent"], o["session"], o["rss_kb"]) == (PROV, DAEMON, aid, SESS, 129200)
     assert [c["pid"] for c in o["children"]] == [KID] and s["killed"] == [] and s["counts"]["orphans"] == 1
     assert not env.log.exists()   # observe writes no log line
 
 
+def test_synthetic_pids_cannot_collide_with_linux_or_macos_os_getpid(env, mod, monkeypatch):
+    """Regression for Carried #94 (PR #849 flake): fake PIDs stay above Linux PID_MAX_LIMIT (4,194,304)."""
+    linux_pid_max_limit = 4_194_304
+    assert all(p > linux_pid_max_limit for p in (SUP, DAEMON, PROV, KID))
+    # Prove the failure mechanism: if os.getpid() ever equals DAEMON, own_tree() absorbs PROV and skips it.
+    orphan_world(env)
+    env.data_path.write_text(json.dumps(env.data))
+    monkeypatch.setattr(mod.os, "getpid", lambda: DAEMON)
+    s = mod.prune(False, 300)
+    assert s["orphans"] == [] and [o["reason"] for o in s["orphan_skipped"]] == ["own-tree"]
+
+
 def test_apply_sigterms_child_then_provider_and_logs(env, mod, kills):
     aid = orphan_world(env)
-    env.data["ps"].append(psl(4000103, PROV, "sleep 1000"))                 # a direct child that is not graft mcp
-    env.data["ps"].append(psl(4000104, KID, "node /Users/x/.local/bin/graft mcp"))   # a grandchild: not direct
+    env.data["ps"].append(psl(9_040_103, PROV, "sleep 1000"))                 # a direct child that is not graft mcp
+    env.data["ps"].append(psl(9_040_104, KID, "node /Users/x/.local/bin/graft mcp"))   # a grandchild: not direct
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
     assert kills == [(KID, signal.SIGTERM), (PROV, signal.SIGTERM)]
     assert [k["pid"] for k in s["killed"]] == [KID, PROV] and s["errors"] == []
     lines = [x for x in env.log_lines() if x["kind"] == "process-kill"]
     assert [(x["pid"], x["ppid"], x["agent"], x["session"], x["rc"], x["role"]) for x in lines] == [
-        (KID, PROV, aid, SESS, 0, "graft-child"), (PROV, 40000, aid, SESS, 0, "provider")]
+        (KID, PROV, aid, SESS, 0, "graft-child"), (PROV, DAEMON, aid, SESS, 0, "provider")]
     assert lines[0]["rss_kb"] == 3904 and lines[0]["ts"].endswith("Z")
 
 
@@ -537,12 +552,12 @@ def test_inspect_must_agree_with_the_record(env, mod, kills):
 def test_unprovable_mappings_are_unmapped_and_untouched(env, mod, kills):
     orphan_world(env)
     other = "11111111-2222-3333-4444-555555555555"
-    env.data["ps"] += [psl(4000201, 40000, provider_cmd(other)),                                        # session with no record
-                       psl(4000202, 777, f"/Users/x/.local/bin/claude --resume={SESS}"),                 # a terminal session: not launched by Paseo
-                       psl(4000203, 40000, f"/Users/x/.local/bin/claude {FLAGS}")]                      # no session in argv: not listed at all
+    env.data["ps"] += [psl(9_040_201, DAEMON, provider_cmd(other)),                                        # session with no record
+                       psl(9_040_202, 777, f"/Users/x/.local/bin/claude --resume={SESS}"),                 # a terminal session: not launched by Paseo
+                       psl(9_040_203, DAEMON, f"/Users/x/.local/bin/claude {FLAGS}")]                      # no session in argv: not listed at all
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
-    assert {u["pid"]: u["reason"] for u in s["unmapped"]} == {4000201: "no-agent-record", 4000202: "not-paseo-launched"}
+    assert {u["pid"]: u["reason"] for u in s["unmapped"]} == {9_040_201: "no-agent-record", 9_040_202: "not-paseo-launched"}
     assert [k[0] for k in kills] == [KID, PROV]
 
 
@@ -557,7 +572,7 @@ def test_two_records_for_one_session_is_ambiguous(env, mod, kills):
 
 def test_reused_pid_is_not_killed(env, mod, kills):
     orphan_world(env)
-    env.data["ps_recheck"] = {str(PROV): psl(PROV, 40000, provider_cmd(), lstart="Sat Nov 14 09:00:00 2026"),   # another process, same pid
+    env.data["ps_recheck"] = {str(PROV): psl(PROV, DAEMON, provider_cmd(), lstart="Sat Nov 14 09:00:00 2026"),   # another process, same pid
                               str(KID): psl(KID, PROV, "node /Users/x/.local/bin/graft mcp", lstart=T0)}
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
@@ -569,7 +584,7 @@ def test_reused_pid_is_not_killed(env, mod, kills):
 
 def test_same_start_time_but_another_session_is_not_killed(env, mod, kills):
     orphan_world(env)
-    env.data["ps_recheck"] = {str(PROV): psl(PROV, 40000, provider_cmd("99999999-0000-0000-0000-000000000009"))}
+    env.data["ps_recheck"] = {str(PROV): psl(PROV, DAEMON, provider_cmd("99999999-0000-0000-0000-000000000009"))}
     env.data_path.write_text(json.dumps(env.data))
     mod.prune(True, 300)
     assert PROV not in [k[0] for k in kills] and [x["skipped"] for x in env.log_lines() if x.get("skipped")] == ["session-changed"]
@@ -593,18 +608,18 @@ def test_pid_one_and_gone_pids_are_never_signalled(env, mod, kills):
     env.data_path.write_text(json.dumps(env.data))
     e = mod.kill_guarded(1, 0, T0, None, uid(70), 100, "provider")           # the fake table's launchd row (pid 1, same start time) matches
     e2 = mod.kill_guarded(1, 0, T0, None, uid(70), 100, "graft-child")
-    e3 = mod.kill_guarded(999999, 1, T0, None, uid(70), 100, "provider")
+    e3 = mod.kill_guarded(9_999_999, 1, T0, None, uid(70), 100, "provider")
     assert kills == [] and e["skipped"] == "gone" and e2["skipped"] == "gone" and e3["skipped"] == "gone"
 
 
 def test_callers_own_process_tree_is_never_killed(env, mod, kills):
     orphan_world(env)
     mine = os.getpid()
-    env.data["ps"] += [psl(mine, 4000301, "python pytest"), psl(4000301, 40000, provider_cmd())]   # my parent IS the archived agent's process
+    env.data["ps"] += [psl(mine, 9_040_301, "python pytest"), psl(9_040_301, DAEMON, provider_cmd())]   # my parent IS the archived agent's process
     env.data_path.write_text(json.dumps(env.data))
     s = mod.prune(True, 300)
-    assert 4000301 not in [k[0] for k in kills] and {o["pid"] for o in s["orphan_skipped"]} >= {4000301}
-    assert {o["reason"] for o in s["orphan_skipped"] if o["pid"] == 4000301} == {"own-tree"}
+    assert 9_040_301 not in [k[0] for k in kills] and {o["pid"] for o in s["orphan_skipped"]} >= {9_040_301}
+    assert {o["reason"] for o in s["orphan_skipped"] if o["pid"] == 9_040_301} == {"own-tree"}
 
 
 def test_excluded_and_own_agent_orphans_are_skipped(env, mod, kills, monkeypatch):
@@ -868,16 +883,16 @@ def test_sdk_host_stream_json_resume_with_a_non_daemon_parent_is_unmapped(env, m
 
 def test_a_dev_daemon_under_another_home_is_not_the_daemon(env, mod, kills):
     orphan_world(env)
-    env.data["ps"] += [psl(50000, 1, "Paseo Supervisor   "), psl(50001, 50000, "Paseo Daemon   ")]   # not the supervisor in paseo.pid
-    set_provider(env, ppid=50001)
+    env.data["ps"] += [psl(9_050_000, 1, "Paseo Supervisor   "), psl(9_050_001, 9_050_000, "Paseo Daemon   ")]   # not the supervisor in paseo.pid
+    set_provider(env, ppid=9_050_001)
     s = mod.prune(True, 300)
     assert kills == [] and unmapped_reasons(s) == [(PROV, "not-paseo-parent")]
 
 
 def test_a_process_titled_like_the_daemon_with_another_parent_is_not_the_daemon(env, mod, kills):
     orphan_world(env)
-    env.data["ps"] += [psl(50001, 1, "Paseo Daemon   ")]    # right title, but neither the supervisor nor its child
-    set_provider(env, ppid=50001)
+    env.data["ps"] += [psl(9_050_001, 1, "Paseo Daemon   ")]    # right title, but neither the supervisor nor its child
+    set_provider(env, ppid=9_050_001)
     assert unmapped_reasons(mod.prune(True, 300)) == [(PROV, "not-paseo-parent")] and kills == []
 
 
@@ -1040,10 +1055,10 @@ def test_unreadable_record_is_an_error_in_observe_mode_too(env):
 
 def test_other_children_print_only_the_basename_of_argv0(env):
     aid = orphan_world(env)
-    env.data["ps"].append(psl(4000103, PROV, "/usr/bin/curl -H Authorization: Bearer s3cr3t https://x"))
+    env.data["ps"].append(psl(9_040_103, PROV, "/usr/bin/curl -H Authorization: Bearer s3cr3t https://x"))
     s = env.go()
     (o,) = s["orphans"]
-    assert o["other_children"] == [{"pid": 4000103, "command": "curl"}] and "s3cr3t" not in json.dumps(s)
+    assert o["other_children"] == [{"pid": 9_040_103, "command": "curl"}] and "s3cr3t" not in json.dumps(s)
 
 
 def test_provider_parented_by_the_supervisor_itself_is_not_the_daemons_child(env, mod, kills):
