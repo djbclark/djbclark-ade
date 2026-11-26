@@ -100,7 +100,7 @@ DENY_REASON = (
 REFUSED_NAME_REASON = (
     "This sub-agent prompt named report path `{report}`, whose basename starts with `{word}`: Claude Code "
     "refuses Write on basenames starting with report/summary/findings/analysis (acp-dispatch parity). "
-    "Rename the report path (or add a safe sibling line) and launch again, e.g.:\n"
+    "Replace the report path with a safe sibling and launch again, e.g.:\n"
     "Report path: {sibling}")
 
 DENY_REASON_RO = (

@@ -1436,6 +1436,7 @@ def test_deep_unclosed_and_nested_arithmetic_finishes_in_linear_time():
         ("echo " + "$((" * 2000 + ")" * 2000, False),
         ("echo " + "$((1 + " * 1000 + "0" + "))" * 1000, False),
         ("echo " + "$((" * 500 + "$(gh pr checks 1 --watch)", True),
+        ("echo " + "$((" * 500 + "$(gh pr checks 1 --watch)" + "))" * 500, True),
     ]:
         started = time.monotonic()
         out = run(command, env=_budget_env(5))
@@ -1446,6 +1447,17 @@ def test_deep_unclosed_and_nested_arithmetic_finishes_in_linear_time():
             assert "time budget" not in out["permissionDecisionReason"], out
         else:
             assert out is None, out
+
+
+def test_closing_paren_nested_arithmetic_does_not_peek_past_limit():
+    """Adversary LOW-1: with `limit < len(text)`, nested `$((` must not treat `text[limit] == ')'` as closing arithmetic."""
+    mod = _load_hook()
+    mod._closing_paren_table.cache_clear()
+    # Inside outer `$(`: nested `$((1)` ends at index 8; index 9 is `)` right at `limit=9`.
+    # Without peeking past `limit`, the inner `$((` is NOT arithmetic, so its `(` opens depth 2 and never closes before limit.
+    text = "$($((1)))"
+    assert mod._closing_paren(text, 2, False, limit=7) == 7
+    assert not mod._is_arithmetic_expansion(text, 2, limit=7)
 
 
 def _write_slow_hook_driver(tmp_path):

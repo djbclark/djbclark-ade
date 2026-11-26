@@ -630,15 +630,15 @@ def _closing_paren(text: str, i: int, arithmetic: bool = False, limit: int | Non
                 j += 2 if text[j] == "\\" else 1
             frame[2] = j + 1
             continue
-        if c == "$" and text[j + 1:j + 2] == "(":
+        if c == "$" and j + 1 < n and text[j + 1] == "(":
             nested_arithmetic = False
-            if text.startswith("$((", j):
+            if text.startswith("$((", j, n):
                 trial = (j + 3, True)
                 if trial not in results:
                     frames.append([trial[0], trial[1], trial[0], 1, []])
                     continue
                 inner = results[trial]
-                nested_arithmetic = inner < n and _arithmetic_close(text, inner)
+                nested_arithmetic = inner + 1 < n and _arithmetic_close(text, inner)
             nested = (j + 2, nested_arithmetic)
             if nested not in results:
                 frames.append([nested[0], nested[1], nested[0], 1, []])
