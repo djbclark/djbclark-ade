@@ -159,12 +159,16 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     tuis: list[str] | None = None
-    if (args.root / "bin" / "skill-everywhere").is_file():
+    skill_script = args.root / "bin" / "skill-everywhere"
+    if skill_script.is_file():
         try:
             tuis = cw.tui_roster(args.root)
         except (OSError, ValueError) as exc:
             print(f"mcp-registry: cannot read TUI roster: {exc}", file=sys.stderr)
             return 2
+    elif args.check:
+        print(f"mcp-registry: --check requires {skill_script} to validate TUI roster", file=sys.stderr)
+        return 2
 
     try:
         rows = cw.load_registry(args.registry, tuis=tuis)

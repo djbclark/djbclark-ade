@@ -475,7 +475,7 @@ section 9 and after the scratch test passed. Live backups are `<file>.bak-2026-M
    `CODEX_HOME` pointing at copies that have chrome-devtools removed: a run with `--mcp fixture` has the child, a run without
    it does not. Then run step 6's rollback on the copies and compare the server tables with the originals key for key. One attended check with the real chrome-devtools (Chrome's Allow dialog needs the operator present).
 4. **Live.** Back up. `claude mcp remove chrome-devtools -s user`; Codex `enabled = false`. Update
-   `config/mcp-clients.toml` (on-demand state, or the doctor warns `missing`) and mcp-servers.md "Setup" in the same PR.
+   `config/mcp-registry.toml` (formerly `config/mcp-clients.toml`; on-demand state, or the doctor warns `missing`) and mcp-servers.md "Setup" in the same PR.
 5. **Verify.** A fresh session has no `chrome-devtools-mcp` child; a `--mcp chrome-devtools` worker's `list_pages` answers.
 6. **Rollback.** The exact `claude mcp add --scope user chrome-devtools -- npx -y chrome-devtools-mcp@latest …` line in
    mcp-servers.md Setup; Codex `enabled = true`; or merge the server table back from the backup. Tested on the scratch copies in step 3.

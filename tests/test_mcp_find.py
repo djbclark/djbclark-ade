@@ -171,6 +171,8 @@ def test_no_match_exits_1():
     "args",
     [
         ("   ",),
+        ("browser", "--client", ""),
+        ("browser", "--client", "   "),
         ("browser", "--client", "bad client!"),
         ("browser", "--registry", "/nonexistent/path/mcp-registry.toml"),
     ],

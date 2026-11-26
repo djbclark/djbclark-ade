@@ -269,19 +269,20 @@ def test_on_demand_accepts_absent_or_disabled_and_warns_when_active(tmp_path, ro
     # Disabled in Codex is ok for on-demand
     write_codex(tmp_path, good_codex_text(tmp_path) + '[mcp_servers.rfab]\ncommand = "ade-mcp-rfab"\nenabled = false\n')
     assert mcp(tmp_path, roster)["codex/rfab"][0] == "ok"
-    # Active in Claude warns as drift
-    write_claude(
-        tmp_path,
-        {
-            "firecrawl": {"type": "http", "url": FC},
-            "basic-memory": {"type": "http", "url": BM},
-            "chrome-devtools": lazy_cdt(tmp_path),
-            "rfab": {"type": "stdio", "command": "ade-mcp-rfab", "args": []},
-        },
-        denied=["bezalel"],
-    )
-    st, detail = mcp(tmp_path, roster)["claude/rfab"]
-    assert st == "warn" and "drift" in detail and "on-demand" in detail
+    # Active in Claude warns as drift — even with enabled=False, since Claude ignores it
+    for extra in ({}, {"enabled": False}):
+        write_claude(
+            tmp_path,
+            {
+                "firecrawl": {"type": "http", "url": FC},
+                "basic-memory": {"type": "http", "url": BM},
+                "chrome-devtools": lazy_cdt(tmp_path),
+                "rfab": {"type": "stdio", "command": "ade-mcp-rfab", "args": [], **extra},
+            },
+            denied=["bezalel"],
+        )
+        st, detail = mcp(tmp_path, roster)["claude/rfab"]
+        assert st == "warn" and "drift" in detail and "on-demand" in detail
 
 
 def test_denied_checks_claude_settings_and_catches_drift(tmp_path, roster):
@@ -860,3 +861,148 @@ def test_stdio_roster_validation(tmp_path, body):
     )
     with pytest.raises(ValueError):
         cw.load_roster(p, TUIS)
+
+
+# ---- Round 2 adversary & Codex P2 regression tests -------------------------------
+
+@pytest.mark.parametrize("head_args,expect_ok,err_sub", [
+    # Valid forms (separated and =, with optional flags, and omitted --idle matching default 600)
+    (["--id", "chrome-devtools", "--idle", "600"], True, ""),
+    (["--id=chrome-devtools", "--idle=600"], True, ""),
+    (["--id", "chrome-devtools"], True, ""),  # omitted --idle defaults to 600
+    (["--id", "chrome-devtools", "--idle", "600", "--cache-dir", "/tmp/c", "--start-timeout", "30"], True, ""),
+    (["--id=chrome-devtools", "--cache-dir=/tmp/c", "--start-timeout=30.5"], True, ""),
+    # Rejected idle mismatches (including --idle 0 which disables reaping!)
+    (["--id", "chrome-devtools", "--idle", "0"], False, "effective --idle"),
+    (["--id", "chrome-devtools", "--idle=0"], False, "effective --idle"),
+    (["--id", "chrome-devtools", "--idle", "30"], False, "effective --idle"),
+    # Non-numeric / non-finite / negative idle & start-timeout
+    (["--id", "chrome-devtools", "--idle", "abc"], False, "--idle must be"),
+    (["--id", "chrome-devtools", "--idle", "nan"], False, "--idle must be"),
+    (["--id", "chrome-devtools", "--idle", "inf"], False, "--idle must be"),
+    (["--id", "chrome-devtools", "--idle", "-5"], False, "--idle must be"),
+    (["--id", "chrome-devtools", "--start-timeout", "0"], False, "--start-timeout must be"),
+    (["--id", "chrome-devtools", "--start-timeout", "-1"], False, "--start-timeout must be"),
+    (["--id", "chrome-devtools", "--start-timeout", "nan"], False, "--start-timeout must be"),
+    # Unknown options, help flag, stray positional, incomplete flag, --cache-dir --id trick, duplicate --id
+    (["--id", "chrome-devtools", "--bogus=SECRET_VAL"], False, "unknown option"),
+    (["--id", "chrome-devtools", "--help"], False, "unknown option"),
+    (["--id", "chrome-devtools", "-h"], False, "unknown option"),
+    (["--id", "chrome-devtools", "stray"], False, "unknown option"),
+    (["--cache-dir", "--id", "chrome-devtools"], False, "missing its value"),
+    (["--id", "chrome-devtools", "--cache-dir"], False, "missing its value"),
+    (["--id", "chrome-devtools", "--cache-dir="], False, "--cache-dir must be non-empty"),
+    (["--id", "chrome-devtools", "--id", "chrome-devtools"], False, "repeat --id"),
+    (["--id", "chrome-devtools", "--id=other"], False, "repeat --id"),
+])
+def test_user_lazy_strict_option_grammar_and_idle_enforcement(tmp_path, roster, head_args, expect_ok, err_sub):
+    good_home(tmp_path)
+    wrapper = str(tmp_path / ".local" / "libexec" / "ade" / "mcp-lazy")
+    write_claude(
+        tmp_path,
+        {"chrome-devtools": {
+            "type": "stdio",
+            "command": wrapper,
+            "args": [*head_args, "--", "/opt/homebrew/bin/npx", *CDT_ARGS],
+        }},
+        denied=["bezalel"],
+    )
+    st, detail = mcp(tmp_path, roster)["claude/chrome-devtools"]
+    assert "SECRET_VAL" not in detail
+    if expect_ok:
+        assert st == "ok", detail
+    else:
+        assert st == "warn" and "wrong-command" in detail and err_sub in detail
+
+
+def test_user_lazy_omitted_idle_fails_when_registry_expects_non_default(tmp_path):
+    p = tmp_path / "r.toml"
+    p.write_text(
+        'schema_version = 1\n[[server]]\nid="chrome-devtools"\ntransport="stdio"\n'
+        'command="npx"\nargs=[]\nlazy_idle_seconds = 300\n'
+        'owner="per-session"\nstate="per-session"\nauth={kind="dialog",keys=[],store="none"}\n'
+        'capabilities=["browser"]\nexpected={ claude = "user-lazy" }\n',
+        encoding="utf-8",
+    )
+    reg = cw.load_registry(p, TUIS)
+    wrapper = str(tmp_path / ".local" / "libexec" / "ade" / "mcp-lazy")
+    # Omitted --idle defaults to 600, which differs from registry 300
+    write_claude(
+        tmp_path,
+        {"chrome-devtools": {"type": "stdio", "command": wrapper, "args": ["--id", "chrome-devtools", "--", "/opt/homebrew/bin/npx"]}},
+    )
+    st, detail = mcp(tmp_path, reg)["claude/chrome-devtools"]
+    assert st == "warn" and "300" in detail
+    # Matching --idle 300 passes
+    write_claude(
+        tmp_path,
+        {"chrome-devtools": {"type": "stdio", "command": wrapper, "args": ["--id", "chrome-devtools", "--idle", "300", "--", "/opt/homebrew/bin/npx"]}},
+    )
+    assert mcp(tmp_path, reg)["claude/chrome-devtools"][0] == "ok"
+
+
+@pytest.mark.parametrize("bad_expected", ["user", "user-lazy", "project:~"])
+def test_injected_transport_rejects_states_requiring_url_or_command(tmp_path, bad_expected):
+    p = tmp_path / "r.toml"
+    p.write_text(
+        'schema_version = 1\n[[server]]\nid="paseo"\ntransport="injected"\n'
+        'owner="daemon:paseo"\nstate="external-app"\nauth={kind="none",keys=[],store="paseo"}\n'
+        f'capabilities=["agents"]\nexpected={{ claude = "{bad_expected}" }}\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="injected|user-lazy"):
+        cw.load_registry(p, TUIS)
+
+
+def test_claude_json_parsed_once_and_concurrent_corruption_fails_closed(tmp_path, roster, monkeypatch):
+    good_home(tmp_path)
+    claude_json = tmp_path / ".claude.json"
+    reads = 0
+    real_read_text = Path.read_text
+
+    def counting_read_text(self, *a, **kw):
+        nonlocal reads
+        if self == claude_json:
+            reads += 1
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    got = mcp(tmp_path, roster)
+    assert reads == 1
+    assert got["claude/firecrawl"][0] == "ok"
+
+
+@pytest.mark.parametrize("extra_toml,err_sub", [
+    ('secret = "raw-val"\n', "unknown field"),
+    ('password = "raw-val"\n', "unknown field"),
+    ('authorization = "Bearer x"\n', "unknown field"),
+    ('auth = { kind = "bearer", keys = ["Authorization"], store = "none", token = "raw" }\n', "unknown auth field"),
+    ('[server.measured]\nsecret = "raw"\n', "unknown measured field"),
+])
+def test_registry_allowlist_rejects_unknown_server_auth_and_measured_keys(tmp_path, extra_toml, err_sub):
+    p = tmp_path / "r.toml"
+    base_auth = '' if extra_toml.startswith("auth =") else 'auth = { kind = "none", keys = [], store = "none" }\n'
+    p.write_text(
+        'schema_version = 1\n[[server]]\nid="a"\ntransport="local-http"\nurl="http://127.0.0.1:1/mcp"\n'
+        f'owner="local"\nstate="shared-safe"\n{base_auth}capabilities=["cap"]\nexpected={{ claude = "user" }}\n'
+        + extra_toml,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=err_sub):
+        cw.load_registry(p, TUIS)
+
+
+def test_cli_main_exits_1_on_error_row(tmp_path):
+    (tmp_path / ".claude.json").write_text("{corrupt SECRET_CLI", encoding="utf-8")
+    env = {**os.environ, "HOME": str(tmp_path)}
+    cp = subprocess.run(
+        [sys.executable, str(REPO / "bin" / "ade_client_wiring.py")],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=60,
+    )
+    assert cp.returncode == 1
+    assert "claude/*" in cp.stdout and "error" in cp.stdout
+    assert "SECRET_CLI" not in cp.stdout and "SECRET_CLI" not in cp.stderr

@@ -205,10 +205,16 @@ def main(argv: list[str] | None = None) -> int:
         print("mcp-find: query must not be empty", file=sys.stderr)
         return 2
 
-    client = normalize_client(args.client) if args.client is not None else detect_client()
-    if client is not None and not cw.SAFE_ID.match(client):
-        print(f"mcp-find: invalid --client id {args.client!r}", file=sys.stderr)
-        return 2
+    if args.client is not None:
+        client = normalize_client(args.client)
+        if client is None or not cw.SAFE_ID.match(client):
+            print(f"mcp-find: invalid --client id {args.client!r}", file=sys.stderr)
+            return 2
+    else:
+        client = detect_client()
+        if client is not None and not cw.SAFE_ID.match(client):
+            print(f"mcp-find: invalid detected client id {client!r}", file=sys.stderr)
+            return 2
 
     try:
         rows = cw.load_registry(args.registry)

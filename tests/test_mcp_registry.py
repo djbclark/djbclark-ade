@@ -94,6 +94,12 @@ def test_mcp_registry_check_missing_markers_exits_2(tmp_path):
     assert "markers" in cp.stderr
 
 
+def test_mcp_registry_check_fails_closed_when_skill_everywhere_missing(tmp_path):
+    cp = _run("--check", "--root", str(tmp_path))
+    assert cp.returncode == 2
+    assert "skill-everywhere" in cp.stderr
+
+
 def test_mcp_registry_json_outputs_validated_servers():
     cp = _run("--json")
     assert cp.returncode == 0, cp.stderr
