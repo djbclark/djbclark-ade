@@ -1,4 +1,5 @@
-# .worktreeinclude: ignored files copied into a new Paseo worktree of this repo.
+# .worktreeinclude: ignored files copied into a new worktree by Claude Code / bin/ade_fork_controller.py
+# (Paseo itself copies paseo.json only via seedPaseoConfigFile; see docs/paseo-workspace-setup.md).
 # Deliberately empty (2026-11-06): the only ignored paths are regenerable caches
 # (/graft/, __pycache__/, .ruff_cache/, .zcode/) or local
 # state that must not follow a worktree; secrets come from sudo-secretspec.
