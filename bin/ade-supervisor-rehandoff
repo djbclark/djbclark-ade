@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Drive cross-agent re-handoffs for planned stuck Pi agents from a supervisor scan plan.
 
-Reads the JSON plan written by ``bin/ade-supervisor-scan`` (``ADE_SUPERVISOR_REHANDOFF=live``),
-writes a bounded nonsecret per-agent checkpoint (mode 0600, cleaned up after launch), and calls
-``bin/ade-self-session handoff --checkpoint FILE --predecessor ID --route-kind code --quiesced``
-for each Pi entry marked ``action == "would-rehandoff"``. Entries with no healthy alternative
-or non-Pi families are left untouched. No agent is archived directly here: retirement waits
-for successor acknowledgement, first-real-turn verification, and ``finish``.
+Reads a JSON plan written by ``bin/ade-supervisor-scan``, verifies a Paseo agent caller
+identity is present (``PASEO_AGENT_ID`` must be set; launchd scans run without one and
+fail closed here), validates each target id as a strict UUID, writes a bounded nonsecret
+per-agent checkpoint (mode 0600, cleaned up in ``finally``), and invokes:
+
+    bin/ade-self-session handoff --checkpoint FILE --predecessor=UUID --route-kind code --quiesced
+
+Only entries with ``family == "pi"`` and ``action == "would-rehandoff"`` are acted on;
+missing/non-Pi families and entries with no healthy alternative are skipped. No agent is
+archived directly here: retirement waits for successor acknowledgement, first-real-turn
+verification, and ``finish``.
 
     ade-supervisor-rehandoff PLAN.json
 """
@@ -14,13 +19,34 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
+CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
 
-def rehandoff(plan_path: Path, runner=None) -> int:
+
+def _scrub(text: str, limit: int = 160) -> str:
+    return CTRL_RE.sub(" ", text).strip()[:limit]
+
+
+def _valid_uuid(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw or raw != value or raw.startswith("-"):
+        return None
+    try:
+        parsed = uuid.UUID(raw)
+    except ValueError:
+        return None
+    return str(parsed) if str(parsed) == raw.lower() else None
+
+
+def rehandoff(plan_path: Path, runner=None, env: dict[str, str] | None = None) -> int:
     try:
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -30,6 +56,17 @@ def rehandoff(plan_path: Path, runner=None) -> int:
     if not isinstance(entries, list):
         print("ade-supervisor-rehandoff: plan has no entry list; nothing moved")
         return 0
+
+    proc_env = os.environ if env is None else env
+    caller_id = (proc_env.get("PASEO_AGENT_ID") or "").strip()
+    if not caller_id:
+        print(
+            "ade-supervisor-rehandoff: PASEO_AGENT_ID is unset; cross-agent re-handoff requires "
+            "a live Paseo agent/lead caller (launchd scans stay notify-only)",
+            file=sys.stderr,
+        )
+        return 1
+
     run = runner or subprocess.run
     session = str(Path(__file__).with_name("ade-self-session"))
     moved = 0
@@ -37,32 +74,36 @@ def rehandoff(plan_path: Path, runner=None) -> int:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        agent = entry.get("id")
+        raw_agent = entry.get("id")
         family = entry.get("family")
-        if family is not None and family != "pi":
-            print(f"ade-supervisor-rehandoff: skipping non-pi {agent} ({family})")
+        if family != "pi":
+            print(f"ade-supervisor-rehandoff: skipping non-pi {raw_agent!r} (family={family!r})")
             continue
-        if entry.get("action") != "would-rehandoff" or not isinstance(agent, str) or not agent:
-            print(f"ade-supervisor-rehandoff: leaving {agent} (no healthy alternative)")
+        if entry.get("action") != "would-rehandoff":
+            print(f"ade-supervisor-rehandoff: leaving {raw_agent!r} (no healthy alternative)")
+            continue
+        agent = _valid_uuid(raw_agent)
+        if agent is None:
+            failed += 1
+            print(f"ade-supervisor-rehandoff: refusing invalid target agent id {raw_agent!r}", file=sys.stderr)
             continue
         note = (
             f"Re-handoff {agent} off exhausted account {entry.get('account')} "
             f"toward {entry.get('alternative')}.\n"
         )
-        checkpoint = None
+        checkpoint: str | None = None
         try:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as fh:
-                os.chmod(fh.name, 0o600)
-                fh.write(note)
                 checkpoint = fh.name
+                os.chmod(checkpoint, 0o600)
+                fh.write(note)
             result = run(
                 [
                     session,
                     "handoff",
                     "--checkpoint",
                     checkpoint,
-                    "--predecessor",
-                    agent,
+                    f"--predecessor={agent}",
                     "--route-kind",
                     "code",
                     "--quiesced",
@@ -81,7 +122,9 @@ def rehandoff(plan_path: Path, runner=None) -> int:
             print(f"ade-supervisor-rehandoff: re-handed {agent} ({entry.get('account')})")
         else:
             failed += 1
-            print(f"ade-supervisor-rehandoff: {agent} not moved ({result.returncode})")
+            detail = _scrub(result.stderr or result.stdout or "")
+            suffix = f": {detail}" if detail else ""
+            print(f"ade-supervisor-rehandoff: {agent} not moved (rc={result.returncode}){suffix}")
     print(f"ade-supervisor-rehandoff: {moved} re-handed, {failed} failed, {len(entries) - moved - failed} left")
     return 1 if failed else 0
 

@@ -4295,6 +4295,33 @@ def test_cross_agent_handoff_falls_back_to_new_local_without_inheriting_caller_w
     assert '--new-workspace' in run_call and supervisor_ws not in run_call
 
 
+def test_cross_agent_workspace_skips_placeholder_and_corrupt_file_and_fails_closed_on_daemon_error(setup):
+    """Placeholder WorkspaceId '-' and corrupt agent state files fall through, while daemon workspace_ls errors fail closed."""
+    service, native, checkpoint = setup
+    service.env['PASEO_AGENT_ID'] = OTHER
+    service.env.pop('PASEO_WORKSPACE_ID', None)
+    native.rows[PRED]['WorkspaceId'] = '-'
+    corrupt = service.home / 'agents' / 'a' / f'{PRED}.json'
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text('{not json', encoding='utf-8')
+    valid = service.home / 'agents' / 'b' / f'{PRED}.json'
+    valid.parent.mkdir(parents=True, exist_ok=True)
+    valid.write_text(json.dumps({'id': PRED, 'workspaceId': WS}), encoding='utf-8')
+
+    record = service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+    assert record['workspace'] == WS and record['workspace_placement'] == 'existing'
+
+    # Daemon workspace_exists failure must propagate fail-closed (never silently mint a new-local workspace)
+    Path(record['record']).unlink()
+
+    def boom(_ws):
+        raise ss.SessionError('workspace listing failed')
+
+    service.workspace_exists = boom
+    with pytest.raises(ss.SessionError, match='workspace listing failed'):
+        service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+
+
 def test_cross_agent_requester_can_verify_turn_retry_and_reconcile_but_successor_cannot(setup, tmp_path):
     """Recorded cross-agent requester may verify-turn, retry, and reconcile; successor and third parties stay refused."""
     service, native, checkpoint = setup

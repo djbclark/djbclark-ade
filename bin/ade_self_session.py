@@ -900,21 +900,34 @@ class Service:
 
     def _predecessor_workspace(self, predecessor: str, source: dict) -> tuple[str | None, str]:
         """Resolve a cross-agent target predecessor's workspace without reading the caller's PASEO_WORKSPACE_ID."""
+        ws = None
         for key in ('WorkspaceId', 'workspaceId'):
             raw = source.get(key)
             if isinstance(raw, str) and raw:
-                ws = workspace_ident(raw)
-                return (ws, 'existing') if self.workspace_exists(ws) else (ws, 'new-local')
-        try:
-            for path in sorted((self.home / 'agents').glob(f'*/{ident(predecessor)}.json')):
-                data = json.loads(read_regular(path, 262144))
-                raw = data.get('workspaceId') if isinstance(data, dict) else None
-                if isinstance(raw, str) and raw:
+                try:
                     ws = workspace_ident(raw)
-                    return (ws, 'existing') if self.workspace_exists(ws) else (ws, 'new-local')
-        except (OSError, ValueError, SessionError, AttributeError, RecursionError):
-            pass
-        return None, 'new-local'
+                    break
+                except SessionError:
+                    continue
+        if ws is None:
+            agents_dir = self.home / 'agents'
+            try:
+                candidates = sorted(agents_dir.glob(f'*/{ident(predecessor)}.json'))
+            except OSError:
+                candidates = []
+            for path in candidates:
+                try:
+                    data = json.loads(read_regular(path, 262144))
+                    raw = data.get('workspaceId') if isinstance(data, dict) else None
+                    if isinstance(raw, str) and raw:
+                        ws = workspace_ident(raw)
+                        break
+                except (OSError, ValueError, SessionError, AttributeError, RecursionError):
+                    continue
+        if ws is None:
+            return None, 'new-local'
+        # Let daemon workspace_ls failures propagate fail-closed rather than minting a stray workspace.
+        return (ws, 'existing') if self.workspace_exists(ws) else (ws, 'new-local')
 
     def handoff(self, checkpoint: Path, *, quiesced: bool, requested_mode=None, requested_thinking=None,
                 requested_title=None, requested_role=None, route_kind=None, requested_provider=None,

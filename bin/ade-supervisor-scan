@@ -192,11 +192,11 @@ if new:
     print("supervisor scan: %d new finding(s) - %s" % (len(new), "; ".join(new)))
 ' "$NOTIFIED" "$pending" "$scan_rc" "${send_to:--}" 2>>"$LOG")"
 
-# Re-handoff stays a dry run (operator, 2026-11-19, Carried 70): log what this scan would move and where, and do
-# not archive or relaunch anything. ADE_SUPERVISOR_REHANDOFF=live is recognized but refused: today
-# ade-supervisor-rehandoff is a stub that moves nothing and exits 1, so a scan can never act on its own. The contract
-# for a future reviewed executor: it is handed the plan file, may act only on an agent the plan names, and owns every
-# archive and relaunch; the scan itself never archives anything. Documented in docs/scheduling.md and skills/watch.
+# Re-handoff stays a dry run by default (operator, 2026-11-19; live executor updated 2026-11-26, Carried 70): log what
+# this scan would move and where, and do not archive or relaunch anything. ADE_SUPERVISOR_REHANDOFF=live invokes
+# ade-supervisor-rehandoff, which drives ade-self-session handoff --predecessor=UUID for planned family=='pi' entries
+# only (never archiving directly) and fails closed (exit 1) when PASEO_AGENT_ID is unset (so launchd runs stay
+# notify-only and log 're-handoff executor failed'). Documented in docs/scheduling.md and skills/watch.
 # The plan is logged only when it differs from the last one logged, so a quiet fleet adds no line per run.
 if [ -f "$pending.plan" ]; then
     plan_json="$(cat "$pending.plan")"

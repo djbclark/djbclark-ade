@@ -85,7 +85,7 @@ providers are blocked rather than assigned an invented mode. An explicit
 `--mode plan|read-only|dontAsk` is retained only when the actual catalog supports
 it; this is for operator-requested restrictive work, not the ordinary default.
 
-**Cross-agent / supervisor re-handoff (`--predecessor AGENT_ID`, Carried 70/103).**
+**Cross-agent / supervisor re-handoff (`--predecessor AGENT_ID`, 2026-11-26, Carried 70/103).**
 When a stuck agent (for example a Pi agent in `Status: error` on an exhausted pool)
 cannot run `handoff` itself, a supervisor or lead may pass `--predecessor AGENT_ID`
 to re-hand that target agent instead of the caller. The transaction record stores

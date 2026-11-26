@@ -184,9 +184,10 @@ action — the supervisor agent owns it, not `ade-pi-stuck` (read-only), and onl
 
 The periodic `bin/ade-supervisor-scan` (every 300 s) also logs a dry-run re-handoff plan to
 `~/.local/state/djbclark-ade/supervisor/supervisor.log`: one `re-handoff plan (dry-run) {...}` line, only when the plan
-changes. `ADE_SUPERVISOR_REHANDOFF` picks the mode: unset or `dry-run` (default) moves nothing; `live` is recognized but
-refused today (`bin/ade-supervisor-rehandoff` is a stub: it moves nothing and exits 1, and the log says
-`re-handoff executor failed`), so a scan never relaunches an agent on its own. See docs/scheduling.md.
+changes. `ADE_SUPERVISOR_REHANDOFF` picks the mode: unset or `dry-run` (default) moves nothing; `live` invokes
+`bin/ade-supervisor-rehandoff`, which drives `ade-self-session handoff --predecessor=UUID --route-kind code --quiesced`
+for planned `family == "pi"` entries only and fails closed (exit 1) when `PASEO_AGENT_ID` is unset (so unattended
+launchd scans log `re-handoff executor failed` and never relaunch or archive on their own). See docs/scheduling.md.
 
 ## 6. Paseo fork releases (`/watch paseo`)
 

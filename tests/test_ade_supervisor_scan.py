@@ -497,8 +497,8 @@ def test_the_plan_names_only_pi_agents_and_carries_their_family(tmp_path: Path) 
 
 
 def test_live_rehandoff_executor_drives_cross_agent_handoff_and_skips_non_pi(tmp_path: Path) -> None:
-    """bin/ade-supervisor-rehandoff invokes ade-self-session --predecessor only for planned Pi agents,
-    cleans up temp checkpoints, and returns non-zero if a planned re-handoff fails."""
+    """bin/ade-supervisor-rehandoff requires PASEO_AGENT_ID, validates strict UUIDs (blocking option injection),
+    acts only on family=='pi' would-rehandoff entries, cleans up temp checkpoints, and returns non-zero on failure."""
     import importlib.machinery
     import importlib.util
     import subprocess
@@ -511,6 +511,8 @@ def test_live_rehandoff_executor_drives_cross_agent_handoff_and_skips_non_pi(tmp
     assert spec.loader is not None
     spec.loader.exec_module(mod)
 
+    pi_uuid = "11111111-1111-4111-8111-111111111111"
+    caller_env = {"PASEO_AGENT_ID": "99999999-9999-4999-8999-999999999999"}
     calls: list[list[str]] = []
     seen_checkpoints: list[Path] = []
 
@@ -525,21 +527,37 @@ def test_live_rehandoff_executor_drives_cross_agent_handoff_and_skips_non_pi(tmp
     plan.write_text(json.dumps({
         "mode": "live",
         "plan": [
-            {"id": "agent-pi", "family": "pi", "account": "openai", "alternative": "pi/opencode-go/x", "action": "would-rehandoff"},
-            {"id": "agent-codex", "family": "codex", "account": "codex", "alternative": "x", "action": "would-rehandoff"},
-            {"id": "agent-no-alt", "family": "pi", "account": "anthropic", "action": "no-healthy-alternative"},
+            {"id": pi_uuid, "family": "pi", "account": "openai", "alternative": "pi/opencode-go/x", "action": "would-rehandoff"},
+            {"id": "22222222-2222-4222-8222-222222222222", "family": "codex", "account": "codex", "alternative": "x", "action": "would-rehandoff"},
+            {"id": "33333333-3333-4333-8333-333333333333", "account": "openai", "alternative": "x", "action": "would-rehandoff"},
+            {"id": "44444444-4444-4444-8444-444444444444", "family": "pi", "account": "anthropic", "action": "no-healthy-alternative"},
         ],
     }), encoding="utf-8")
 
-    assert mod.rehandoff(plan, runner=fake_run) == 0
+    # Unset PASEO_AGENT_ID fails closed before invoking runner
+    assert mod.rehandoff(plan, runner=fake_run, env={}) == 1
+    assert calls == []
+
+    # With caller identity, only strict-UUID family=='pi' would-rehandoff entry runs
+    assert mod.rehandoff(plan, runner=fake_run, env=caller_env) == 0
     assert len(calls) == 1
     argv = calls[0]
     assert argv[1:3] == ["handoff", "--checkpoint"]
-    assert argv[argv.index("--predecessor") + 1] == "agent-pi"
+    assert f"--predecessor={pi_uuid}" in argv
     assert not seen_checkpoints[0].exists()
+
+    # Option-injection id ('--help') is refused without invoking runner
+    bad_plan = tmp_path / "bad-plan.json"
+    bad_plan.write_text(json.dumps({
+        "mode": "live",
+        "plan": [{"id": "--help", "family": "pi", "account": "openai", "alternative": "x", "action": "would-rehandoff"}],
+    }), encoding="utf-8")
+    calls.clear()
+    assert mod.rehandoff(bad_plan, runner=fake_run, env=caller_env) == 1
+    assert calls == []
 
     def failing_run(argv, capture_output, text):
         return subprocess.CompletedProcess(argv, 1, "", "blocked")
 
-    assert mod.rehandoff(plan, runner=failing_run) == 1
+    assert mod.rehandoff(plan, runner=failing_run, env=caller_env) == 1
 
