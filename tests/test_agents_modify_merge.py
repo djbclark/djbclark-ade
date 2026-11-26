@@ -257,6 +257,17 @@ class WrapperCollectionsTest(unittest.TestCase):
                                 self.assertEqual(first["hooks"]["PreToolUse"],
                                                  [desired["hooks"]["PreToolUse"][0], live["hooks"]["PreToolUse"][0]])
 
+    def test_mcp_args_are_replaced_whole_not_merged(self):
+        """args is a positional argv, like notify: repeated flags survive and the live vector is replaced,
+        not unioned (Codex review on #771)."""
+        live = {"mcp_servers": {"node_repl": {"command": "node", "args": ["--include", "old", "--weird"]}}}
+        desired = {"mcp_servers": {"node_repl": {"command": "node", "args": ["--include", "a", "--include", "b"]}}}
+        got = lib.merge_owned(live, desired)
+        self.assertEqual(got["mcp_servers"]["node_repl"]["args"], ["--include", "a", "--include", "b"])
+        cleared = lib.merge_owned(live, {"mcp_servers": {"node_repl": {"args": []}}})
+        self.assertEqual(cleared["mcp_servers"]["node_repl"]["args"], [])
+
+
 
 class RefuseLiveHomeTest(unittest.TestCase):
     def test_refuses_claude_and_codex_under_home(self):
