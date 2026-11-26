@@ -39,7 +39,41 @@ import sys
 from pathlib import Path
 
 LABEL = "ade.interactive=1"
-RETIRED_PREFIX = "RETIRED "
+RETIRED_PREFIX = "RETIRED "  # legacy display fallback only (2026-11-25 ruling)
+RETIRED_LABEL = "ade.retired"
+RETIRED_TO_LABEL = "ade.retired_to"
+
+
+def _paseo_home() -> Path:
+    return Path(os.environ.get("PASEO_HOME") or Path.home() / ".paseo")
+
+
+def _state_record(aid: str) -> dict:
+    if not isinstance(aid, str) or not aid or "/" in aid or "\\" in aid or ".." in aid:
+        return {}
+    try:
+        for path in sorted((_paseo_home() / "agents").glob(f"*/{aid}.json")):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def _labels_of(row: dict) -> dict:
+    merged: dict = {}
+    aid = row.get("id")
+    st = _state_record(aid) if isinstance(aid, str) else {}
+    if isinstance(st.get("labels"), dict):
+        merged.update(st["labels"])
+    if isinstance(row.get("labels"), dict):
+        merged.update(row["labels"])
+    return merged
+
+
+def _is_truthy(val) -> bool:
+    return str(val or "").strip().lower() in ("1", "true", "yes")
 
 
 def _load_succession():
@@ -97,9 +131,33 @@ def paseo_json(*argv: str, paseo_bin: str = "paseo"):
 
 
 def is_worker(row: dict) -> bool:
-    name = row.get("name") or ""
+    """Classify worker/internal tabs from structured metadata first (2026-11-25 ruling),
+    falling back to legacy display prefixes only when no structured metadata classifies the tab."""
     if row.get("background") is True:
         return True
+    aid = row.get("id")
+    st = _state_record(aid) if isinstance(aid, str) else {}
+    if st.get("internal") is True:
+        return True
+    labels = _labels_of(row)
+    if _is_truthy(labels.get("ade.internal")) or str(labels.get("baton-writer") or "") == "1":
+        return True
+    # Check worker ownership markers BEFORE placement/box hints: an interactive worker launched via
+    # `ade-worker-run --placement lead` carries `ade.box=LEAD` / `ade.placement=main` alongside `ade.lead` and `slice`.
+    if str(labels.get("ade.lead") or "").strip() or str(labels.get("slice") or "").strip():
+        return True
+    if row.get("parentAgentId") or st.get("parentAgentId") or str(labels.get("paseo.parent-agent-id") or "").strip():
+        return True
+    raw_box = str(labels.get("ade.box") or "").strip().upper()
+    raw_place = str(labels.get("ade.placement") or "").strip().lower()
+    if raw_box in ("WORKER", "WORKERS") or raw_place in ("worker", "workers"):
+        return True
+    if raw_box in ("LEAD", "MAIN") or raw_place in ("lead", "main"):
+        return False
+    if str(labels.get("ade.role") or "").strip() or str(labels.get("ade.chain") or "").strip():
+        return False
+    # Legacy display-name fallback for pre-2026-11-25 unlabelled tabs.
+    name = row.get("name") or ""
     if name == "Herald summary":
         return True
     return isinstance(name, str) and name.startswith("worker ")
@@ -110,11 +168,15 @@ def is_archived(row: dict) -> bool:
 
 
 def is_retired(row: dict) -> bool:
-    name = row.get("name") or ""
-    if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
+    labels = _labels_of(row)
+    if _is_truthy(labels.get(RETIRED_LABEL)):
         return True
     aid = row.get("id")
     if isinstance(aid, str) and aid and has_completed_handoff(aid):
+        return True
+    # Legacy display-name fallback for pre-2026-11-25 tabs.
+    name = row.get("name") or ""
+    if isinstance(name, str) and name.startswith(RETIRED_PREFIX):
         return True
     return False
 

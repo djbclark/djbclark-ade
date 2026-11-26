@@ -120,6 +120,7 @@ export function isDefaultTitle(windowTitle, agentTitle, young = true) {
   if (SCHEME_NAME.test(windowTitle.trim())) return false; // already `<KIND> <repo> (<work>)`: never re-wrapped, whatever the tab is called
   return young && !blank(agentTitle) && windowTitle.trim() === agentTitle.trim();
 }
+// Display-formatting idempotency check ONLY (2026-11-25 ruling: window names are human UI labels, never metadata).
 const SCHEME_NAME = /^(?:LEAD|WORKER|OTHER|MAIN|WORKERS|USER) \S+ \(.+\)$/;
 
 /**
@@ -173,12 +174,16 @@ export async function handleAgentEvent(agent, context, deps = {}) {
       remember(settled, wid);
       return out("skip", { reason: "window already has a title" });
     }
+    const mergedLabels = {
+      ...(agent.labels && typeof agent.labels === "object" ? agent.labels : {}),
+      ...(self.labels && typeof self.labels === "object" ? self.labels : {}),
+    };
     const info = {
       cwd: agent.cwd,
       windowTitle: null, // default by the check above; the script's own title rule stays for a direct call
       firstAgent: true,
       background: false,
-      agent: { title, parentAgentId: agent.parentAgentId ?? null, labels: self.labels ?? {} },
+      agent: { title, parentAgentId: self.parentAgentId ?? agent.parentAgentId ?? null, labels: mergedLabels },
     };
     const script = resolveDecisionScript({ env, pluginRoot: deps.pluginRoot });
     const run = deps.run ?? runDecision;

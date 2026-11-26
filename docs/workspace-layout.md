@@ -24,6 +24,18 @@ carry it as a hint (`[wt: …]`, below), not by its window.
 
 The name shortener (`bin/seat-name`) was deleted 2026-11-06 (slim-down E2); keep names readable without an automatic cap.
 
+## Display names are UI labels only, never metadata (operator ruling, 2026-11-25)
+
+Operator, 2026-11-25 (verbatim): "In general, we need to do a better job keeping workspace, window and tab names up to date with beginnings ("LEAD djbclark-ade") that are understandable by humans. We should never use the names as a resource for metadata exchange between agents as a human may rename them."
+
+1. **Human-facing UI labels only:** Workspace, window, and tab titles exist so a human scanning the Paseo sidebar can immediately tell what each item is (`LEAD <repo> (<work>)`, `WORKER <repo> (<work>)`, `OTHER <repo> (<work>)`, concise worker tabs `worker <slice> [wt: <worktree>]`, and `RETIRED <old> (-> <successor>)` as a visual cue). Keep their beginnings clear, accurate, and up to date.
+2. **Never authoritative machine metadata:** Agents and ADE tools MUST NEVER parse a workspace, window, or tab display name as authoritative metadata or as an inter-agent exchange channel, because a human may rename any workspace, window, or tab at any time (e.g. `"Daniel debugging Venice"`, `"My custom tab"`). Structured metadata (`ade.*` labels, `<lead>.windows.json` `entries`, `handoff-*.json`) governs ownership, box classification, and retirement; renaming a LEAD, WORKER, or OTHER window or tab does not break tools operating on structurally recorded windows/tabs (`ade-worker-run`, `ade-tidy`, `ade_self_session.py`, `ade_ws_autoname.py`, `ade-archive-retired`, `ade-pin-interactive`, `ade-pin-workspaces`). Destructive actions (`ade-archive-retired`, `ade-worker-run archive-window`) fail closed when structured proof is absent or ambiguous (for example, an ordinary idle tab titled `RETIRED …` without positive `ade.retired=1` or a completed handoff record is never archived, and an unproven legacy window without structured box evidence returns `unknown`).
+3. **Sole authoritative metadata sources:**
+   - **Structured Paseo agent labels & fields:** `ade.lead`, `ade.role`, `ade.chain`, `ade.placement`, `ade.box`, `ade.repo`, `ade.retired`, `ade.retired_to`, `ade.internal`, `slice`, `baton-writer`, `paseo.parent-agent-id`, `workspaceId`, `parentAgentId`, `archived`, `archivedAt`, `background`, `internal`. (Note: worker ownership markers — `ade.lead`, `slice`, `parentAgentId` — take precedence over placement hints like `ade.box=LEAD` / `ade.placement=main` so interactive workers placed in a LEAD window are never mistaken for lead identity.)
+   - **Durable state records:** `$ADE_WORKER_RUN_STATE/<lead>.windows.json` (which stores both the backward-compatible `"windows"` list and strictly validated per-window `"entries"` with `windowId`, `box`, `repo`, `lead`, `cwd`, `work`; mutators fail closed on malformed or symlinked/non-regular registry files), `self-session/handoff-<predecessor>.json` (`status: "archived"` + `retired`), and `$LW_STATE_DIR/watcher.json`.
+   - **Git / `cwd` inspection:** `ade_ws_names.repo_of(cwd)`, `primary_checkout_of(cwd)`, `linked_worktree(cwd)`.
+   - Legacy display-name checks (`parse_legacy`, `[Handoff writer]`, `WORKER ` on unregistered windows) exist solely as non-destructive fallbacks for pre-2026-11-25 tabs/records and are never an inter-agent metadata channel. In `plugins/ade-window-name`, treating a window title that mirrors its first agent's title within 5 minutes of creation as default is a heuristic for Paseo's prompt-title behavior (not an absolute guarantee against renaming a young custom mirrored title).
+
 ## Window names: `<KIND> <repo> (<work>)`, KIND LEAD, WORKER or OTHER (operator ruling, 2026-11-14)
 
 Operator, 2026-11-14, to the tendcf lead ae1f6d65 (verbatim): "Close any unneeded tabs and any unneeded workspaces you or your
@@ -45,30 +57,34 @@ are still **found, never duplicated**, and renamed to the current kind when a la
 | `WORKERS` | `WORKER` | every worker, reviewer and advisor the lead starts on its own initiative |
 | `USER` | `OTHER` | probes, side tasks, agents the operator started that the lead connected |
 
-Window names are exactly `<KIND> <repo-name> (<current work>)`, e.g. `LEAD djbclark-ade (Wave 7)`, `WORKER djbclark-ade (Wave 7)`,
-`OTHER djbclark-ade (probes)`. **The lead's agent id is not in a window name**; it stays in the tab name and the `ade.lead` label.
-`bin/ade_ws_names.py` is the one builder/parser (`build`, `parse`, `parse_legacy`, `migrated_name`, `repo_of`; a parsed `Name.box`
-maps both spellings onto LEAD, WORKER, OTHER); `ade-tidy` and `ade-worker-run` reuse it.
+Window names are `<KIND> <repo-name> (<current work>)`, e.g. `LEAD djbclark-ade (Wave 7)`, `WORKER djbclark-ade (Wave 7)`,
+`OTHER djbclark-ade (probes)`. **The lead's agent id is not in a window name or tab name**; ownership lives strictly in the
+structured `ade.lead` label and `$ADE_WORKER_RUN_STATE/<lead>.windows.json` entries.
+`bin/ade_ws_names.py` is the one display-name builder/migrator and window-registry helper (`build`, `parse`, `parse_legacy`,
+`migrated_name`, `repo_of`, `tab_name`, `read_window_registry`, `write_window_registry`, `all_registered_windows`); `ade-tidy`,
+`ade-worker-run`, `ade_ws_autoname.py`, and `ade-pin-workspaces` reuse it.
 
 1. **`LEAD <repo> (<work>)`**: a lead's own window, the row of tabs that includes the lead. Workers the **operator** asks
    for interactively ("open a new sonnet tab to …") are launched as a tab in this window:
-   `ade-worker-run --lead <id> --slice <name> --placement lead -- …` (aliases `--placement main`, `--interactive`; label
-   `ade.placement=main`, the label value keeps its 2026-11-13 spelling). It resolves the window from the lead's own agent record
-   (never from a possibly-unset `PASEO_WORKSPACE_ID`), refuses unless the window is named `LEAD …` and the caller is the lead
-   (a `MAIN …` name is renamed to `LEAD …` by the launch), and never archives it. `ade-worker-run rename-lead --lead <id>
-   [--window-middle <work>] [--repo <repo>]` (alias `rename-main`) names the lead's own window `LEAD <repo> (<work>)` (a WORKER or
-   OTHER window is refused; a legacy `MAIN <middle>` and a bare `LEAD <repo>` are renamed too). The repo is `--repo`, else the window cwd's
+   `ade-worker-run --lead <id> --slice <name> --placement lead -- …` (aliases `--placement main`, `--interactive`; labels
+   `ade.placement=main`, `ade.box=LEAD`, `ade.repo=<repo>`). It resolves the window from the lead's own agent record
+   (never from a possibly-unset `PASEO_WORKSPACE_ID`), refuses only if the caller is not the lead or structured registry metadata
+   marks the window as a WORKER/OTHER box (it **never refuses because a human renamed the window away from `LEAD …`**; a 2026-11-13
+   `MAIN …` name is still migrated to `LEAD …`, while custom human names are left untouched), and never archives it. `ade-worker-run rename-lead --lead <id>
+   [--window-middle <work>] [--repo <repo>]` (alias `rename-main`) refreshes the lead's own window to `LEAD <repo> (<work>)` (a WORKER or
+   OTHER box is refused; a legacy `MAIN <middle>`, custom human name, and bare `LEAD <repo>` are renamed cleanly). The repo is `--repo`, else the window cwd's
    repo, never the home directory's name: a bare `LEAD tendcf` over a cwd that is not a git repo keeps `tendcf`, and a home-directory
    cwd with no repo-like name is refused ("pass --repo"). A window already in the current form is corrected when `--repo` or
-   `--window-middle` differs from its name; only `rename-lead` corrects, a `--placement lead` launch takes a current name as it is.
+   `--window-middle` differs from its name; only `rename-lead` corrects, a `--placement lead` launch takes a current or custom human name as it is.
 2. **`WORKER <repo> (<work>)`**: one box per lead and repo for **every** worker, reviewer and advisor the lead starts on its own
-   initiative (the next section). Tab name: `worker <slice> <lead agent id>` (singular), with the **full** lead id, so a sidebar line
-   names its owner, plus ` [wt: <worktree dir basename>]` when the worker writes in a worktree (below). Example: window `WORKER
-   djbclark-ade (Wave 7)`, tab `worker placement-docs 8cd86203-d33b-49db-abde-9baba52bcf61 [wt: djbclark-ade-placement-docs-wt]`.
+   initiative (the next section). Concise tab name (updated 2026-11-25): `worker <slice>` plus ` [wt: <worktree dir basename>]`
+   when the worker writes in a worktree (the 36-char lead UUID is no longer embedded in the tab title; structured `--label ade.lead=<lead id>`,
+   `slice=<slice>`, `ade.box=WORKER`, `ade.repo=<repo>` carry ownership and placement). Example: window `WORKER
+   djbclark-ade (Wave 7)`, tab `worker placement-docs [wt: djbclark-ade-placement-docs-wt]`.
 3. **`OTHER <repo> (<work>)`**: probes, side tasks and agents the operator started that a lead has connected to. A launch goes in
-   with `ade-worker-run … --placement other` (alias `--other`; label `ade.placement=other`; tab prefix `other `, so `other <slice>
-   <lead id> [wt: …]`; default `(<work>)` text `other`). `ade-tidy` classes an operator agent of the repo as OTHER. It is the same
-   kind of box as WORKER (one per lead and repo, found by ownership); `archive-window --placement other` archives it.
+   with `ade-worker-run … --placement other` (alias `--other`; labels `ade.placement=other`, `ade.box=OTHER`, `ade.repo=<repo>`;
+   concise tab `other <slice> [wt: …]`; default `(<work>)` text `other`). `ade-tidy` classes an operator agent of the repo as OTHER. It is the same
+   kind of box as WORKER (one per lead and repo, found by structured ownership); `archive-window --placement other` archives it.
 4. **`<repo>`** is `--repo`, else the name of the repo of `--cwd` (the main checkout's name via `git rev-parse
    --git-common-dir`, so a linked worktree `djbclark-ade-x-wt` reads `djbclark-ade`; else the directory's basename);
    **`<work>`** is `--window-middle` (nonempty, trimmed, one line) of the launch that **opens** the box. **Legacy names** recognised and
@@ -119,7 +135,7 @@ windows, carry the slice, and a tab may mention its worktree. Never one window p
    agent does not remove its window. The per-work-text window of 2026-11-13 made it worse (tendcf 9, djbclark-ade about 15 by
    2026-11-14), hence the ruling above.
 4. **Length:** keep a window or tab name under about 100 characters (`NAME_LIMIT` in `bin/ade_ws_names.py`; the build refuses
-   a longer window name, the tab name `worker <slice> <lead id>` is checked too, and the ` [wt: …]` hint is shortened to fit,
+   a longer window name, the tab name `worker <slice>` is checked too, and the ` [wt: …]` hint is shortened to fit,
    never refused). Measured limits, Paseo 0.16.0-beta.2,
    2026-11-13: `paseo workspace rename`
    and `paseo agent update --name` read back unchanged at 60, 100, 200 and 400 characters (no server cap seen); the

@@ -172,3 +172,29 @@ def test_ade_window_name_plugin_node_tests():
     r = subprocess.run([node, "--test", str(ROOT / "plugins" / "ade-window-name" / "server" / "name-lib.test.mjs")],
                        capture_output=True, text=True, timeout=120, env=env)
     assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-1500:]
+
+
+def test_structured_labels_override_title_and_cwd_and_human_renames_are_untouched(tmp_path):
+    repo = git_repo(tmp_path, "fallback-repo")
+    # Structured `ade.box`, `ade.repo`, and `slice` drive naming without parsing the display title.
+    d = an.decide(info(
+        repo,
+        agent={
+            "title": "My custom tab",
+            "labels": {"ade.box": "OTHER", "ade.repo": "explicit-repo", "slice": "venice-probe"},
+        },
+    ))
+    assert d == {
+        "action": "rename",
+        "name": "OTHER explicit-repo (venice-probe)",
+        "kind": "OTHER",
+        "repo": "explicit-repo",
+        "work": "venice-probe",
+    }
+    # Concise worker tab (no 36-char lead UUID) still tidies cleanly when no `slice` label exists.
+    assert an.work_from_title("worker decouple-q126 [wt: djbclark-ade-wt]", "my-repo") == "decouple-q126"
+    assert an.work_from_title("worker pool redesign", "my-repo") == "worker pool redesign"
+    # Human-renamed window is NEVER overwritten.
+    for custom in ("Daniel debugging Venice", "My custom tab"):
+        s = an.decide(info(repo, windowTitle=custom))
+        assert s["action"] == "skip" and s["retry"] is False

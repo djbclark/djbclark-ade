@@ -150,19 +150,19 @@ ade-worker-run rename-lead --lead LEAD [--window-middle "Wave 7"] [--repo NAME] 
    the footer into the brief (2026-11-13: lead-written briefs omitted it and a worker pushed a changelog fragment with no
    `###` heading).
    `--placement lead` (aliases `main`, `--interactive`) is for a worker the operator asked you for in the chat: it launches a tab into your
-   own window (resolved from your own agent record, not `PASEO_WORKSPACE_ID`; you must be the caller), which must be named
-   `LEAD <repo> (<work>)` (`rename-lead` names it; a `MAIN …` name is renamed on the first such launch), labels it
-   `ade.placement=main`, and never archives it. `--placement other` puts the worker in the OTHER box (label `ade.placement=other`).
+   own window (resolved from your own agent record, not `PASEO_WORKSPACE_ID`; you must be the caller), never refuses because a human renamed
+   the window away from `LEAD …` (2026-11-25 ruling; `rename-lead` refreshes the display name, and a 2026-11-13 `MAIN …` name is still migrated),
+   labels it `ade.placement=main` and `ade.box=LEAD`, and never archives it. `--placement other` puts the worker in the OTHER box (labels `ade.placement=other`, `ade.box=OTHER`).
 3. When the run ends, archive the agents, then `ade-worker-run archive-window --lead LEAD [--placement worker|other] [--window-middle …]
    [--idle-handled]`: it runs `paseo workspace archive` only if every live agent labelled `ade.lead=<LEAD>` in that window is closed (or
-   idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and the window is this
-   lead's WORKER (or OTHER) box (current or legacy name); otherwise it lists the blockers and archives nothing (`--dry-run` to only
+   idle, with `--idle-handled` once its report is handled), no other live agent sits in the window, and structured ownership metadata shows the window is this
+   lead's WORKER (or OTHER) box (even if a human renamed it); otherwise it lists the blockers and archives nothing (`--dry-run` to only
    check). It archives only a window it can show is this lead's (window record, labelled agent, or legacy name with the lead id), never one found by name alone; no agent in another window (a LEAD- or OTHER-placed tab, a worker of the lead in a second WORKER window) blocks it. A LEAD window is never archived. Extra windows a chain left behind
-   (a second WORKER window, a window named outside the scheme) are listed by `bin/ade-tidy` (section H) and archived by `--apply` when empty or finished.
+   (a second WORKER window, a window with neither structured box nor scheme name) are listed by `bin/ade-tidy` (section H) and archived by `--apply` when empty or finished.
 
 By hand (what the helper does; a hand-made window has no ownership record, so `archive-window` will not archive it until a helper launch adopted it while empty): the same strip, `--new-workspace` on the first launch only, the window id taken from the
 launch and never guessed by cwd or name, `paseo workspace rename`, `--workspace wks_…` on later launches, `paseo agent update
-<full agent id> --name "worker <NAME> <LEAD>"`.
+<full agent id> --name "worker <NAME>"` (lead ownership lives in `--label ade.lead=<LEAD>`, not the tab title).
 
 A handoff **successor** is a new lead, not a worker: it starts as `skills/self-handoff` says (its own top-level `paseo run`), keeps
 its own placement (its own LEAD window), and reuses the chain's WORKER and OTHER boxes when it dispatches (it opens none beside them).

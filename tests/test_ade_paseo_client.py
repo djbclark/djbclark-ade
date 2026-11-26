@@ -807,6 +807,7 @@ def test_converted_pollers_run_zero_subprocess_against_unix_daemon(tmp_path: Pat
             model="claude-sonnet-5-5",
             status="idle",
             cwd=str(tmp_path),
+            labels={"ade.retired": "1"},
             updated_at="2020-01-01T00:00:00Z",
         ),
     ]

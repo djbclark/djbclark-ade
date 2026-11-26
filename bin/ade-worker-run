@@ -27,14 +27,15 @@ worktree), reads the new window's id from the launch (JSON `workspaceId`, else t
 cross-checked against the agent's state file) and names it `WORKER <repo> (<work>)`.
 --window-middle is only the `(<work>)` text of a box this launch opens (default `workers`; `other` in the OTHER box), and, when the
 lead owns several boxes of the repo, picks the one with that text. It never opens a second box. Old invocations keep working.
---placement other (alias --other): the same for the OTHER box; label ade.placement=other, tab `other <slice> <lead id>`.
+--placement other (alias --other): the same for the OTHER box; labels ade.placement=other, ade.box=OTHER, tab `other <slice>`.
 --placement lead (aliases main, --interactive; for a worker the OPERATOR asked for interactively): launches into the lead's own
-window, resolved from the lead's agent record ($PASEO_AGENT_ID must be --lead); it must be named `LEAD <repo> (<work>)` (a MAIN name
-is renamed to that) or the launch is refused (`rename-main` fixes that); never archived by this tool. Label ade.placement=main.
-Tab names: `worker <slice> <lead id>` plus ` [wt: <worktree dir>]` when --worktree DIR names the worktree the worker writes in or
---cwd is a linked worktree (a hint, shortened to fit 100 characters; the brief still carries the path). Every launch carries
-`--label ade.lead=<lead>` and `--label slice=<NAME>`. One JSON line goes to stdout: {agentId, workspaceId, windowName, tabName}
-(plus reportPath and donePath unless --no-footer).
+window, resolved from the lead's agent record ($PASEO_AGENT_ID must be --lead); never refuses because a human renamed the window
+away from `LEAD ...` (2026-11-25 ruling; a 2026-11-13 MAIN name is still migrated to LEAD); never archived by this tool. Labels
+ade.placement=main, ade.box=LEAD.
+Tab names: concise `worker <slice>` (or `other <slice>`) plus ` [wt: <worktree dir>]` when --worktree DIR names the worktree the
+worker writes in or --cwd is a linked worktree (a display hint, shortened to fit 100 characters; the brief still carries the path).
+Every launch carries `--label ade.lead=<lead>`, `--label slice=<NAME>`, `--label ade.box=<LEAD|WORKER|OTHER>`, and `--label ade.repo=<repo>`.
+One JSON line goes to stdout: {agentId, workspaceId, windowName, tabName} (plus reportPath and donePath unless --no-footer).
 Pass --no-wait to paseo. The last `--` argument (the brief) gets one line appended: `Also follow every item of <repo root>/docs/
 dispatch-footer.md.` (skipped by --no-footer; refused when the last argument is not recognisably the brief). A `Footer values:` line
 always follows it and fills {lead}, {report}, {done}, {inbox} and {replies}. A report path the brief LABELS (a line-start `Report:`/
@@ -102,8 +103,9 @@ CLI_TIMEOUT = 60
 # Flags the helper owns; a caller passing one would break the placement or the labels.
 OWNED_FLAGS = ("--workspace", "--new-workspace", "--cwd", "--dir", "-C", "--host", "--home", "-o", "--format", "-q", "--quiet")
 DETACH_FLAGS = ("--no-wait", "-d", "--background", "--detach")
-OWNED_LABEL_KEYS = ("ade.lead", "slice", "ade.placement")
+OWNED_LABEL_KEYS = ("ade.lead", "slice", "ade.placement", "ade.box", "ade.repo")
 DEFAULT_WORK = {"WORKER": "workers", "OTHER": "other"}  # the (<work>) text of a box opened without --window-middle
+PLACEMENT_TO_BOX = {"lead": "LEAD", "main": "LEAD", "worker": "WORKER", "workers": "WORKER", "other": "OTHER", "user": "OTHER"}
 
 
 class Refused(Exception):
@@ -116,12 +118,13 @@ def child_env() -> dict[str, str]:
 
 def paseo(args: list[str], timeout: int | None = CLI_TIMEOUT) -> tuple[int, str, str]:
     """One paseo call, argv list, stdout and stderr read back from files (never a pipe)."""
+    paseo_bin = (os.environ.get("ADE_WORKER_RUN_PASEO") or os.environ.get("ADE_PASEO_BIN") or "").strip() or "paseo"
     with tempfile.TemporaryFile("w+") as out, tempfile.TemporaryFile("w+") as err:
         try:
-            rc = subprocess.run(["paseo", *args], env=child_env(), stdin=subprocess.DEVNULL, stdout=out,
+            rc = subprocess.run([paseo_bin, *args], env=child_env(), stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=err, timeout=timeout).returncode
         except FileNotFoundError:
-            raise Refused("paseo is not on PATH")
+            raise Refused(f"{paseo_bin} is not on PATH")
         except subprocess.TimeoutExpired:
             raise Refused(f"paseo {' '.join(args[:2])} timed out after {timeout}s")
         out.seek(0)
@@ -242,14 +245,108 @@ def label_queries(lead: str) -> list[str]:
     return ids
 
 
-def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
-    """For each of `leads`: window ids that hold a live agent labelled ade.lead=<it> (from its state file); one `ls` each."""
+def _box_from_labels(labels: dict | None) -> str | None:
+    if not isinstance(labels, dict):
+        return None
+    raw_box = str(labels.get("ade.box") or "").strip().upper()
+    if raw_box in wsn.BOX_OF:
+        return wsn.BOX_OF[raw_box]
+    raw_place = str(labels.get("ade.placement") or "").strip().lower()
+    if raw_place in PLACEMENT_TO_BOX:
+        return PLACEMENT_TO_BOX[raw_place]
+    return None
+
+
+def member_windows_meta(leads: list[str]) -> tuple[dict[str, set[str]], dict[str, dict]]:
+    """For each of `leads`: window ids that hold a live agent labelled ade.lead=<it>, plus structured
+    box/repo metadata aggregated from those live agents' labels (`ade.box`, `ade.placement`, `ade.repo`)."""
     out: dict[str, set[str]] = {}
+    meta: dict[str, dict] = {}
     for lead in leads:
         ids = [r["id"] for r in (paseo_json(["ls", "-g", "--json", "--label", f"ade.lead={lead}"]) or [])
                if isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("status") != "closed"]
-        out[lead] = {st["workspaceId"] for st in map(state_file, ids) if st and isinstance(st.get("workspaceId"), str)}
-    return out
+        wins: set[str] = set()
+        for aid in ids:
+            st = state_file(aid)
+            wks = st.get("workspaceId") if st else None
+            if not isinstance(wks, str) or not WKS_RE.fullmatch(wks):
+                continue
+            wins.add(wks)
+            labels = st.get("labels") if isinstance(st.get("labels"), dict) else {}
+            m = meta.setdefault(wks, {"boxes": set()})
+            b = _box_from_labels(labels)
+            if b:
+                m["boxes"].add(b)
+            raw_repo = labels.get("ade.repo")
+            if isinstance(raw_repo, str) and wsn.REPO_RE.fullmatch(raw_repo.strip()) and "repo" not in m:
+                m["repo"] = raw_repo.strip()
+        out[lead] = wins
+    return out, meta
+
+
+def chain_lead_workspaces(mine: set[str]) -> set[str]:
+    """Every workspaceId recorded on any state file of the lead or its replaced predecessors in `mine`."""
+    wks_set: set[str] = set()
+    for x in mine:
+        for p in state_paths(x):
+            rec = _state_copy(p)
+            wks = rec.get("workspaceId") if isinstance(rec, dict) else None
+            if isinstance(wks, str) and WKS_RE.fullmatch(wks):
+                wks_set.add(wks)
+    return wks_set
+
+
+def resolve_window_box(
+    wks: str | None,
+    chain_lead_wks: set[str],
+    reg_ids: set[str],
+    reg_entries: dict[str, dict],
+    agent_meta: dict[str, dict],
+    *,
+    cur,
+    legacy,
+) -> str:
+    """Single structural box resolver -> `LEAD`, `WORKER`, `OTHER`, or `unknown`.
+
+    Precedence:
+    1. Unconditional own-workspace + chain-wide LEAD veto (beats registry, labels, and display titles).
+    2. Explicit structured registry entry `box` (`LEAD`/`WORKER`/`OTHER`).
+    3. Explicit structured agent label boxes (`ade.box`/`ade.placement`) — ALWAYS beats display title;
+       conflicting explicit boxes return `unknown`.
+    4. Legacy display-name migration hint (`cur.box` / `legacy.kind`) when no structured box exists.
+    5. Otherwise `unknown` (never defaults an unproven legacy window to `WORKER`).
+    """
+    if wks and wks in chain_lead_wks:
+        return "LEAD"
+    entry = reg_entries.get(wks) if wks else None
+    if isinstance(entry, dict) and entry.get("box") in wsn.KINDS:
+        return entry["box"]
+    am_boxes: set[str] = set((agent_meta.get(wks) or {}).get("boxes") or ()) if wks else set()
+    if wks and wks in reg_ids:
+        # Legacy ID-only registry record (ade-worker-run only registers WORKER/OTHER boxes; a stray
+        # `ade.placement=main` worker inside it never turns it into LEAD, while chain leads were vetoed above).
+        non_lead = am_boxes - {"LEAD"}
+        if len(non_lead) == 1:
+            return next(iter(non_lead))
+        if len(non_lead) > 1:
+            return "unknown"
+    else:
+        if "LEAD" in am_boxes:
+            return "LEAD"
+        if len(am_boxes) == 1:
+            return next(iter(am_boxes))
+        if len(am_boxes) > 1:
+            return "unknown"
+    if cur:
+        return cur.box
+    if legacy:
+        return wsn.BOX_OF[legacy.kind]
+    return "unknown"
+
+
+def member_windows_by_lead(leads: list[str]) -> dict[str, set[str]]:
+    """For each of `leads`: window ids that hold a live agent labelled ade.lead=<it> (from its state file); one `ls` each."""
+    return member_windows_meta(leads)[0]
 
 
 def _state_copy(path: Path) -> dict | None:
@@ -339,55 +436,109 @@ def legacy_target(row: dict, legacy, repo: str | None, explicit: bool) -> str:
 class Found(NamedTuple):
     row: dict
     rename_to: str | None  # the current-form name when the window still has a legacy one
-    owned: bool            # positive evidence it is this lead's (legacy name with its id, registry, or its labelled live agent)
+    owned: bool            # positive evidence it is this lead's (registry, labelled live agent, or legacy name with its id)
+    box: str | None = None
+    repo: str | None = None
+    work: str | None = None
 
 
 def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool = False, cwd: str | None = None,
                 box: str = "WORKER", pick: str | None = None, per_repo: bool = False) -> Found | None:
-    """The lead's window of `box` (WORKER or OTHER; a LEAD window is the lead's own, `own_window`). Matches by exact name
-    `<KIND> <repo> (<middle>)` (any repo when `repo` is None) or, without `middle`, by ownership; a legacy name carrying <lead>
-    matches too; the 2026-11-13 kinds (WORKERS, USER) match as their box and come back with `rename_to` set. A launch passes
-    `middle=None` (one box per lead and repo, whatever the slice or work) and `pick` (its --window-middle): `pick` chooses
-    among several owned boxes by their `(<work>)` text and is never a reason to open another; `per_repo` (a launch) drops a
-    box of another repo (by name, else by checkout), so a launch for a repo the lead has no box for opens that repo's box. Ownership is evidence, never a name: the lead's
-    window record (written when the helper mints or migrates a window, and by a launch into an existing WORKERS window), a live agent labelled ade.lead=<lead> in it, or the
-    lead id in a legacy name. Refused: two matches; a window registered to another lead or holding any agent (closed
-    included) labelled for another lead; a `middle` that matches nothing while the lead owns another window (a typo must not
-    open a second one, and only a window of the launch's own `repo` counts: one WORKERS window per (lead, repo), so a launch
-    for a repo the lead has no window for mints one; windows only a predecessor placed do not count either, so a successor opens
-    a new one for new work; a window whose repo cannot be read counts, and with `repo` None every owned window counts). With several
-    owned windows and no `middle`, `repo` narrows them to that repo's (one match picks it). A name match with no evidence either way is returned with owned=False: a launch may adopt it, an
-    archive never does."""
+    """The lead's window of `box` (WORKER or OTHER; a LEAD window is the lead's own, `own_window`).
+
+    Operator ruling 2026-11-25: display names are human-facing UI labels only and are never required for
+    ownership or box classification. Owned windows are resolved from structured ownership records
+    (`$ADE_WORKER_RUN_STATE/<lead>.windows.json` entries: `box`, `repo`, `work`) and structured Paseo agent
+    labels (`ade.lead`, `ade.box`, `ade.placement`, `ade.repo`) plus git/cwd inspection, so renaming a window
+    to an arbitrary human string never breaks box reuse or `archive-window`. Legacy names (`workers ... <lead>`,
+    2026-11-13 `WORKERS`/`USER`) are still recognised for backward compatibility and migration."""
     mine = lineage(lead)
-    labelled = member_windows_by_lead(label_queries(lead))
-    members = set().union(*labelled.values()).union(*(read_registry(registry_path(x)) for x in mine))
+    labelled, agent_meta = member_windows_meta(label_queries(lead))
+    reg_ids_by_lead: dict[str, set[str]] = {}
+    reg_entries: dict[str, dict] = {}
+    for x in sorted(mine):
+        ids_x, ents_x = read_registry_entries(registry_path(x))
+        reg_ids_by_lead[x] = ids_x
+        for wks_id, entry in ents_x.items():
+            if x == lead or wks_id not in reg_entries:
+                reg_entries[wks_id] = entry
+    reg_ids = set().union(*reg_ids_by_lead.values()) if reg_ids_by_lead else set()
+    members = set().union(*labelled.values()).union(reg_ids)
     others = other_leads_windows(mine)
-    own_ids = labelled.get(lead, set()) | read_registry(registry_path(lead))  # not inherited from a predecessor
+    own_ids = labelled.get(lead, set()) | reg_ids_by_lead.get(lead, set())  # not inherited from a predecessor
+    lead_state = state_file(lead)
+    chain_lead_wks = chain_lead_workspaces(mine)
     owned: list[dict] = []
     owned_own: list[dict] = []  # the subset the lead itself placed (or labelled): a typo must not open a second window
     own_cwd: dict[str, str | None] = {}  # window id -> its recorded cwd
-    own_repo: dict[str, str | None] = {}  # window id -> its repo (the name's, else a legacy window's cwd's), None when unreadable
-    hits: list[tuple[dict, str | None, Refused | None]] = []
+    own_repo: dict[str, str | None] = {}  # window id -> its repo (structured first, else cwd/display fallback)
+    # Each hit: (row, rename_to, err, win_box, win_repo, win_work)
+    hits: list[tuple[dict, str | None, Refused | None, str | None, str | None, str | None]] = []
+
+    def structured_repo(row: dict, wks: str | None, cur, is_legacy: bool) -> str | None:
+        entry = reg_entries.get(wks) if wks else None
+        if entry and entry.get("repo"):
+            return entry["repo"]
+        am = agent_meta.get(wks) if wks else None
+        if am and am.get("repo"):
+            return am["repo"]
+        if cur:
+            return cur.repo
+        rcwd = row.get("cwd")
+        if is_legacy:
+            if rcwd and os.path.isdir(rcwd):
+                r = wsn.repo_of(rcwd)
+                return r if r and wsn.REPO_RE.fullmatch(r) else None
+            return None
+        if rcwd:
+            r = wsn.repo_of(rcwd)
+            return r if r and wsn.REPO_RE.fullmatch(r) else None
+        return None
+
     for row in list_windows():
+        wks = row.get("workspaceId")
+        # Unconditional chain-wide LEAD veto ahead of EVERY selection branch (by_member, legacy migration,
+        # and unowned adoption): a chain LEAD window can never be selected or migrated as a WORKER/OTHER box.
+        if wks and wks in chain_lead_wks:
+            continue
         cur = wsn.parse(row["name"])
         legacy = None if cur else wsn.parse_legacy(row["name"])
-        if cur and cur.box == box:
-            by_member = row.get("workspaceId") in members
-            by_name = middle is not None and cur.work == middle and (repo is None or cur.repo == repo)
-            if by_member:
-                owned.append(row)
-                if row.get("workspaceId") in own_ids:
-                    owned_own.append(row)
-                    own_repo[row.get("workspaceId")] = cur.repo
-                    own_cwd[row.get("workspaceId")] = row.get("cwd")
-            if by_name or (middle is None and by_member):
-                hits.append((row, None, None))
+        by_member = wks in members
+        if by_member:
+            entry = reg_entries.get(wks) or {}
+            win_box = resolve_window_box(
+                wks, chain_lead_wks, reg_ids, reg_entries, agent_meta, cur=cur, legacy=legacy,
+            )
+            if win_box != box:
+                continue
+            win_repo = structured_repo(row, wks, cur, is_legacy=bool(legacy))
+            win_work = entry.get("work") or (cur.work if cur else None)
+            owned.append(row)
+            if wks in own_ids:
+                owned_own.append(row)
+                own_repo[wks] = win_repo
+                own_cwd[wks] = row.get("cwd")
+            if legacy and wsn.BOX_OF[legacy.kind] == box and legacy.lead in mine:
+                try:
+                    new, err = legacy_target(row, legacy, repo, explicit), None
+                except Refused as e:
+                    new, err = None, e
+                lm = legacy.middle.strip()
+                names_it = err is not None and middle is not None and (lm == middle or any(
+                    wsn.normalize_work(lm, r) == middle for r in {repo, os.path.basename(row.get("cwd") or "")} if r))
+                if middle is None or win_work == middle or (new is not None and wsn.parse(new).work == middle) or names_it:
+                    hits.append((row, new, err, win_box, win_repo, win_work))
+            else:
+                work_match = middle is None or win_work == middle or (cur is not None and cur.work == middle)
+                if work_match:
+                    hits.append((row, None, None, win_box, win_repo, win_work))
         elif legacy and wsn.BOX_OF[legacy.kind] == box and legacy.lead in mine:
             owned.append(row)
+            win_repo = structured_repo(row, wks, None, is_legacy=True)
             if legacy.lead == lead:
                 owned_own.append(row)
-                own_cwd[row.get("workspaceId")] = row.get("cwd")
-                own_repo[row.get("workspaceId")] = wsn.repo_of(row["cwd"]) if row.get("cwd") and os.path.isdir(row["cwd"]) else None  # a gone directory names no repo
+                own_cwd[wks] = row.get("cwd")
+                own_repo[wks] = win_repo
             try:  # the new name is built for a hit only: an unbuildable legacy name must not block unrelated calls
                 new, err = legacy_target(row, legacy, repo, explicit), None
             except Refused as e:
@@ -396,13 +547,11 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
             names_it = err is not None and middle is not None and (lm == middle or any(
                 wsn.normalize_work(lm, r) == middle for r in {repo, os.path.basename(row.get("cwd") or "")} if r))
             if middle is None or (new is not None and wsn.parse(new).work == middle) or names_it:  # unbuildable but for this work: refuse
-                hits.append((row, new, err))
-    # Windows only a predecessor placed are inherited, not windows this lead placed, so they do not trigger the typo guard: new
-    # work gets a new window (2026-11-14, lead 8dcd57f4 stuck with four inherited windows). A window becomes the lead's own while
-    # one of its live workers sits in it (labelled[lead]), or from the launch that places a worker in it (register_window below).
-    # One WORKERS window per (lead, repo): a typo guards only against a second window for the SAME repo. A launch for a repo the
-    # lead has no window for mints one (2026-11-14, tendcf lead 698fa914: a libntech worker was refused for a cfengine-core window
-    # and had to run in it). A window whose repo cannot be read still counts, and `repo` None keeps every owned window counting.
+                hits.append((row, new, err, box, win_repo, wsn.parse(new).work if new else None))
+        elif cur and cur.box == box and middle is not None and cur.work == middle and (repo is None or cur.repo == repo):
+            # Unowned exact-name match (never archived; adoptable only when empty/no strangers).
+            hits.append((row, None, None, cur.box, cur.repo, cur.work))
+
     def by_name(r: dict) -> bool:  # names compare without case (`--repo CFEngine-core` is the repo `cfengine-core`)
         theirs = own_repo.get(r.get("workspaceId"))
         return theirs is None or theirs.casefold() == (repo or "").casefold()
@@ -424,14 +573,17 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                 hint = (f"it is the same checkout as --cwd, so a window for {repo} needs --cwd that repo's own checkout; "
                         "otherwise use that --window-middle (or none), not a second window")
             raise Refused(f"no WORKERS window is named for work {middle!r}, but this lead has {ids}; {hint}")
-    def hit_repo(h, live: bool = False):  # a repo known from evidence: the name, else (a legacy window) its cwd; never the argument itself
+
+    def hit_repo(h, live: bool = False):  # structured repo first, else legacy/cwd fallback; never the argument itself except explicit legacy rename
+        if h[4]:
+            return h[4]
         cur = wsn.parse(h[0]["name"])
         if cur:
             return cur.repo
-        if live and explicit:
+        if live and explicit and h[1] is not None:
             return repo  # a launch with --repo: legacy_target renames the legacy window to that repo, so it is that repo's
         if live and not (h[0].get("cwd") and os.path.isdir(h[0]["cwd"])):
-            return None  # a launch: a legacy window whose directory is gone names no repo, so it still counts (it may be this one's)
+            return None  # a launch: a window whose directory is gone and has no structured repo still counts (it may be this one's)
         r = wsn.repo_of(h[0]["cwd"]) if h[0].get("cwd") else None
         return r if r and (not live or wsn.REPO_RE.fullmatch(r)) else None  # a directory that names no valid repo counts for any
 
@@ -447,7 +599,7 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
                         and wsn.primary_checkout_of(wc) == co)
         hits = [h for h in hits if same_repo_hit(h)]
     if len(hits) > 1 and pick is not None:  # several owned boxes: --window-middle (an old invocation) says which
-        picked = [h for h in hits if (wsn.parse(h[1] or h[0]["name"]) or wsn.Name("", "", "")).work == pick]
+        picked = [h for h in hits if (h[5] or (wsn.parse(h[1] or h[0]["name"]) or wsn.Name("", "", "")).work) == pick]
         if picked:
             hits = picked
     if len(hits) > 1:  # a duplicate unclaimed name must not lock the lead out of its own window
@@ -459,12 +611,12 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         if for_repo:  # one match picks it; several are still ambiguous, but only among this repo's windows
             hits = for_repo
     if len(hits) > 1:
-        ids = ", ".join(f"{row_wks(r)} ({r['name']!r})" for r, _, _ in hits)
+        ids = ", ".join(f"{row_wks(r)} ({r['name']!r})" for r, *_ in hits)
         raise Refused(f"{len(hits)} windows match the lead's {box} box: {ids}; pass --repo (or --window-middle, a work text "
                       "above) to pick one, or archive the extras (`ade-tidy --apply`, docs/workspace-layout.md)")
     if not hits:
         return None
-    row, new, err = hits[0]
+    row, new, err, win_box, win_repo, win_work = hits[0]
     if err is not None:
         raise err
     wks = row_wks(row)
@@ -474,24 +626,25 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         raise Refused(f"window {wks} ({row['name']!r}) is registered to lead {others[wks]}, not {lead}{note} "
                       "(pick a different --window-middle)")
     owned_here = new is not None or wks in members
-    if new is None:  # a current-form name: prove it is not another lead's
-        foreign = foreign_agents(wks, lead)
-        if foreign:
-            raise Refused(f"window {wks} ({row['name']!r}) holds another lead's agents: {', '.join(foreign)}; "
-                          "it is not this lead's WORKERS window (pick a different --window-middle)")
-        if not owned_here:  # an unclaimed name: adoptable only when nothing foreign to this lead is in it
-            strangers = unclaimed_agents(wks, lead)
-            if strangers:
-                raise Refused(f"window {wks} ({row['name']!r}) holds agents not labelled for this lead: {', '.join(strangers)}; "
-                              "it may be the operator's or another lead's. Pick a different --window-middle, or archive "
-                              "those agents first")
+    # Prove it is not another lead's, even when legacy migration would rename the window.
+    foreign = foreign_agents(wks, lead)
+    if foreign:
+        raise Refused(f"window {wks} ({row['name']!r}) holds another lead's agents: {', '.join(foreign)}; "
+                      "it is not this lead's WORKERS window (pick a different --window-middle)")
+    if new is None and not owned_here:  # an unclaimed name: adoptable only when nothing foreign to this lead is in it
+        strangers = unclaimed_agents(wks, lead)
+        if strangers:
+            raise Refused(f"window {wks} ({row['name']!r}) holds agents not labelled for this lead: {', '.join(strangers)}; "
+                          "it may be the operator's or another lead's. Pick a different --window-middle, or archive "
+                          "those agents first")
     cur_hit = wsn.parse(row["name"])
-    if new is None and cur_hit and not cur_hit.current:  # `WORKERS r (w)` -> `WORKER r (w)`: renamed when a launch reuses it
+    resolved_box = win_box or box
+    if new is None and cur_hit and not cur_hit.current:  # `WORKERS r (w)` -> `<resolved_box> r (w)`: renamed when a launch reuses it
         try:
-            new = wsn.current_name(cur_hit)
+            new = wsn.build(resolved_box, win_repo or cur_hit.repo, win_work or cur_hit.work)
         except ValueError as e:
             raise Refused(f"window {wks} ({row['name']!r}) cannot be renamed to its current kind: {e}; rename it by hand")
-    return Found(row, new, owned_here)
+    return Found(row, new, owned_here, resolved_box, win_repo, win_work)
 
 
 def state_paths(agent_id: str) -> list[Path]:
@@ -546,35 +699,78 @@ def registry_path(lead: str) -> Path:
     return state_dir() / f"{lead}.windows.json"
 
 
-def read_registry(path: Path) -> set[str]:
+def read_registry_entries(path: Path) -> tuple[set[str], dict[str, dict]]:
     try:
-        data = json.loads(path.read_text())
-        ids = data["windows"]
-        if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
-            raise ValueError("bad window id")
-        return set(ids)
-    except FileNotFoundError:
-        return set()
+        return wsn.read_window_registry(path, anchor_dir=state_dir())
     except (OSError, ValueError, KeyError, TypeError):
         raise Refused(f"the window ownership record {path} is unreadable; ownership of windows is unknown, so nothing is "
                       "placed, renamed or archived (fix or remove that file by hand)")
 
 
-def write_registry(lead: str, ids: set[str]) -> None:
+def check_lead_window(lead: str, win: dict, what: str) -> None:
+    """Verify `win` (from `own_window(lead)`) is safe for `--placement lead` or `rename-lead`:
+    not registered to another lead, holds no foreign lead's agents, not registered in this chain's
+    WORKER/OTHER registry (explicit entry OR ID-only legacy record), and holds no WORKER/OTHER-labelled
+    live agents. Never refuses solely because a human renamed a LEAD window away from `LEAD ...`."""
+    wks = row_wks(win)
+    mine = lineage(lead)
+    others = other_leads_windows(mine)
+    if wks in others:
+        raise Refused(f"the lead's own window {wks} is registered to another lead {others[wks]} ({what} refused)")
+    foreign = foreign_agents(wks, lead)
+    if foreign:
+        raise Refused(f"the lead's own window {wks} ({win['name']!r}) holds another lead's agents: {', '.join(foreign)} ({what} refused)")
+    for x in sorted(mine):
+        ids_x, ents_x = read_registry_entries(registry_path(x))
+        if wks in ids_x:
+            e_box = (ents_x.get(wks) or {}).get("box")
+            if e_box in ("WORKER", "OTHER"):
+                raise Refused(f"the lead's own window {wks} is registered as a {e_box} box ({what} refused)")
+            if e_box is None:
+                raise Refused(f"the lead's own window {wks} is registered in {x}'s legacy window registry without explicit box ({what} refused)")
+    for a in live_agents():
+        aid = a["id"]
+        if aid == lead or aid in mine:
+            continue
+        st = state_file(aid)
+        if st and st.get("workspaceId") == wks:
+            b = _box_from_labels(st.get("labels"))
+            if b in ("WORKER", "OTHER"):
+                raise Refused(f"the lead's own window {wks} holds agent {aid} labelled as a {b} box ({what} refused)")
+
+
+def read_registry(path: Path) -> set[str]:
+    return read_registry_entries(path)[0]
+
+
+def write_registry(lead: str, ids: set[str], entries: dict[str, dict] | None = None) -> None:
     """Atomic: a temp file next to the record, then rename."""
-    path = registry_path(lead)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            json.dump({"windows": sorted(ids)}, fh)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    wsn.write_window_registry(registry_path(lead), ids, entries)
 
 
-def register_window(lead: str, wks: str) -> None:
-    write_registry(lead, read_registry(registry_path(lead)) | {wks})
+def register_window(lead: str, wks: str, *, box: str | None = None, repo: str | None = None,
+                    cwd: str | None = None, work: str | None = None) -> None:
+    ids, entries = read_registry_entries(registry_path(lead))
+    entry = dict(entries.get(wks) or {"windowId": wks})
+    entry["windowId"] = wks
+    entry["lead"] = lead
+    if box is not None:
+        entry["box"] = box
+    if repo is not None:
+        entry["repo"] = repo
+    if cwd is not None:
+        entry["cwd"] = cwd
+    if work is not None:
+        entry["work"] = work
+    entries[wks] = entry
+    write_registry(lead, ids | {wks}, entries)
+
+
+def unregister_window(lead: str, wks: str) -> None:
+    ids, entries = read_registry_entries(registry_path(lead))
+    if wks in ids:
+        entries.pop(wks, None)
+        write_registry(lead, ids - {wks}, entries)
 
 
 def other_leads_windows(mine: set[str]) -> dict[str, str]:
@@ -698,6 +894,7 @@ def rename_main(opts) -> int:
     lock = lock_for(opts.lead)
     try:
         row = own_window(opts.lead, "rename-main")
+        check_lead_window(opts.lead, row, "rename-lead")
         new = main_target(row, opts.repo, bool(opts.repo), opts.window_middle, correct=True)
         if new is None:
             print(json.dumps({"renamed": False, "workspaceId": row["workspaceId"], "windowName": row["name"]}))
@@ -1068,19 +1265,22 @@ def launch(opts, rest: list[str]) -> int:
     lock = lock_for(lead)  # held to the end: launches and archive-window of one lead serialize (paseo run --no-wait is quick)
     try:
         rename_to, adopt = None, False
+        found_meta: Found | None = None
         if main_place:
-            win = own_window(lead, "--placement main")
-            rename_to = main_target(win, repo, bool(opts.repo), None)  # None: already `MAIN <repo> (<work>)`
+            # Operator ruling 2026-11-25: resolve the lead's own window strictly from its agent record and
+            # structured metadata; NEVER refuse just because a human renamed the window away from `LEAD ...`.
+            win = own_window(lead, "--placement lead")
+            check_lead_window(lead, win, "--placement lead")
             legacy = wsn.parse_legacy(win["name"])
             cur = wsn.parse(win["name"])
-            if rename_to is not None and not ((legacy and legacy.kind == "MAIN") or (cur and not cur.current)):  # only a 2026-11-13 MAIN name is migrated
-                raise Refused(f"the lead's own window {win['workspaceId']} is named {win['name']!r}, not `LEAD <repo> (<work>)`; "
-                              f"run `ade-worker-run rename-main --lead {lead}` first (a worker started on the operator's "
-                              "request goes in the LEAD window; only a 2026-11-13 `MAIN` name is renamed implicitly)")
+            if (legacy and legacy.kind == "MAIN") or (cur and cur.kind == "MAIN"):
+                # Still migrate 2026-11-13 `MAIN ...` names to `LEAD ...`; leave custom human names untouched.
+                rename_to = main_target(win, repo, bool(opts.repo), None)
         else:
             # One box per lead and repo, whatever the slice: --window-middle only names a box this launch opens, or picks among several
             # boxes the lead already owns (find_window `pick`); it never opens a second one (operator ruling 2026-11-14).
             found = find_window(lead, repo, None, bool(opts.repo), cwd, box=box, pick=opts.window_middle, per_repo=True)
+            found_meta = found
             win, rename_to = (found.row, found.rename_to) if found else (None, None)
             adopt = bool(found and not found.owned)  # an unclaimed, empty window of this exact name: recorded once the launch succeeds
         if win is not None and win.get("cwd"):
@@ -1130,7 +1330,11 @@ def launch(opts, rest: list[str]) -> int:
                 raise Refused(f"cannot rename legacy window {win['name']!r} to {rename_to!r}: another window already has that "
                               "name (it would erase the only record of whose window this is); rename one by hand")
             if not main_place:
-                register_window(lead, row_wks(win))  # ownership is recorded before the lead id leaves the name
+                parsed_ren = wsn.parse(rename_to)
+                register_window(lead, row_wks(win), box=box,
+                                repo=(parsed_ren.repo if parsed_ren else repo),
+                                cwd=win.get("cwd") or eff_cwd,
+                                work=(parsed_ren.work if parsed_ren else work))  # ownership is recorded before the lead id leaves the name
             run_ok(["workspace", "rename", row_wks(win), rename_to])
             win = {**win, "name": rename_to}
         if win is None:
@@ -1150,7 +1354,10 @@ def launch(opts, rest: list[str]) -> int:
         if linked:
             sys.stderr.write(f"ade-worker-run: warning: no primary checkout found for {cwd}; the new window's cwd {eff_cwd} is a "
                              "linked worktree (a later worker of the window would start in it)\n")
-        args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}"]
+        target_box = "LEAD" if main_place else box
+        args = ["run", *place, "--label", f"ade.lead={lead}", "--label", f"slice={name}", "--label", f"ade.box={target_box}"]
+        if repo and wsn.REPO_RE.fullmatch(repo):
+            args += ["--label", f"ade.repo={repo}"]
         if main_place:
             args += ["--label", "ade.placement=main"]  # the label value keeps its 2026-11-13 spelling: tidy and the autoname hook read both
         elif box == "OTHER":
@@ -1180,9 +1387,12 @@ def launch(opts, rest: list[str]) -> int:
         try:
             wks = resolve_window_id(win, result, err, agent_id)
             if win is not None and not main_place:  # a launch into an existing window (inherited, legacy, adopted) makes it this lead's own
-                register_window(lead, wks)
+                parsed_win = wsn.parse(wname)
+                reg_repo = (found_meta.repo if found_meta and found_meta.repo else None) or (parsed_win.repo if parsed_win else repo)
+                reg_work = (found_meta.work if found_meta and found_meta.work else None) or (parsed_win.work if parsed_win else None)
+                register_window(lead, wks, box=box, repo=reg_repo, cwd=win.get("cwd") or eff_cwd, work=reg_work)
             if win is None:
-                register_window(lead, wks)  # the window is this lead's from the moment it exists
+                register_window(lead, wks, box=box, repo=repo, cwd=eff_cwd, work=work)  # the window is this lead's from the moment it exists
                 run_ok(["workspace", "rename", wks, wname])
             run_ok(["agent", "update", agent_id, "--name", tab])
             if requested:  # paseo drops --cwd in an existing window and from inside an agent (getpaseo/paseo#9699): check where it landed
@@ -1317,29 +1527,28 @@ def archive_locked(opts) -> int:
                       ("" if opts.window_middle else " (no window record or labelled agent finds it: pass --window-middle)"))
     win = found.row
     name = win["name"]
-    cur = wsn.parse(name)
-    legacy = wsn.parse_legacy(name)
+    wks = win["workspaceId"]
     if not found.owned:
-        raise Refused(f"window {win['workspaceId']} ({name!r}) has the right name but nothing shows it is lead {opts.lead}'s "
+        raise Refused(f"window {wks} ({name!r}) has the right name but nothing shows it is lead {opts.lead}'s "
                       "(no window record, no live agent labelled for this lead): a name alone never confers ownership, "
                       "so it is not archived")
-    if not ((cur and cur.box == box) or (legacy and wsn.BOX_OF[legacy.kind] == box and legacy.lead in lineage(opts.lead))):
-        raise Refused(f"window {win['workspaceId']} is not a {box} box ({name!r}); a LEAD window is never archived here")
-    mine = sorted(lineage(opts.lead))  # computed before the archive: a ledger gone cyclic meanwhile must not strand the record
-    blockers = archive_blockers(opts.lead, win["workspaceId"], opts.idle_handled)
+    mine_set = lineage(opts.lead)
+    lead_wks_set = chain_lead_workspaces(mine_set)
+    if wks in lead_wks_set or found.box != box:
+        raise Refused(f"window {wks} is not a {box} box ({name!r}); a LEAD or unproven window is never archived here")
+    mine = sorted(mine_set)  # computed before the archive: a ledger gone cyclic meanwhile must not strand the record
+    blockers = archive_blockers(opts.lead, wks, opts.idle_handled)
     if blockers:
         for b in blockers:
             sys.stderr.write(f"blocker: {b}\n")
-        print(json.dumps({"archived": False, "workspaceId": win["workspaceId"], "windowName": name,
+        print(json.dumps({"archived": False, "workspaceId": wks, "windowName": name,
                           "blockers": blockers}))
         return 1
     if not opts.dry_run:
-        run_ok(["workspace", "archive", win["workspaceId"]])
+        run_ok(["workspace", "archive", wks])
         for x in mine:  # the window may be recorded under a replaced lead (the global lock is held)
-            recorded = read_registry(registry_path(x))
-            if win["workspaceId"] in recorded:
-                write_registry(x, recorded - {win["workspaceId"]})
-    print(json.dumps({"archived": not opts.dry_run, "workspaceId": win["workspaceId"], "windowName": name,
+            unregister_window(x, wks)
+    print(json.dumps({"archived": not opts.dry_run, "workspaceId": wks, "windowName": name,
                       "blockers": []}))
     return 0
 

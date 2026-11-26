@@ -74,7 +74,8 @@ if argv[:2] == ["agent", "archive"]:
         ins = data.get("inspect", {}).get(aid)
         if isinstance(ins, dict):
             ins["Archived"] = True
-            data_path.write_text(json.dumps(data), encoding="utf-8")
+        data["agents"] = [r for r in data.get("agents", []) if r.get("id") != aid]
+        data_path.write_text(json.dumps(data), encoding="utf-8")
     print(json.dumps({"id": aid, "archived": True}))
     sys.exit(0)
 
@@ -139,6 +140,7 @@ class Env:
         inspect_id: str | None = None,
         omit_keys: tuple[str, ...] = (),
         labels: dict | None = None,
+        inspect_labels: dict | None = None,
     ) -> str:
         row: dict = {"id": aid, "name": name, "status": status}
         if labels is not None:
@@ -152,6 +154,10 @@ class Env:
             "PendingPermissions": [] if perms is None else perms,
             "UpdatedAt": iso(self.now - 600) if updated_at == "__default__" else updated_at,
         }
+        if inspect_labels is not None:
+            ins["Labels"] = inspect_labels
+        elif labels is not None:
+            ins["Labels"] = dict(labels)
         for k in omit_keys:
             ins.pop(k, None)
         self.data["inspect"][aid] = ins
@@ -209,8 +215,8 @@ class Env:
 
 def test_archives_idle_and_closed_retired_and_handoff_predecessors(tmp_path: Path):
     env = Env(tmp_path)
-    retired_idle = env.add_agent(uid(1), "RETIRED lead A (-> xyz)", status="idle")
-    retired_closed = env.add_agent(uid(2), "RETIRED lead B", status="closed")
+    retired_idle = env.add_agent(uid(1), "RETIRED lead A (-> xyz)", status="idle", labels={"ade.retired": "1"})
+    retired_closed = env.add_agent(uid(2), "RETIRED lead B", status="closed", labels={"ade.retired": "1"})
     handoff_pred = env.add_agent(uid(3), "Old lead before rename", status="idle")
     active_lead = env.add_agent(uid(4), "LEAD active repo", status="idle")
     write_handoff(env.self_state, env.home, handoff_pred, uid(50), status="archived")
@@ -246,31 +252,34 @@ def test_archives_idle_and_closed_retired_and_handoff_predecessors(tmp_path: Pat
     assert len(logs) == 3
     assert all(e["verified"] is True and e["rc"] == 0 for e in logs)
     assert {e["agent"]: e["proof"] for e in logs} == {
-        retired_idle: "retired-name",
-        retired_closed: "retired-name",
+        retired_idle: "retired-label",
+        retired_closed: "retired-label",
         handoff_pred: "handoff-successor",
     }
 
 
 def test_skips_unsafe_candidates_fail_closed(tmp_path: Path):
     env = Env(tmp_path)
-    running = env.add_agent(uid(1), "RETIRED running", status="running")
-    pending = env.add_agent(uid(2), "RETIRED perm", status="idle", perms=[{"id": "p1"}])
-    missing_perms = env.add_agent(uid(3), "RETIRED no-perms-key", status="idle", omit_keys=("PendingPermissions",))
-    nonlist_perms = env.add_agent(uid(4), "RETIRED bad-perms", status="idle", perms="none")
-    recent = env.add_agent(uid(5), "RETIRED recent", status="idle", updated_at=iso(env.now - 30))
-    future = env.add_agent(uid(6), "RETIRED future", status="idle", updated_at=iso(env.now + 300))
-    missing_upd = env.add_agent(uid(7), "RETIRED no-upd", status="idle", omit_keys=("UpdatedAt",))
-    naive_upd = env.add_agent(uid(8), "RETIRED naive-upd", status="idle", updated_at="2026-11-22T10:00:00")
-    already_arch = env.add_agent(uid(9), "RETIRED archived", status="idle", archived=True)
-    missing_arch = env.add_agent(uid(10), "RETIRED no-arch", status="idle", omit_keys=("Archived",))
-    self_aid = env.add_agent(uid(11), "RETIRED self", status="idle")
-    watcher_aid = env.add_agent(uid(12), "RETIRED watcher", status="idle")
-    excl_file_aid = env.add_agent(uid(13), "RETIRED excl-file", status="idle")
-    excl_cli_aid = env.add_agent(uid(14), "RETIRED excl-cli", status="idle")
-    id_mismatch = env.add_agent(uid(15), "RETIRED mismatch", status="idle", inspect_id=uid(99))
-    renamed_active = env.add_agent(uid(16), "RETIRED renamed", status="idle", inspect_name="LEAD active again")
-    inspect_fail = env.add_agent(uid(17), "RETIRED inspect-err", status="idle")
+    rl = {"ade.retired": "1"}
+    running = env.add_agent(uid(1), "RETIRED running", status="running", labels=rl)
+    pending = env.add_agent(uid(2), "RETIRED perm", status="idle", perms=[{"id": "p1"}], labels=rl)
+    missing_perms = env.add_agent(uid(3), "RETIRED no-perms-key", status="idle", omit_keys=("PendingPermissions",), labels=rl)
+    nonlist_perms = env.add_agent(uid(4), "RETIRED bad-perms", status="idle", perms="none", labels=rl)
+    recent = env.add_agent(uid(5), "RETIRED recent", status="idle", updated_at=iso(env.now - 30), labels=rl)
+    future = env.add_agent(uid(6), "RETIRED future", status="idle", updated_at=iso(env.now + 300), labels=rl)
+    missing_upd = env.add_agent(uid(7), "RETIRED no-upd", status="idle", omit_keys=("UpdatedAt",), labels=rl)
+    naive_upd = env.add_agent(uid(8), "RETIRED naive-upd", status="idle", updated_at="2026-11-22T10:00:00", labels=rl)
+    already_arch = env.add_agent(uid(9), "RETIRED archived", status="idle", archived=True, labels=rl)
+    missing_arch = env.add_agent(uid(10), "RETIRED no-arch", status="idle", omit_keys=("Archived",), labels=rl)
+    self_aid = env.add_agent(uid(11), "RETIRED self", status="idle", labels=rl)
+    watcher_aid = env.add_agent(uid(12), "RETIRED watcher", status="idle", labels=rl)
+    excl_file_aid = env.add_agent(uid(13), "RETIRED excl-file", status="idle", labels=rl)
+    excl_cli_aid = env.add_agent(uid(14), "RETIRED excl-cli", status="idle", labels=rl)
+    id_mismatch = env.add_agent(uid(15), "RETIRED mismatch", status="idle", inspect_id=uid(99), labels=rl)
+    unretired_on_inspect = env.add_agent(
+        uid(16), "RETIRED renamed", status="idle", inspect_name="LEAD active again", labels=rl, inspect_labels={"ade.retired": "0"},
+    )
+    inspect_fail = env.add_agent(uid(17), "RETIRED inspect-err", status="idle", labels=rl)
     env.data["inspect_rc"][inspect_fail] = 1
 
     (env.lw_dir / "watcher.json").write_text(
@@ -301,7 +310,7 @@ def test_skips_unsafe_candidates_fail_closed(tmp_path: Path):
         excl_file_aid: "excluded",
         excl_cli_aid: "excluded",
         id_mismatch: "id-mismatch",
-        renamed_active: "name-changed",
+        unretired_on_inspect: "retirement-unproven",
         inspect_fail: "inspect-failed",
     }
     assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
@@ -309,7 +318,7 @@ def test_skips_unsafe_candidates_fail_closed(tmp_path: Path):
 
 def test_corrupt_watcher_json_fails_closed(tmp_path: Path):
     env = Env(tmp_path)
-    aid = env.add_agent(uid(1), "RETIRED tab", status="idle")
+    aid = env.add_agent(uid(1), "RETIRED tab", status="idle", labels={"ade.retired": "1"})
     other_home = tmp_path / "other-paseo-home"
     other_home.mkdir()
     bad_payloads = [
@@ -376,8 +385,8 @@ def test_watcher_valid_default_home_and_relay_channel(tmp_path: Path):
     # paseo_home=None resolves to ~/.paseo and matches when PASEO_HOME is unset.
     env = Env(tmp_path)
     (tmp_path / ".paseo").mkdir()
-    watcher_aid = env.add_agent(uid(1), "RETIRED watcher", status="idle")
-    other_aid = env.add_agent(uid(2), "RETIRED other", status="idle")
+    watcher_aid = env.add_agent(uid(1), "RETIRED watcher", status="idle", labels={"ade.retired": "1"})
+    other_aid = env.add_agent(uid(2), "RETIRED other", status="idle", labels={"ade.retired": "1"})
     (env.lw_dir / "watcher.json").write_text(
         json.dumps({"channel": "paseo", "target": watcher_aid, "paseo_home": None}),
         encoding="utf-8",
@@ -392,7 +401,7 @@ def test_watcher_valid_default_home_and_relay_channel(tmp_path: Path):
     relay_tmp = tmp_path / "relay_case"
     relay_tmp.mkdir()
     env2 = Env(relay_tmp)
-    a2 = env2.add_agent(uid(3), "RETIRED tab", status="idle")
+    a2 = env2.add_agent(uid(3), "RETIRED tab", status="idle", labels={"ade.retired": "1"})
     (env2.lw_dir / "watcher.json").write_text(
         json.dumps({"channel": "relay", "target": "sess-1"}),
         encoding="utf-8",
@@ -404,8 +413,8 @@ def test_watcher_valid_default_home_and_relay_channel(tmp_path: Path):
 
 def test_apply_recheck_failure_does_not_double_account_selected(tmp_path: Path):
     env = Env(tmp_path)
-    excl_mid = env.add_agent(uid(1), "RETIRED excl-mid", status="idle")
-    watch_mid = env.add_agent(uid(2), "RETIRED watch-mid", status="idle")
+    excl_mid = env.add_agent(uid(1), "RETIRED excl-mid", status="idle", labels={"ade.retired": "1"})
+    watch_mid = env.add_agent(uid(2), "RETIRED watch-mid", status="idle", labels={"ade.retired": "1"})
     # Mutate exclude file and watcher.json during inspect (after initial scan, before pre-archive re-check).
     env.data["on_inspect_write"] = {
         excl_mid: {"path": str(env.exclude_file), "content": f"{excl_mid}\n"},
@@ -428,9 +437,9 @@ def test_apply_recheck_failure_does_not_double_account_selected(tmp_path: Path):
 
 def test_skips_candidate_with_live_non_retired_non_baton_child(tmp_path: Path):
     env = Env(tmp_path)
-    parent_live_child = env.add_agent(uid(1), "RETIRED parent with live child", status="idle")
-    parent_retired_child = env.add_agent(uid(2), "RETIRED parent with retired child", status="idle")
-    parent_baton_child = env.add_agent(uid(3), "RETIRED parent with baton child", status="idle")
+    parent_live_child = env.add_agent(uid(1), "RETIRED parent with live child", status="idle", labels={"ade.retired": "1"})
+    parent_retired_child = env.add_agent(uid(2), "RETIRED parent with retired child", status="idle", labels={"ade.retired": "1"})
+    parent_baton_child = env.add_agent(uid(3), "RETIRED parent with baton child", status="idle", labels={"ade.retired": "1"})
 
     env.add_agent(
         uid(10),
@@ -442,7 +451,7 @@ def test_skips_candidate_with_live_non_retired_non_baton_child(tmp_path: Path):
         uid(11),
         "RETIRED old child",
         status="idle",
-        labels={"paseo.parent-agent-id": parent_retired_child},
+        labels={"paseo.parent-agent-id": parent_retired_child, "ade.retired": "1"},
     )
     env.add_agent(
         uid(12),
@@ -460,7 +469,7 @@ def test_skips_candidate_with_live_non_retired_non_baton_child(tmp_path: Path):
 
 def test_corrupt_exclude_file_fails_closed(tmp_path: Path):
     env = Env(tmp_path)
-    env.add_agent(uid(1), "RETIRED tab", status="idle")
+    env.add_agent(uid(1), "RETIRED tab", status="idle", labels={"ade.retired": "1"})
     env.exclude_file.write_text("not-a-uuid\n", encoding="utf-8")
     res = env.run(apply=True)
     assert res.returncode == 1
@@ -472,7 +481,7 @@ def test_corrupt_exclude_file_fails_closed(tmp_path: Path):
 
 def test_readback_failure_reports_error_and_logs(tmp_path: Path):
     env = Env(tmp_path)
-    aid = env.add_agent(uid(1), "RETIRED stuck", status="idle")
+    aid = env.add_agent(uid(1), "RETIRED stuck", status="idle", labels={"ade.retired": "1"})
     env.data["skip_archive_mutation"] = {aid: True}
     res = env.run(apply=True)
     assert res.returncode == 1
@@ -487,7 +496,7 @@ def test_readback_failure_reports_error_and_logs(tmp_path: Path):
 
 def test_lock_held_skips_cleanly(tmp_path: Path):
     env = Env(tmp_path)
-    env.add_agent(uid(1), "RETIRED tab", status="idle")
+    env.add_agent(uid(1), "RETIRED tab", status="idle", labels={"ade.retired": "1"})
     lock_path = env.state_dir / "archive-retired.lock"
     with lock_path.open("a", encoding="utf-8") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -499,8 +508,8 @@ def test_lock_held_skips_cleanly(tmp_path: Path):
 
 def test_text_summary_and_bad_cli_args(tmp_path: Path):
     env = Env(tmp_path)
-    env.add_agent(uid(1), "RETIRED tab", status="idle")
-    env.add_agent(uid(2), "RETIRED running", status="running")
+    env.add_agent(uid(1), "RETIRED tab", status="idle", labels={"ade.retired": "1"})
+    env.add_agent(uid(2), "RETIRED running", status="running", labels={"ade.retired": "1"})
     r_dry = env.run(apply=False, json_out=False, use_env_bin=True)
     assert r_dry.returncode == 0
     assert r_dry.stdout.strip() == "would archive 1 retired agents (skipped 1)"
@@ -544,3 +553,161 @@ def test_ade_pin_sweep_runs_archive_retired_before_pin_interactive(tmp_path: Pat
         ["ade-pin-interactive"],
         ["ade-pin-workspaces", "pin"],
     ]
+
+
+def test_archives_human_renamed_agent_with_structured_retired_label(tmp_path: Path):
+    env = Env(tmp_path)
+    labeled_retired = env.add_agent(
+        uid(30),
+        "Daniel old custom tab",
+        status="idle",
+        labels={"ade.retired": "1", "ade.retired_to": uid(99)},
+    )
+    # Also ensure inspect carries structured labels via state file (as Paseo does when inspect omits labels).
+    st_dir = env.home / "agents" / "proj"
+    st_dir.mkdir(parents=True, exist_ok=True)
+    (st_dir / f"{labeled_retired}.json").write_text(
+        json.dumps({"id": labeled_retired, "labels": {"ade.retired": "1", "ade.retired_to": uid(99)}}),
+        encoding="utf-8",
+    )
+    # A retired child marked by label (renamed by human) must not block its parent.
+    parent = env.add_agent(uid(31), "Custom parent", status="idle", labels={"ade.retired": "1"})
+    (st_dir / f"{parent}.json").write_text(
+        json.dumps({"id": parent, "labels": {"ade.retired": "1"}}),
+        encoding="utf-8",
+    )
+    child = env.add_agent(
+        uid(32),
+        "My custom child tab",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent, "ade.retired": "1"},
+    )
+    (st_dir / f"{child}.json").write_text(
+        json.dumps({"id": child, "labels": {"paseo.parent-agent-id": parent, "ade.retired": "1"}}),
+        encoding="utf-8",
+    )
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert {x["id"] for x in s["archived"]} == {labeled_retired, parent, child}
+    assert all(x["proof"] == "retired-label" for x in s["archived"])
+
+
+def test_human_prefixed_retired_title_and_malformed_labels_never_archived(tmp_path: Path):
+    """P1 Round 2: destructive archiving requires explicit positive structured retirement proof."""
+    env = Env(tmp_path)
+    human_title = env.add_agent(uid(40), "RETIRED notes on old API", status="idle")
+    human_arrow = env.add_agent(uid(41), "RETIRED lead A (-> xyz)", status="idle")
+    only_to = env.add_agent(uid(42), "Custom tab", status="idle", labels={"ade.retired_to": uid(99)})
+    explicit_false = env.add_agent(uid(43), "Custom tab 2", status="idle", labels={"ade.retired": "0", "ade.retired_to": uid(99)})
+    bad_to = env.add_agent(uid(44), "Custom tab 3", status="idle", labels={"ade.retired": "1", "ade.retired_to": "not-a-uuid"})
+    self_to = env.add_agent(uid(45), "Custom tab 4", status="idle", labels={"ade.retired": "1", "ade.retired_to": uid(45)})
+
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert s["candidates"] == 0
+    assert s["selected"] == []
+    assert s["archived"] == []
+    assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+    for aid in (human_title, human_arrow, only_to, explicit_false, bad_to, self_to):
+        assert not any(c == ["agent", "inspect", aid, "--json"] for c in env.calls())
+
+
+def test_revived_working_child_with_retirement_proof_still_blocks_parent(tmp_path: Path):
+    """P1 Round 2: an unarchived child carrying retirement labels/handoff that is still running,
+    recently active, or fails archive readback MUST block archiving its parent."""
+    env = Env(tmp_path)
+    parent_running = env.add_agent(uid(50), "Parent of revived running child", status="idle", labels={"ade.retired": "1"})
+    child_running = env.add_agent(
+        uid(51),
+        "Revived worker",
+        status="running",
+        labels={"paseo.parent-agent-id": parent_running, "ade.retired": "1"},
+    )
+    write_handoff(env.self_state, env.home, child_running, uid(90), status="archived")
+
+    parent_recent = env.add_agent(uid(52), "Parent of revived recent child", status="idle", labels={"ade.retired": "1"})
+    env.add_agent(
+        uid(53),
+        "Revived recent worker",
+        status="idle",
+        updated_at=iso(env.now - 10),
+        labels={"paseo.parent-agent-id": parent_recent, "ade.retired": "1"},
+    )
+
+    parent_stuck = env.add_agent(uid(54), "Parent of stuck child", status="idle", labels={"ade.retired": "1"})
+    child_stuck = env.add_agent(
+        uid(55),
+        "Stuck child",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent_stuck, "ade.retired": "1"},
+    )
+    env.data["skip_archive_mutation"] = {child_stuck: True}
+
+    res = env.run(apply=True)
+    assert res.returncode == 1  # readback failure on child_stuck
+    s = json.loads(res.stdout)
+    assert s["archived"] == []
+    reasons = {x["id"]: x["reason"] for x in s["skipped"]}
+    assert reasons[parent_running] == "has-children"
+    assert reasons[parent_recent] == "has-children"
+    assert reasons[parent_stuck] == "has-children"
+    assert not any(c[:3] == ["agent", "archive", parent_running] for c in env.calls())
+    assert not any(c[:3] == ["agent", "archive", parent_recent] for c in env.calls())
+    assert not any(c[:3] == ["agent", "archive", parent_stuck] for c in env.calls())
+
+
+def test_fresh_ls_recheck_blocks_parent_when_new_child_appears_before_archive(tmp_path: Path):
+    """P1 Round 2: fresh `paseo ls -g` recheck right before `agent archive` catches newly spawned children."""
+    env = Env(tmp_path)
+    parent = env.add_agent(uid(60), "Parent", status="idle", labels={"ade.retired": "1"})
+    # During parent's inspect, simulate a new live child appearing in data["agents"].
+    mutated = json.loads(json.dumps(env.data))
+    mutated["agents"].append({
+        "id": uid(61),
+        "name": "Newly spawned child",
+        "status": "running",
+        "labels": {"paseo.parent-agent-id": parent},
+    })
+    env.data["on_inspect_write"] = {
+        parent: {"path": str(env.data_path), "content": json.dumps(mutated)},
+    }
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    assert s["archived"] == []
+    assert s["skipped"] == [{"id": parent, "reason": "has-children"}]
+    assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+
+def test_same_sweep_revived_child_in_fresh_ls_overrides_earlier_archive_confirmation(tmp_path: Path):
+    """P1 Round 3: after a retired child is archived and readback confirms Archived=true, if a later
+    message/operator action revives that child so it reappears unarchived in the parent's fresh `paseo ls`,
+    the fresh listing MUST override `confirmed_archived` and block archiving the parent."""
+    env = Env(tmp_path)
+    parent = env.add_agent(uid(70), "Parent lead", status="idle", labels={"ade.retired": "1"})
+    child = env.add_agent(
+        uid(71),
+        "Child worker",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent, "ade.retired": "1"},
+    )
+    # Child is evaluated first (children-first ordering), archived, and removed from data["agents"].
+    # When parent is inspected right afterwards, revive `child` back into data["agents"] as running/unarchived!
+    revived_snapshot = json.loads(json.dumps(env.data))
+    for r in revived_snapshot["agents"]:
+        if r["id"] == child:
+            r["status"] = "running"
+    env.data["on_inspect_write"] = {
+        parent: {"path": str(env.data_path), "content": json.dumps(revived_snapshot)},
+    }
+
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    # Child was archived earlier in the sweep, but its revival in fresh `ls` MUST block archiving parent!
+    assert [x["id"] for x in s["archived"]] == [child]
+    assert s["skipped"] == [{"id": parent, "reason": "has-children"}]
+    assert any(c[:3] == ["agent", "archive", child] for c in env.calls())
+    assert not any(c[:3] == ["agent", "archive", parent] for c in env.calls())
