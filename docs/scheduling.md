@@ -108,14 +108,16 @@ will run within five minutes if the install lock caused the load-time run to ski
 uninstalling `com.djbclark.ade-agent-sweep` before reinstalling the two standalone templates.
 Keep their state directories during either cutover. Apply this migration through `ade-sched`.
 
-**Re-handoff plan and `ADE_SUPERVISOR_REHANDOFF` (Carried 70, 2026-11-19).** For each stuck agent the scan also works out
+**Re-handoff plan and `ADE_SUPERVISOR_REHANDOFF` (Carried 70, 2026-11-19; updated 2026-11-26).** For each stuck agent the scan also works out
 the re-handoff it *would* do (who, the exhausted account, the healthy alternative `ade-pi-stuck` offered, or
 `no-healthy-alternative`) and logs one `re-handoff plan (dry-run) {...}` line to `supervisor.log`, only when the plan
 differs from the last one logged (state file `last-plan`), so a quiet fleet adds no line per run. The mode comes from the
-environment of the job: unset or `dry-run` is the default and moves nothing (no archive, no relaunch). `live` is
-recognized but refused today: it calls `bin/ade-supervisor-rehandoff`, a stub that moves nothing, exits 1 and makes the
-scan log `re-handoff executor failed`. Do not set `live` in the plist until a reviewed executor exists; that executor
-alone may archive or relaunch, and only an agent the plan names whose `family` is `pi` (a non-Pi agent is never in the plan). The notices to the lead are unchanged either way.
+environment of the job: unset or `dry-run` is the default and moves nothing (no archive, no relaunch). `live` invokes
+`bin/ade-supervisor-rehandoff`, which drives `bin/ade-self-session handoff --predecessor=UUID --route-kind code --quiesced`
+strictly for entries whose `family` is `pi` and `action` is `would-rehandoff` (never archiving predecessors directly).
+Because cross-agent handoffs require a recorded Paseo requester (`PASEO_AGENT_ID`), `bin/ade-supervisor-rehandoff` fails
+closed with exit 1 when `PASEO_AGENT_ID` is unset (making unattended launchd jobs log `re-handoff executor failed` without
+moving agents; invoke it from a live lead/supervisor agent session when executing a plan). The notices to the lead are unchanged either way.
 
 `config/launchd/com.djbclark.ade-pin-sweep.plist` (2026-11-20; updated 2026-11-23) runs every 900 s via
 `bin/ade-pin-sweep`: first `bin/ade-archive-retired --apply` (safely re-archiving idle/closed `RETIRED ` tabs and

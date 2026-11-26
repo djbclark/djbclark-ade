@@ -4254,3 +4254,139 @@ def test_recovered_actor_must_be_codex(setup):
     for _ in range(2):
         with pytest.raises(ss.SessionError, match='not a Codex provider'):
             service.actor()
+
+
+def test_cross_agent_handoff_uses_target_workspace_and_allows_error_status(setup):
+    """A supervisor can re-hand an errored target agent using the target's own workspace, never caller env."""
+    service, native, checkpoint = setup
+    supervisor_ws = 'wks_9999999999999999'
+    service.env['PASEO_AGENT_ID'] = OTHER
+    service.env['PASEO_WORKSPACE_ID'] = supervisor_ws
+    native.workspaces.append({'workspaceId': supervisor_ws, 'project': 'sup', 'name': 'SUP', 'cwd': '/tmp'})
+    native.rows[PRED]['Status'] = 'error'
+    agent_file = service.home / 'agents' / 'p' / f'{PRED}.json'
+    agent_file.parent.mkdir(parents=True, exist_ok=True)
+    agent_file.write_text(json.dumps({'id': PRED, 'workspaceId': WS}), encoding='utf-8')
+
+    record = service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+    assert record['predecessor'] == PRED
+    assert record['requested_by'] == OTHER
+    assert record['cross_agent'] is True
+    assert record['workspace'] == WS
+    assert record['workspace_placement'] == 'existing'
+    assert native.created == 1 and native.archived == 0
+    run_call = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+    assert run_call[run_call.index('--workspace') + 1] == WS
+
+
+def test_cross_agent_handoff_falls_back_to_new_local_without_inheriting_caller_workspace(setup):
+    """When target workspace is unknown, cross-agent handoff creates a new-local workspace instead of using caller env."""
+    service, native, checkpoint = setup
+    supervisor_ws = 'wks_8888888888888888'
+    service.env['PASEO_AGENT_ID'] = OTHER
+    service.env['PASEO_WORKSPACE_ID'] = supervisor_ws
+    native.workspaces.append({'workspaceId': supervisor_ws, 'project': 'sup', 'name': 'SUP', 'cwd': '/tmp'})
+
+    record = service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+    assert record['cross_agent'] is True
+    assert record['workspace'] is None
+    assert record['workspace_placement'] == 'new-local'
+    run_call = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+    assert '--new-workspace' in run_call and supervisor_ws not in run_call
+
+
+def test_cross_agent_workspace_skips_placeholder_and_corrupt_file_and_fails_closed_on_daemon_error(setup):
+    """Placeholder WorkspaceId '-' and corrupt agent state files fall through, while daemon workspace_ls errors fail closed."""
+    service, native, checkpoint = setup
+    service.env['PASEO_AGENT_ID'] = OTHER
+    service.env.pop('PASEO_WORKSPACE_ID', None)
+    native.rows[PRED]['WorkspaceId'] = '-'
+    corrupt = service.home / 'agents' / 'a' / f'{PRED}.json'
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text('{not json', encoding='utf-8')
+    valid = service.home / 'agents' / 'b' / f'{PRED}.json'
+    valid.parent.mkdir(parents=True, exist_ok=True)
+    valid.write_text(json.dumps({'id': PRED, 'workspaceId': WS}), encoding='utf-8')
+
+    record = service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+    assert record['workspace'] == WS and record['workspace_placement'] == 'existing'
+
+    # Daemon workspace_exists failure must propagate fail-closed (never silently mint a new-local workspace)
+    Path(record['record']).unlink()
+
+    def boom(_ws):
+        raise ss.SessionError('workspace listing failed')
+
+    service.workspace_exists = boom
+    with pytest.raises(ss.SessionError, match='workspace listing failed'):
+        service.handoff(checkpoint, quiesced=True, predecessor=PRED)
+
+
+def test_cross_agent_requester_can_verify_turn_retry_and_reconcile_but_successor_cannot(setup, tmp_path):
+    """Recorded cross-agent requester may verify-turn, retry, and reconcile; successor and third parties stay refused."""
+    service, native, checkpoint = setup
+    service.env['PASEO_AGENT_ID'] = OTHER
+    service.env.pop('PASEO_WORKSPACE_ID', None)
+    native.rows[PRED]['Status'] = 'error'
+    routed_calls = []
+
+    def fake_route(kind, excluded, cwd):
+        routed_calls.append((kind, list(excluded)))
+        pool = 'pi-pool-1' if not excluded else 'pi-pool-2'
+        return {'service': pool, 'model': f'{pool}/model-x', 'thinking': None}
+
+    service.route_successor = fake_route
+    record = service.handoff(checkpoint, quiesced=True, route_kind='code', predecessor=PRED)
+    rec_path = Path(record['record'])
+    assert record['status'] == 'awaiting-ack'
+    assert record['cross_agent'] is True and record['requested_by'] == OTHER
+
+    # Successor acknowledges -> ack-pending-turn
+    ack_file = tmp_path / 'ack.json'
+    ack_file.write_text(json.dumps({
+        'token': record['token'],
+        'checkpoint_sha256': record['checkpoint_sha256'],
+        'head': record['head'],
+        'next_action': 'continue',
+    }), encoding='utf-8')
+    service.env['PASEO_AGENT_ID'] = SUCC
+    native.rows[SUCC]['Status'] = 'idle'
+    acked = service.accept(rec_path, ack_file)
+    assert acked['status'] == 'ack-pending-turn'
+
+    # Successor cannot verify itself; unrelated third party cannot verify
+    service.evidence_reader = lambda *a, **k: {'state': 'complete', 'session': 's1', 'entry': 'e1'}
+    with pytest.raises(ss.SessionError, match='verifies'):
+        service.verify_turn(rec_path)
+    service.env['PASEO_AGENT_ID'] = '44444444-4444-4444-8444-444444444444'
+    with pytest.raises(ss.SessionError, match='verifies'):
+        service.verify_turn(rec_path)
+
+    # Recorded requester verifies first real turn -> acknowledged
+    service.env['PASEO_AGENT_ID'] = OTHER
+    verified = service.verify_turn(rec_path)
+    assert verified['status'] == 'acknowledged'
+
+    # Failed first turn -> recorded requester retries targeting PRED (not OTHER)
+    service.evidence_reader = lambda *a, **k: {'state': 'failed', 'cause': 'provider-error'}
+    failed = service.verify_turn(rec_path)
+    assert failed['status'] == 'first-turn-failed'
+    retried = service.retry(rec_path)
+    assert retried['predecessor'] == PRED
+    assert retried['requested_by'] == OTHER
+    assert retried['cross_agent'] is True
+    assert retried['pool'] == 'pi-pool-2'
+    assert len(routed_calls) == 2
+
+    # Creation-unknown -> recorded requester reconciles, unrelated agent refused
+    retried['status'] = 'creation-unknown'
+    retried['successor'] = None
+    service.save(rec_path, retried)
+    native.labelled = [{'id': SUCC}]
+    service.env['PASEO_AGENT_ID'] = '44444444-4444-4444-8444-444444444444'
+    with pytest.raises(ss.SessionError, match='reconciles'):
+        service.reconcile(rec_path)
+    service.env['PASEO_AGENT_ID'] = OTHER
+    reconciled = service.reconcile(rec_path)
+    assert reconciled['status'] == 'awaiting-ack' and reconciled['successor'] == SUCC
+
