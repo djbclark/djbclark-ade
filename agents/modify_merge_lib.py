@@ -2,8 +2,9 @@
 
 Desired (rendered template) keys are owned and applied; keys that exist only in the live
 file stay. Dicts merge recursively. When both values are lists, retain desired entries
-first, then live-only entries, without deep-equality duplicates. Scalars and differing
-types use desired. No secrets,
+first, then live-only entries, without deep-equality duplicates — except any dictionary
+`args` list (positional argv, replaced atomically whole like Codex top-level `notify`).
+Scalars and differing types use desired. No secrets,
 no companion render, and no write to the operator's live ~/.claude or ~/.codex paths
 (order 11): those targets are refused until a later chezmoi apply slice owns that step.
 """
@@ -29,15 +30,20 @@ _LIVE_REFUSE = (
 def merge_owned(live: Any, desired: Any) -> Any:
     """Keep unowned live keys; apply owned desired keys.
 
-    Desired dicts recurse and keep live-only keys when live is a dict. Lists
-    retain the first occurrence of each deeply equal entry in desired then live
-    order. Entries are opaque whole values: compare and deep-copy their original
-    content without normalizing nested dicts/lists or merging by identity.
-    An empty desired list preserves live entries; deletion requires removing entries
-    explicitly outside this helper. New/type-changing desired dictionaries recurse by
-    key until each list boundary; new/type-changing lists deduplicate outer entries
-    on the first merge, too. Otherwise desired replaces live. Results are
-    deep copies, so changing them never changes either input.
+    Desired dicts recurse and keep live-only keys when live is a dict. Ordinary
+    lists retain the first occurrence of each deeply equal entry in desired then
+    live order. Entries are opaque whole values: compare and deep-copy their
+    original content without normalizing nested dicts/lists or merging by
+    identity. For ordinary collection lists, an empty desired list preserves live
+    entries; deletion requires removing entries explicitly outside this helper.
+    Dictionary `args` lists (e.g., `mcp_servers.<name>.args`) are atomic
+    positional argv vectors like Codex top-level `notify`: when owned, desired
+    replaces live whole (preserving repeated flags and allowing `[]` to clear
+    live args); when unowned, live `args` stays intact. New/type-changing desired
+    dictionaries recurse by key until each list boundary; new/type-changing
+    ordinary lists deduplicate outer entries on the first merge, too. Otherwise
+    desired replaces live. Results are deep copies, so changing them never
+    changes either input.
     """
     if isinstance(desired, dict):
         out = copy.deepcopy(live) if isinstance(live, dict) else {}

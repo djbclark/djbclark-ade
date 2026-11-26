@@ -258,14 +258,53 @@ class WrapperCollectionsTest(unittest.TestCase):
                                                  [desired["hooks"]["PreToolUse"][0], live["hooks"]["PreToolUse"][0]])
 
     def test_mcp_args_are_replaced_whole_not_merged(self):
-        """args is a positional argv, like notify: repeated flags survive and the live vector is replaced,
-        not unioned (Codex review on #771)."""
-        live = {"mcp_servers": {"node_repl": {"command": "node", "args": ["--include", "old", "--weird"]}}}
+        """args is a positional argv, like notify: repeated flags survive, desired [] clears live args,
+        unowned live args stay intact with duplicates, copies are independent, and both wrappers agree."""
+        live = {
+            "mcp_servers": {
+                "node_repl": {"command": "node", "args": ["--include", "old", "--weird"]},
+                "local_only": {"command": "tool", "args": ["-v", "-v", "target"]},
+            }
+        }
         desired = {"mcp_servers": {"node_repl": {"command": "node", "args": ["--include", "a", "--include", "b"]}}}
         got = lib.merge_owned(live, desired)
         self.assertEqual(got["mcp_servers"]["node_repl"]["args"], ["--include", "a", "--include", "b"])
+        self.assertEqual(got["mcp_servers"]["local_only"]["args"], ["-v", "-v", "target"])
+        # Deep-copy independence: mutating merged output never mutates inputs
+        got["mcp_servers"]["node_repl"]["args"].append("--mutated")
+        got["mcp_servers"]["local_only"]["args"].append("--mutated")
+        self.assertEqual(desired["mcp_servers"]["node_repl"]["args"], ["--include", "a", "--include", "b"])
+        self.assertEqual(live["mcp_servers"]["local_only"]["args"], ["-v", "-v", "target"])
+
         cleared = lib.merge_owned(live, {"mcp_servers": {"node_repl": {"args": []}}})
         self.assertEqual(cleared["mcp_servers"]["node_repl"]["args"], [])
+
+        # End-to-end wrapper subprocess check (Claude JSON + Codex TOML)
+        for wrapper, suffix in ((CLAUDE, "json"), (CODEX, "toml")):
+            encode = json.dumps if suffix == "json" else lib.dump_toml
+            decode = json.loads if suffix == "json" else tomllib.loads
+            with tempfile.TemporaryDirectory() as tmp:
+                desired_path = Path(tmp) / f"desired.{suffix}"
+                desired_path.write_text(encode(desired), encoding="utf-8")
+                proc = subprocess.run(
+                    [sys.executable, str(wrapper), "--desired", str(desired_path)],
+                    input=encode(live),
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                merged = decode(proc.stdout)
+                self.assertEqual(merged["mcp_servers"]["node_repl"]["args"], ["--include", "a", "--include", "b"])
+                self.assertEqual(merged["mcp_servers"]["local_only"]["args"], ["-v", "-v", "target"])
+                desired_path.write_text(encode({"mcp_servers": {"node_repl": {"args": []}}}), encoding="utf-8")
+                proc2 = subprocess.run(
+                    [sys.executable, str(wrapper), "--desired", str(desired_path)],
+                    input=encode(live),
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(proc2.returncode, 0, proc2.stderr)
+                self.assertEqual(decode(proc2.stdout)["mcp_servers"]["node_repl"]["args"], [])
 
 
 
