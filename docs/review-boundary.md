@@ -436,7 +436,7 @@ Cursor Bugbot (`cursor[bot]`), Copilot code review (`copilot-pull-request-review
 (`macroscopeapp[bot]`; see "Macroscope" below: a scarce, manually requested reviewer). Each entry names the REST login
 (with `[bot]`) and the GraphQL login (without) and where they were verified (`source`), how its findings are recognised
 (`thread_markers`, `review_body_patterns`, `issue_comment_patterns`) and which check runs show it is working
-(`check_names`, `check_apps`, `status_contexts`). Identity is the exact login AND actor type `Bot`: a human account `coderabbitai`, `CodeRabbitAI`,
+(`check_runs` for AND-paired `{name, app}`, plus `check_names`, `check_apps`, `status_contexts`). Identity is the exact login AND actor type `Bot`: a human account `coderabbitai`, `CodeRabbitAI`,
 `coderabbitai-dev` and the REST spelling in a GraphQL position are not the bot. Unknown keys, wrong types, a bad regex, a
 duplicate id or login, or a `rest_login` that is not `graphql_login` + `[bot]` refuse the whole file (fail closed).
 
@@ -468,8 +468,8 @@ reason of at least three characters; a top-level finding needs a later issue com
 
 **Trust root.** The default list is read from the checkout that runs the tool: run `ade-merge-ready` from master or the installed copy, never from the PR's own worktree. An override's regex patterns may not contain a quantified group or more than one `.*` / `.+` (a heuristic backtracking guard, not a proof: a hostile default-branch override can still hang the tool, and the default branch is the repo's own); `--merged-limit` is capped at 40 PRs (about 5 GraphQL calls each).
 
-**Pending bots.** The tool never sleeps. A listed bot whose check run (`check_names` / `check_apps`) or commit status (`status_contexts`, read from `GET commits/<head>/status`) on the exact head is not completed and started or updated less
-than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the next `classify` sees the result. A running check
+**Pending bots.** The tool never sleeps. A listed bot whose check run (`check_runs` requiring both exact name and app slug, or `check_names` / `check_apps`) or commit status (`status_contexts`, read from `GET commits/<head>/status`) on the exact head is not completed and started or updated less
+than `pending_max_minutes` (default 15) ago yields `review_bot_pending`; the next `classify` sees the result. `cursor-bugbot` and `macroscope` pin both name and app slug via `check_runs` so an outside workflow job with a matching name cannot spoof `review_bot_pending` and sibling checks from the same app (such as `Macroscope - Approvability Check`) never hold a merge (`coderabbit` keeps `check_names` + `status_contexts` until its check-run app slug is verified on a live PR). A running check
 older than that is a `stalled` note, and a bot with no check run or status on the head (never installed, never started, or one that
 reviews without a check) never blocks.
 

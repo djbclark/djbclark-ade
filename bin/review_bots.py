@@ -97,6 +97,7 @@ class Bot:
     check_apps: tuple[str, ...]
     status_contexts: tuple[str, ...]
     source: str
+    check_runs: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -107,9 +108,10 @@ class Config:
 
 BOT_REQUIRED = frozenset({"id", "name", "rest_login", "graphql_login"})
 BOT_OPTIONAL = frozenset({
-    "thread_markers", "review_body_patterns", "issue_comment_patterns", "check_names", "check_apps", "status_contexts",
-    "source",
+    "thread_markers", "review_body_patterns", "issue_comment_patterns", "check_names", "check_apps", "check_runs",
+    "status_contexts", "source",
 })
+CHECK_RUN_KEYS = frozenset({"name", "app"})
 
 
 def _table(value: Any, allowed: frozenset[str], required: frozenset[str], where: str) -> dict[str, Any]:
@@ -134,6 +136,16 @@ def _strs(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or len(value) > 50:
         raise ConfigError(f"{where}: expected a list of at most 50 strings")
     return tuple(_str(v, f"{where}[{i}]") for i, v in enumerate(value))
+
+
+def _check_runs(value: Any, where: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, list) or len(value) > 50:
+        raise ConfigError(f"{where}: expected a list of at most 50 tables")
+    out: list[tuple[str, str]] = []
+    for i, item in enumerate(value):
+        t = _table(item, CHECK_RUN_KEYS, CHECK_RUN_KEYS, f"{where}[{i}]")
+        out.append((_str(t["name"], f"{where}[{i}].name"), _str(t["app"], f"{where}[{i}].app")))
+    return tuple(out)
 
 
 _QUANTIFIED_GROUP = re.compile(r"\)\s*[*+?{]")
@@ -178,6 +190,7 @@ def _parse_bot(raw: Any, where: str, strict: bool = False) -> Bot:
         check_apps=_strs(t.get("check_apps", []), f"{where}.check_apps"),
         status_contexts=_strs(t.get("status_contexts", []), f"{where}.status_contexts"),
         source=_str(t["source"], f"{where}.source") if "source" in t else "",
+        check_runs=_check_runs(t.get("check_runs", []), f"{where}.check_runs"),
     )
 
 
@@ -646,7 +659,9 @@ def bot_check_states(
     for b in bots:
         mine = [
             r for r in runs
-            if r.get("name") in b.check_names or (r.get("app") or {}).get("slug") in b.check_apps
+            if r.get("name") in b.check_names
+            or (r.get("app") or {}).get("slug") in b.check_apps
+            or (r.get("name"), (r.get("app") or {}).get("slug")) in b.check_runs
         ]
         mine_st = [s for s in statuses if b.status_contexts and s.get("context") in b.status_contexts]
         if not mine and not mine_st:

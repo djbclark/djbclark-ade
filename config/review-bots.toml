@@ -18,6 +18,9 @@
 #   issue_comment_patterns   list of regex: a match in the bot's LATEST issue comment = actionable findings
 #   check_names              list: check-run names that show the bot is running on a head
 #   check_apps               list: check-run app slugs that show the same
+#   check_runs               list of `{ name = "...", app = "..." }` tables: AND-paired check-run name + app slug
+#                            (preferred over bare check_names/check_apps so a workflow job cannot spoof the name and
+#                            sibling checks from the same app do not hold merges)
 #   status_contexts          list: commit-status contexts (GET commits/<head>/status) that show the same; a `pending`
 #                            one younger than pending_max_minutes blocks (CodeRabbit reports as a status in many repos)
 #   source                   where the logins were verified
@@ -73,8 +76,9 @@ graphql_login = "cursor"
 thread_markers = []
 review_body_patterns = []
 issue_comment_patterns = []
-check_names = ["Cursor Bugbot"]
+check_names = []
 check_apps = []
+check_runs = [{ name = "Cursor Bugbot", app = "cursor" }]
 source = "gabrielmoreira/agent-skills-mirror fstack pr-ship review-bots.md (Cursor Bugbot is `cursor`; check `Cursor Bugbot`); cursor check runs on djbclark-ade PR 711 carry app slug cursor, 2026-11-14"
 
 [[bot]]
@@ -92,7 +96,7 @@ source = "brandondees/code-quality-atlas PR 640 and auerbachb/claude-code-config
 # Macroscope (operator ruling 2026-11-22: trusted like CodeRabbit, must-triage). SCARCE: the workspace holds a US$100
 # non-renewable balance billed per KB of reviewed diff, so NOTHING in this repo requests a review (a macroscope-app
 # mention comment is the operator's or a lead's deliberate act, skills/macroscope-review; so is a mode label). A PR with no Macroscope check run
-# is `not_started`, never pending. Only the Correctness check is listed in check_names: Approvability (a verdict
+# is `not_started`, never pending. Only the Correctness check is listed in check_runs (pinned to app slug macroscopeapp): Approvability (a verdict
 # review/comment, no inline threads) and Check Run Agents are not findings and must not hold a merge.
 # NOTE the mention handle `macroscope-app` (written with a leading at-sign only in the skill) is NOT the login: the login is `macroscopeapp[bot]` (the `-nonprod` app,
 # `macroscopeapp-nonprod[bot]`, is Macroscope's own test app and is not listed).
@@ -104,6 +108,7 @@ graphql_login = "macroscopeapp"
 thread_markers = []
 review_body_patterns = []
 issue_comment_patterns = []
-check_names = ["Macroscope - Correctness Check"]
+check_names = []
 check_apps = []
+check_runs = [{ name = "Macroscope - Correctness Check", app = "macroscopeapp" }]
 source = "REST macroscopeapp[bot] user.type Bot: wave-av/wave-moq-edge PR 149 (issue comment and APPROVED review), good-night-oppie/agentdex-cli PRs 742 and 748 (inline review comments with a severity line, review body macroscope-meta marker); GitHub App slug macroscopeapp (https://github.com/apps/macroscopeapp, owner prassoai; users/macroscopeapp[bot] id 170038800 type Bot); check runs `Macroscope - Correctness Check` / `Macroscope - Approvability Check` app slug macroscopeapp: ardia-browser/ardia PR 3320, Wladefant/speakr PR 11; docs https://docs.macroscope.com/correctness, 2026-11-22"
