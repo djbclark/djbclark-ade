@@ -124,9 +124,11 @@ all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/a
 3. **Window name** (the Paseo workspace/window title, e.g. `WORKER djbclark-ade (post-hold)`)
 4. **Tab name** (the agent tab title, e.g. `worker <slice> <lead-id> [wt: <worktree>]`)
 
-**Human-interaction starts (operator ruling 2026-11-26, relayed via `bdd829df`):** whenever starting something that requires the human to interact — including existing/ordinary starts, not just handoffs — always include the exact Paseo designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus the workspace ID (`wks_…`) for the **actual** tab/window the human needs, and explicitly state **where the interaction occurs** (for example, phone overlay vs Paseo tab). Example:
+**Human-interaction starts and `WORKER` boundary (operator rulings 2026-11-26, relayed via `bdd829d (bdd829df-939a-459a-878d-51caa5f20f5f)`):**
 
-`{d4ab1e4 (d4ab1e4f-4334-4056-b09e-b9480e3e1f70) plektra-djbclark/WORKER plektra-djbclark (workers)/worker HandQA Neon qualification}`, workspace `wks_b06299d82e6672e7` (interaction occurs in the phone overlay / Paseo tab).
+1. Whenever starting something that requires the human to interact — including existing/ordinary starts, not just handoffs — always include the exact Paseo designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus the workspace ID (`wks_…`) for the **actual** tab/window the human needs, and explicitly state **where the interaction occurs** (for example, phone overlay vs Paseo tab). Example:
+   `{d4ab1e4 (d4ab1e4f-4334-4056-b09e-b9480e3e1f70) plektra-djbclark/WORKER plektra-djbclark (workers)/worker HandQA Neon qualification}`, workspace `wks_b06299d82e6672e7` (interaction occurs in the phone overlay / Paseo tab).
+2. Reserve `WORKER` nomenclature strictly for subagents the operator will **never** need to interact with directly. When a child session requires human attention (e.g., HandQA), open it as a descriptively named tab in the **launching agent's window** when practical, keeping the parent relationship in Paseo metadata and still providing the full designation, workspace ID, and interaction venue. If a separate workspace is needed, `INTERACTIVE <repo> (<task>)` is a proposed human-facing label (proposed only; reserving `WORKER` for non-interactive subagents is the operator's ruling; see [docs/workspace-layout.md](workspace-layout.md)).
 
 ## Install
 

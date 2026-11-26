@@ -65,9 +65,9 @@ structured `ade.lead` label and `$ADE_WORKER_RUN_STATE/<lead>.windows.json` entr
 `ade-worker-run`, `ade_ws_autoname.py`, and `ade-pin-workspaces` reuse it.
 
 1. **`LEAD <repo> (<work>)`**: a lead's own window, the row of tabs that includes the lead. Workers the **operator** asks
-   for interactively ("open a new sonnet tab to …") are launched as a tab in this window:
+   for interactively ("open a new sonnet tab to …") — and any child session that requires human attention (for example, HandQA; operator ruling 2026-11-26, relayed via `bdd829d (bdd829df-939a-459a-878d-51caa5f20f5f)`) — are launched as a descriptively named tab in the launching agent's window when practical:
    `ade-worker-run --lead <id> --slice <name> --placement lead -- …` (aliases `--placement main`, `--interactive`; labels
-   `ade.placement=main`, `ade.box=LEAD`, `ade.repo=<repo>`). It resolves the window from the lead's own agent record
+   `ade.placement=main`, `ade.box=LEAD`, `ade.repo=<repo>`, keeping the Paseo parent relationship in metadata). It resolves the window from the lead's own agent record
    (never from a possibly-unset `PASEO_WORKSPACE_ID`), refuses only if the caller is not the lead or structured registry metadata
    marks the window as a WORKER/OTHER box (it **never refuses because a human renamed the window away from `LEAD …`**; a 2026-11-13
    `MAIN …` name is still migrated to `LEAD …`, while custom human names are left untouched), and never archives it. `ade-worker-run rename-lead --lead <id>
@@ -76,11 +76,11 @@ structured `ade.lead` label and `$ADE_WORKER_RUN_STATE/<lead>.windows.json` entr
    repo, never the home directory's name: a bare `LEAD tendcf` over a cwd that is not a git repo keeps `tendcf`, and a home-directory
    cwd with no repo-like name is refused ("pass --repo"). A window already in the current form is corrected when `--repo` or
    `--window-middle` differs from its name; only `rename-lead` corrects, a `--placement lead` launch takes a current or custom human name as it is.
-2. **`WORKER <repo> (<work>)`**: one box per lead and repo for **every** worker, reviewer and advisor the lead starts on its own
-   initiative (the next section). Concise tab name (updated 2026-11-25): `worker <slice>` plus ` [wt: <worktree dir basename>]`
+   If a human-interactive child session genuinely requires a separate workspace, a proposed human-facing label is `INTERACTIVE <repo> (<task>)` (proposed label only; reserving `WORKER` for non-interactive subagents and placing interactive children in the launching agent's window when practical is the operator's 2026-11-26 ruling).
+2. **`WORKER <repo> (<work>)`**: one box per lead and repo reserved strictly for non-interactive subagents (workers, reviewers, and advisors) the operator will **never** need to interact with directly (operator ruling 2026-11-26; see the next section). Concise tab name (updated 2026-11-25): `worker <slice>` plus ` [wt: <worktree dir basename>]`
    when the worker writes in a worktree (the 36-char lead UUID is no longer embedded in the tab title; structured `--label ade.lead=<lead id>`,
    `slice=<slice>`, `ade.box=WORKER`, `ade.repo=<repo>` carry ownership and placement). Example: window `WORKER
-   djbclark-ade (Wave 7)`, tab `worker placement-docs [wt: djbclark-ade-placement-docs-wt]`.
+   djbclark-ade (Wave 7)`, tab `worker placement-docs [wt: djbclark-ade-placement-docs-wt]`. Do not place human-interactive sessions (such as guided HITL/HandQA runs) under `WORKER` nomenclature.
 3. **`OTHER <repo> (<work>)`**: probes, side tasks and agents the operator started that a lead has connected to. A launch goes in
    with `ade-worker-run … --placement other` (alias `--other`; labels `ade.placement=other`, `ade.box=OTHER`, `ade.repo=<repo>`;
    concise tab `other <slice> [wt: …]`; default `(<work>)` text `other`). `ade-tidy` classes an operator agent of the repo as OTHER. It is the same
