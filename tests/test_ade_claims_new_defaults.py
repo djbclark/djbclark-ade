@@ -44,6 +44,7 @@ def _head(d):
 def _run(*args, **extra_env):
     env = {k: v for k, v in os.environ.items() if not k.startswith(("PASEO_", "ADE_CLAIM", "CLAUDE_CODE"))}
     env["ADE_STATE_DIR"] = os.environ["ADE_STATE_DIR"]
+    env["PASEO_AGENT_ID"] = ""  # These subprocess fixtures are standalone even under live Codex.
     env.update(extra_env)
     return subprocess.run([sys.executable, str(ROOT / "bin" / "ade_claims.py"), *args],
                           capture_output=True, text=True, env=env, timeout=60)
@@ -297,3 +298,110 @@ def test_inherited_paseo_agent_id_makes_a_subagent_claim_the_parents(repo):
     assert len(active) == 1 and active[0]["id"] != parent_claim
     assert active[0]["owner"]["agent"] == PARENT
     assert ade_claims.read_claim(parent_claim)["state"] == "released"
+
+
+@pytest.mark.parametrize("mode", ["recovered", "opt-out", "ambiguous"])
+def test_own_paseo_identity_for_claim_guard_and_cli(repo, monkeypatch, capsys, mode):
+    for key in ("PASEO_AGENT_ID", "ACP_RUN_AGENT", "ADE_CLAIM_ID"):
+        monkeypatch.delenv(key, raising=False)
+    if mode == "opt-out":
+        monkeypatch.setenv("PASEO_AGENT_ID", "")
+    identity = ade_claims._load_sibling("paseo_identity")
+
+    def recover(env, *, own_env):
+        assert env is os.environ and own_env
+        assert mode != "opt-out"
+        if mode == "ambiguous":
+            raise identity.PaseoIdentityAmbiguousError("conflicting agent ids")
+        return {"PASEO_AGENT_ID": AGENT}
+
+    monkeypatch.setattr(identity, "recover_paseo_env", recover)
+    monkeypatch.setattr(ade_claims, "_own_claude_session_id", lambda: None)
+    assert ade_claims.caller_ident() == (AGENT if mode == "recovered" else None)
+    assert ade_claims.is_agent_env() == (mode != "opt-out")
+    assert ade_claims.caller_ident({}) is None
+    assert not ade_claims.is_agent_env({})
+
+    new_rc = ade_claims._cli(["new", "--path", str(repo)])
+    if mode == "recovered":
+        assert new_rc == 0
+        assert ade_claims.list_claims("active")[0]["owner"]["agent"] == AGENT
+    else:
+        assert new_rc == 2
+        assert not ade_claims.list_claims("active")
+        expected = "ambiguous Paseo identity" if mode == "ambiguous" else "no owner"
+        assert expected in capsys.readouterr().err
+
+    callers = []
+
+    def rebind(predecessor, *, caller, **kwargs):
+        callers.append(caller)
+        return []
+
+    monkeypatch.setattr(ade_claims, "rebind_successor", rebind)
+    successor_rc = ade_claims._cli(["successor-of", AGENT, "--record", str(repo / "handoff.json")])
+    if mode == "ambiguous":
+        assert successor_rc == 2
+        assert "ambiguous Paseo identity" in capsys.readouterr().err
+        assert not callers
+    else:
+        assert successor_rc == 0
+        assert callers == [AGENT if mode == "recovered" else ""]
+
+
+@pytest.mark.parametrize(("marker", "opt_out", "expected"), [(False, False, 0), (True, False, 77), (True, True, 0)])
+def test_git_shim_routes_only_filtered_codex_to_ancestor_lookup(repo, tmp_path, marker, opt_out, expected):
+    probe = tmp_path / "guard-probe"
+    probe.write_text("#!/bin/sh\nexit 77\n")
+    probe.chmod(0o700)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CODEX_")
+           and k not in ("PASEO_AGENT_ID", "ADE_CLAIM_ID", "ACP_RUN_AGENT", "GIT_INDEX_FILE", "PRE_COMMIT")}
+    if marker:
+        env["CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS"] = "1"
+    if opt_out:
+        env["PASEO_AGENT_ID"] = ""
+    env["ADE_PYTHON"] = str(probe)
+    result = subprocess.run([str(ROOT / "bin" / "ade-git-guard"), "config", "--local", "test.key", "value"],
+                            cwd=repo, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == expected, result.stderr
+
+
+@pytest.mark.parametrize("explicit_opt_out", [False, True])
+def test_standalone_git_guard_does_not_install_hooks(repo, monkeypatch, explicit_opt_out):
+    if explicit_opt_out:
+        monkeypatch.setenv("PASEO_AGENT_ID", "")
+    else:
+        monkeypatch.delenv("PASEO_AGENT_ID", raising=False)
+    monkeypatch.delenv("ADE_CLAIM_ID", raising=False)
+    monkeypatch.delenv("ACP_RUN_AGENT", raising=False)
+    identity = ade_claims._load_sibling("paseo_identity")
+    monkeypatch.setattr(identity, "recover_paseo_env", lambda *args, **kwargs: {})
+
+    def unexpected_install(*args):
+        pytest.fail("standalone guard attempted to install git hooks")
+
+    monkeypatch.setattr(ade_claims, "_lazy_install", unexpected_install)
+    assert ade_claims.guard_argv(["config", "--local", "test.key", "value"], cwd=str(repo)) == 0
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_git_guard_resolves_once_per_invocation_even_on_refusal(repo, monkeypatch, ambiguous):
+    owner = "44444444-4444-4444-8444-444444444444"
+    assert _run("new", "--path", str(repo), "--owner-agent", owner).returncode == 0
+    for key in ("PASEO_AGENT_ID", "ADE_CLAIM_ID", "ACP_RUN_AGENT", "GIT_INDEX_FILE", "PRE_COMMIT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(ade_claims, "_own_claude_session_id", lambda: None)
+    identity = ade_claims._load_sibling("paseo_identity")
+    calls = []
+
+    def recover(env, *, own_env):
+        calls.append(env)
+        if ambiguous:
+            raise identity.PaseoIdentityAmbiguousError("test conflict")
+        return {"PASEO_AGENT_ID": AGENT}
+
+    monkeypatch.setattr(identity, "recover_paseo_env", recover)
+    for invocation in (1, 2):
+        assert ade_claims.guard_argv(["add", "example"], cwd=str(repo)) == 77
+        assert len(calls) == invocation

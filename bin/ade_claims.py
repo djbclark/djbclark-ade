@@ -179,6 +179,7 @@ from __future__ import annotations
 # argparse, subprocess and tempfile are imported where used: the `guard` path of a plain `git add`/`commit`
 # runs once per git call of an agent and must start fast.
 import contextlib
+import contextvars
 import dataclasses
 import fcntl
 import json
@@ -201,7 +202,6 @@ LIST_STATES = STATES + ("expired",)   # `expired` is read from expires_at, never
 DEFAULT_TTL_H = 72.0
 ROLES = ("lead", "worker", "builder")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-IDENT_ENV = ("ADE_CLAIM_ID", "CLAUDE_CODE_SESSION_ID", "PASEO_AGENT_ID")
 OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the deleted Wave 6 dispatch shim
 
 
@@ -211,15 +211,18 @@ OVERRIDE = "git-guard"  # ACP_OPERATOR_APPROVED value, the convention of the del
 
 
 def _coord():
+    return _load_sibling("ade_coord")
+
+
+def _load_sibling(name):
     """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
     import importlib.util
     import sys
-    path = Path(__file__).resolve().with_name("ade_coord.py")
-    name = "ade_coord"
+    path = Path(__file__).resolve().with_name(name + ".py")
     found = sys.modules.get(name)
     if found is not None and Path(found.__file__).resolve() == path:
         return found
-    key = name if found is None else "_ade_coord_" + str(path)
+    key = name if found is None else "_ade_sibling_" + str(path)
     if key in sys.modules:
         return sys.modules[key]
     spec = importlib.util.spec_from_file_location(key, path)
@@ -762,22 +765,58 @@ def _owner_session_arg(given: Optional[str]) -> Optional[str]:
     return given
 
 
+class _AmbiguousPaseoIdentity(ValueError):
+    """An ambiguous ancestor identity must never authorize a claim write."""
+
+
+# Scope this cache to a single shim guard call, including alias recursion and
+# refusal formatting. Direct calls and later guard evaluations get fresh reads.
+_guard_paseo_cache = contextvars.ContextVar("guard_paseo_cache", default=None)
+
+
+def _own_paseo_agent_id(env) -> Optional[str]:
+    if "PASEO_AGENT_ID" in env:
+        return (env.get("PASEO_AGENT_ID") or "").strip() or None
+    if env is not os.environ:
+        return None
+    cache = _guard_paseo_cache.get()
+    if cache is None:
+        return _recover_paseo_agent_id(env)
+    if not cache:
+        try:
+            cache.append(_recover_paseo_agent_id(env))
+        except _AmbiguousPaseoIdentity as err:
+            cache.append(_AmbiguousPaseoIdentity(str(err)))
+    cached = cache[0]
+    if isinstance(cached, _AmbiguousPaseoIdentity):
+        raise _AmbiguousPaseoIdentity(str(cached))
+    return cached
+
+
+def _recover_paseo_agent_id(env) -> Optional[str]:
+    identity = _load_sibling("paseo_identity")
+    try:
+        return identity.recover_paseo_env(env, own_env=True).get("PASEO_AGENT_ID")
+    except identity.PaseoIdentityAmbiguousError as err:
+        raise _AmbiguousPaseoIdentity(f"ambiguous Paseo identity: {err}") from None
+
+
 def caller_ident(env: Optional[dict[str, str]] = None) -> Optional[str]:
     """ADE_CLAIM_ID first (acp-dispatch exports it); harness ids leak from a lead into its slices, so they
     are only the fallback for an interactive session (design 3.4.3). For this process's own environment (ENV None, or os.environ itself) the Claude session id is the
     registry's, not the possibly stale CLAUDE_CODE_SESSION_ID; any other mapping is read as given."""
     env = os.environ if env is None else env
-    own = env is os.environ    # callers pass os.environ itself (evaluate, hook_push); a copy or a test dict is read as given
-    for name in IDENT_ENV:
-        v = _own_claude_session_id() if own and name == "CLAUDE_CODE_SESSION_ID" else env.get(name)
-        if v:
-            if name == "CLAUDE_CODE_SESSION_ID":
-                paseo = (env.get("PASEO_AGENT_ID") or "").strip()
-                if paseo:
-                    return CallerIdent(v, paseo)    # M1: is_mine also accepts it as owner.record of a bind-owner-shaped claim
-            elif name == "PASEO_AGENT_ID" and v.strip():
-                return CallerIdent(v, v.strip())    # claim-guard (2026-11-21): is_mine also accepts it as owner.agent of a claim
-            return v
+    if env.get("ADE_CLAIM_ID"):
+        return env["ADE_CLAIM_ID"]
+    try:
+        paseo = _own_paseo_agent_id(env)
+    except _AmbiguousPaseoIdentity:
+        return None  # is_agent_env still enforces the guard
+    claude = _own_claude_session_id() if env is os.environ else env.get("CLAUDE_CODE_SESSION_ID")
+    if claude:
+        return CallerIdent(claude, paseo) if paseo else claude
+    if paseo:
+        return CallerIdent(env.get("PASEO_AGENT_ID", paseo), paseo)
     return None
 
 
@@ -800,12 +839,12 @@ class CallerIdent(str):
 
 def is_agent_env(env: Optional[dict[str, str]] = None) -> bool:
     env = os.environ if env is None else env
-    paseo = (env.get("PASEO_AGENT_ID") or "").strip()
-    return (
-        env.get("ACP_RUN_AGENT", "") not in ("", "0")
-        or bool(env.get("ADE_CLAIM_ID"))
-        or bool(paseo)
-    )
+    if env.get("ACP_RUN_AGENT", "") not in ("", "0") or env.get("ADE_CLAIM_ID"):
+        return True
+    try:
+        return bool(_own_paseo_agent_id(env))
+    except _AmbiguousPaseoIdentity:
+        return True
 
 
 _DEFAULT_PORTS = {"https": "443", "http": "80", "ssh": "22", "git": "9418", "ftp": "21"}
@@ -1803,7 +1842,7 @@ def _ws_decision(call: GitCall, ws: Optional[Workspace], ident: Optional[str], b
         authorize_claim = _coord().authorize_claim
         CoordinationError = _coord().CoordinationError
         try:
-            authorize_claim(claim, os.environ.get("PASEO_AGENT_ID") or ident)
+            authorize_claim(claim, os.environ.get("PASEO_AGENT_ID") or getattr(ident, "paseo_agent", None) or ident)
         except CoordinationError:
             return _foreign(claim, "coordination-authority-unavailable", "enrolled claims require current broker authority; no local fallback")
     if claim is not None and not is_mine(claim, ident):
@@ -2708,7 +2747,10 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
     must not tell that owner it is somebody else or to message itself: it says the claim names the caller and how the guard
     identified it."""
     env = os.environ if env is None else env
-    paseo = (env.get("PASEO_AGENT_ID") or "").strip()
+    try:
+        paseo = _own_paseo_agent_id(env)
+    except _AmbiguousPaseoIdentity:
+        paseo = None
     log = f"Logged in {_esc(guard_log_path())}.\n"
     if paseo and paseo in (d.detail.get("owner_ids") or []):
         who = (f"  claim {_esc(d.claim_id)} names you (Paseo agent {_esc(paseo)}) as an owner, but the guard identified you as {me}, "
@@ -2739,15 +2781,15 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
     return who, nxt
 
 
-def refusal_text(decision: Decision, call: GitCall) -> str:
-    who, nxt = _refusal_lines(decision, _esc(decision.detail.get("ident") or "no claim id"))
+def refusal_text(decision: Decision, call: GitCall, env=None) -> str:
+    who, nxt = _refusal_lines(decision, _esc(decision.detail.get("ident") or "no claim id"), env)
     return (f"ade-git-guard: REFUSED `{_esc(call.display())}` [{_esc(decision.rule)}] in "
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
             f"  Safe alternative: {_esc(decision.message)}.\n" + nxt)
 
 
-def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) -> int:
+def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None, *, env=None) -> int:
     """Log and print a non-plain decision; returns 0 (override) or EXIT_REFUSED."""
     log_event(d, call, extra)
     if d.override:
@@ -2755,14 +2797,21 @@ def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) 
         sys.stderr.write(f"ade-git-guard: {_esc(via)}: allowed `{_esc(call.display())}` "
                          f"[{_esc(d.rule)}] (logged)\n")
         return 0
-    sys.stderr.write(refusal_text(d, call))
+    sys.stderr.write(refusal_text(d, call, env))
     return EXIT_REFUSED
 
 
 def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> int:
     """What ade-git-guard runs for a git call that was not plainly read-only. 0 = run real git, 77 = refused. An allowed
     call also installs the ref hooks into its repository when they are missing (lazy install; never fails the call)."""
-    env = os.environ if env is None else env
+    token = _guard_paseo_cache.set([])
+    try:
+        return _guard_argv(argv, os.environ if env is None else env, cwd)
+    finally:
+        _guard_paseo_cache.reset(token)
+
+
+def _guard_argv(argv, env, cwd):
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
         authorize_claim = _coord().authorize_claim
         CoordinationError = _coord().CoordinationError
@@ -2779,6 +2828,8 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
         except CoordinationError:
             return EXIT_REFUSED
         return 0
+    if not is_agent_env(env):
+        return 0  # Standalone calls reaching Python must not install hooks.
     try:
         base = cwd or os.getcwd()
     except OSError:
@@ -2788,7 +2839,7 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
     if d.allowed and not d.override:
         _lazy_install(call, env)
         return 0
-    rc = _report(d, call)
+    rc = _report(d, call, env=env)
     if rc == 0:
         _lazy_install(call, env)
     return rc
@@ -3249,7 +3300,7 @@ def _cli(argv: Sequence[str]) -> int:
             if a.ownerless and (owner_agent or owner_record is not None or owner_session):
                 raise ValueError("--ownerless excludes --owner-agent, --owner-record and --owner-session: drop one side")
             if not (owner_agent or owner_record or owner_session) and not a.ownerless:
-                env_agent = (os.environ.get("PASEO_AGENT_ID") or "").strip()
+                env_agent = _own_paseo_agent_id(os.environ)
                 if not is_paseo_agent_id(env_agent):
                     raise ValueError("no owner: pass --owner-agent (a Paseo agent id; PASEO_AGENT_ID is not set to one here), "
                                      "--owner-record or --owner-session; --ownerless is for a claim bind-owner completes later")
@@ -3297,7 +3348,7 @@ def _cli(argv: Sequence[str]) -> int:
             c = rebind_owner(a.id, from_agent=a.from_agent, to_agent=a.owner_agent, owner_state=a.owner_state)
             print(c.get("id"))
         elif a.cmd == "successor-of":
-            ids = rebind_successor(a.predecessor, caller=os.environ.get("PASEO_AGENT_ID", ""), record_path=a.record,
+            ids = rebind_successor(a.predecessor, caller=_own_paseo_agent_id(os.environ) or "", record_path=a.record,
                                    self_session_state=Path(a.self_session_state) if a.self_session_state else None)
             print(json.dumps({"rebound": ids}))
         elif a.cmd == "release":

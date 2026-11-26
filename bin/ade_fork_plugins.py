@@ -25,7 +25,7 @@ LINKS = {'CLAUDE.md': 'AGENTS.md', 'libexec/agent-bin/git': 'bin/ade-git-guard'}
 HELPERS = {
     'ade-yolo': (),
     'ade-window-name': ('bin/ade_ws_autoname.py', 'bin/ade_ws_names.py'),
-    'ade-claim': ('bin/ade_claims.py', 'bin/ade-git-guard',
+    'ade-claim': ('bin/ade_claims.py', 'bin/paseo_identity.py', 'bin/ade-git-guard',
                   'libexec/agent-bin/git', 'libexec/git-hooks/pre-push',
                   'libexec/git-hooks/reference-transaction'),
 }

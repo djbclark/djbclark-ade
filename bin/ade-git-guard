@@ -34,7 +34,8 @@
 #   ade-git-guard --help
 #
 # Order of work, cheapest first (one bash exec and no Python for the common call):
-#   1. Not an agent process (no ACP_RUN_AGENT=1, nonempty PASEO_AGENT_ID, nor ADE_CLAIM_ID): exec the real git untouched.
+#   1. No agent markers: exec the real git untouched. An absent Paseo ID
+#      plus an exported CODEX_* marker can reach the ancestor lookup.
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
 #   3. A plain read (status log show diff rev-parse ls-files ls-tree cat-file blame describe rev-list for-each-ref grep
 #      shortlog name-rev merge-base version help), after -C/-c/--git-dir=...: exec. No argument is scanned.
@@ -141,12 +142,22 @@ if [ "${self##*/}" = "ade-git-guard" ]; then
   esac
 fi
 
-# 1-2: not an agent, or inside a git hook
-if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN_AGENT}" = 0 ]; } \
-  && case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) false ;; *) true ;; esac; } \
-  || [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${PRE_COMMIT:-}" ]; then
+# 1-2: an ordinary shell, explicit Paseo opt-out, or recursion from a hook.
+if [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${PRE_COMMIT:-}" ]; then
   exec "$real" "$@"
 fi
+agent=0
+case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) agent=1 ;; esac
+if [ -n "${ADE_CLAIM_ID:-}" ] || { [ -n "${ACP_RUN_AGENT:-}" ] && [ "${ACP_RUN_AGENT}" != 0 ]; }; then
+  agent=1
+elif [ "${PASEO_AGENT_ID+x}" != x ]; then
+  # Same exported marker test as the ref hooks. Codex adds markers after
+  # applying its shell environment policy.
+  for v in $(compgen -A export); do
+    case "$v" in CODEX_*) agent=1; break ;; esac
+  done
+fi
+[ "$agent" = 1 ] || exec "$real" "$@"
 
 # 3: first non-option word (skipping -C DIR, -c K=V and the value-less global flags) is one of the plain reads that cannot
 # move a ref or touch another agent's tree (O2: a stray --output file is a nuisance, not lost work, so no argument is scanned)
