@@ -497,6 +497,10 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
 
     for row in list_windows():
         wks = row.get("workspaceId")
+        # Unconditional chain-wide LEAD veto ahead of EVERY selection branch (by_member, legacy migration,
+        # and unowned adoption): a chain LEAD window can never be selected or migrated as a WORKER/OTHER box.
+        if wks and wks in chain_lead_wks:
+            continue
         cur = wsn.parse(row["name"])
         legacy = None if cur else wsn.parse_legacy(row["name"])
         by_member = wks in members
@@ -622,24 +626,25 @@ def find_window(lead: str, repo: str | None, middle: str | None, explicit: bool 
         raise Refused(f"window {wks} ({row['name']!r}) is registered to lead {others[wks]}, not {lead}{note} "
                       "(pick a different --window-middle)")
     owned_here = new is not None or wks in members
-    if new is None:  # prove it is not another lead's
-        foreign = foreign_agents(wks, lead)
-        if foreign:
-            raise Refused(f"window {wks} ({row['name']!r}) holds another lead's agents: {', '.join(foreign)}; "
-                          "it is not this lead's WORKERS window (pick a different --window-middle)")
-        if not owned_here:  # an unclaimed name: adoptable only when nothing foreign to this lead is in it
-            strangers = unclaimed_agents(wks, lead)
-            if strangers:
-                raise Refused(f"window {wks} ({row['name']!r}) holds agents not labelled for this lead: {', '.join(strangers)}; "
-                              "it may be the operator's or another lead's. Pick a different --window-middle, or archive "
-                              "those agents first")
+    # Prove it is not another lead's, even when legacy migration would rename the window.
+    foreign = foreign_agents(wks, lead)
+    if foreign:
+        raise Refused(f"window {wks} ({row['name']!r}) holds another lead's agents: {', '.join(foreign)}; "
+                      "it is not this lead's WORKERS window (pick a different --window-middle)")
+    if new is None and not owned_here:  # an unclaimed name: adoptable only when nothing foreign to this lead is in it
+        strangers = unclaimed_agents(wks, lead)
+        if strangers:
+            raise Refused(f"window {wks} ({row['name']!r}) holds agents not labelled for this lead: {', '.join(strangers)}; "
+                          "it may be the operator's or another lead's. Pick a different --window-middle, or archive "
+                          "those agents first")
     cur_hit = wsn.parse(row["name"])
-    if new is None and cur_hit and not cur_hit.current:  # `WORKERS r (w)` -> `WORKER r (w)`: renamed when a launch reuses it
+    resolved_box = win_box or box
+    if new is None and cur_hit and not cur_hit.current:  # `WORKERS r (w)` -> `<resolved_box> r (w)`: renamed when a launch reuses it
         try:
-            new = wsn.current_name(cur_hit)
+            new = wsn.build(resolved_box, win_repo or cur_hit.repo, win_work or cur_hit.work)
         except ValueError as e:
             raise Refused(f"window {wks} ({row['name']!r}) cannot be renamed to its current kind: {e}; rename it by hand")
-    return Found(row, new, owned_here, win_box or box, win_repo, win_work)
+    return Found(row, new, owned_here, resolved_box, win_repo, win_work)
 
 
 def state_paths(agent_id: str) -> list[Path]:

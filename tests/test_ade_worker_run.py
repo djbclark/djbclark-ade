@@ -580,7 +580,8 @@ def test_legacy_window_matched_and_renamed_before_launch(env, legacy):
     env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": legacy, "cwd": "/repo"}]
     r = launch(env, "beta")
     assert r.returncode == 0, r.stderr
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"], ["agent", "inspect"]]  # rename first (2nd ls: name-free check)
+    # foreign_agents (`ls`) runs before rename/launch even on legacy migration (2nd workspace ls: name-free check)
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"], ["agent", "inspect"]]
     assert rename_calls(env) == [["workspace", "rename", "wks_old1", WIN]]  # `repo ` prefix of the middle is folded into KIND repo
     run = run_argv(env)
     assert run[run.index("--workspace") + 1] == "wks_old1" and "--new-workspace" not in run
@@ -3490,3 +3491,56 @@ def test_q126_round2_unproven_legacy_archive_refused_chain_lead_veto_and_label_b
     reg_file.write_text(json.dumps({"windows": ["wks_clash"], "entries": None}))
     r_bad = no_path_env.run("archive-window", "--lead", LEAD)
     assert r_bad.returncode == 1 and "unreadable" in r_bad.stderr
+
+
+def test_q126_round3_legacy_migration_foreign_occupants_chain_lead_veto_and_resolved_box(no_path_env):
+    """Round 3 P1 (Rule-2-clean NoPathEnv, no PATH mutation):
+    1. Legacy `workers ... <LEAD>` window holding foreign-lead occupants is refused by `foreign_agents`
+       even though migration sets `rename_to` (never renamed, never launched into).
+    2. Chain LEAD window outside `members` (no registry, no labelled workers) whose human title matches
+       legacy `workers ... <LEAD>` is vetoed ahead of legacy migration (never renamed, never reused as WORKER).
+    3. Reusing a window with resolved structural box `WORKER` whose display title uses a conflicting
+       2026-11-13 kind (`USER repo (Wave 7)`) migrates its title to `WORKER repo (Wave 7)` (resolved box, not `OTHER`).
+    """
+    # 1. Legacy migration window holding foreign lead's agent -> refused before rename/launch
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": "wks_legfor", "name": f"workers repo Wave 7 {LEAD}", "cwd": "/repo"},
+    ]
+    no_path_env.data["agents"] = [{"id": "for1", "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
+    no_path_env.state("for1", "wks_legfor", {"ade.lead": OTHER_LEAD})
+    r_for = no_path_env.run("--lead", LEAD, "--slice", "s1", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_for.returncode == 1 and "another lead's agents" in r_for.stderr
+    assert rename_calls(no_path_env) == [] and ["run"] not in no_path_env.verbs()
+
+    # 2. Chain LEAD window outside `members` with a legacy `workers ... <LEAD>` title -> vetoed!
+    no_path_env.data["agents"] = []
+    no_path_env.state(LEAD, LEAD_WKS)  # current lead's own window, NOT in registry or member workers
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": LEAD_WKS, "name": f"workers repo Wave 7 {LEAD}", "cwd": "/repo"},
+    ]
+    no_path_env.data["created_id"] = "wks_freshw"
+    no_path_env.data["run_err"] = "Created workspace wks_freshw - master (master)\n"
+    no_path_env.calls_path.unlink()
+    r_lead = no_path_env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_lead.returncode == 0, r_lead.stderr
+    out_lead = json.loads(r_lead.stdout)
+    assert out_lead["workspaceId"] == "wks_freshw"  # minted a new WORKER box instead of hijacking LEAD_WKS!
+    assert all(c[2] != LEAD_WKS for c in rename_calls(no_path_env))
+
+    # 3. Resolved structural box `WORKER` beats conflicting 2026-11-13 kind `USER repo (Wave 7)` on migration
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / f"{LEAD}.windows.json").write_text(json.dumps({
+        "windows": ["wks_userkind"],
+        "entries": {"wks_userkind": {"windowId": "wks_userkind", "box": "WORKER", "repo": "repo", "lead": LEAD, "work": "Wave 7"}},
+    }))
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": "wks_userkind", "name": "USER repo (Wave 7)", "cwd": "/repo"},
+    ]
+    no_path_env.calls_path.unlink()
+    r_mig = no_path_env.run("--lead", LEAD, "--slice", "s3", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_mig.returncode == 0, r_mig.stderr
+    out_mig = json.loads(r_mig.stdout)
+    assert out_mig["workspaceId"] == "wks_userkind"
+    assert out_mig["windowName"] == "WORKER repo (Wave 7)"
+    assert rename_calls(no_path_env) == [["workspace", "rename", "wks_userkind", "WORKER repo (Wave 7)"]]

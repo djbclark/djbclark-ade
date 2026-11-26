@@ -254,6 +254,25 @@ def test_node_and_python_registry_validation_aligned(pin, tmp_path):
     (state_dir / f"{lead_sym}.windows.json").symlink_to(target)
     # FIFO must not hang and must be skipped
     os.mkfifo(state_dir / f"{lead_fifo}.windows.json")
+    # Malformed UTF-8 bytes must be rejected fatally by BOTH Python and Node
+    lead_utf8 = "66666666-2222-3333-4444-555555555555"
+    (state_dir / f"{lead_utf8}.windows.json").write_bytes(
+        b'{"windows":["wks_badutf8"],"entries":{"wks_badutf8":{"windowId":"wks_badutf8","box":"WORKER","work":"\xff"}}}'
+    )
+    # Trailing-newline IDs must be rejected by BOTH Python and Node
+    lead_nl_wks = "77777777-2222-3333-4444-555555555555"
+    (state_dir / f"{lead_nl_wks}.windows.json").write_text(
+        json.dumps({"windows": ["wks_nl\n"], "entries": {"wks_nl\n": {"windowId": "wks_nl\n", "box": "WORKER"}}}),
+        encoding="utf-8",
+    )
+    lead_nl_lead = "88888888-2222-3333-4444-555555555555"
+    (state_dir / f"{lead_nl_lead}.windows.json").write_text(
+        json.dumps({
+            "windows": ["wks_nllead"],
+            "entries": {"wks_nllead": {"windowId": "wks_nllead", "box": "WORKER", "lead": f"{lead_ok}\n"}},
+        }),
+        encoding="utf-8",
+    )
 
     # Python side
     py_reg = pin.wsn.all_registered_windows(state_dir)
@@ -276,6 +295,9 @@ def test_node_and_python_registry_validation_aligned(pin, tmp_path):
         "        { id: 'wks_nonuuid', title: 'Custom non-uuid' },\n"
         "        { id: 'wks_orphan', title: 'Custom orphan' },\n"
         "        { id: 'wks_sym', title: 'Custom sym' },\n"
+        "        { id: 'wks_badutf8', title: 'Custom bad utf8' },\n"
+        "        { id: 'wks_nl\\n', title: 'Custom nl wks' },\n"
+        "        { id: 'wks_nllead', title: 'Custom nl lead' },\n"
         "      ] };\n"
         "    },\n"
         "    async setWorkspacePinned(id) { pinned.push(id); },\n"
@@ -292,4 +314,6 @@ def test_node_and_python_registry_validation_aligned(pin, tmp_path):
     }
     res = subprocess.run([node, str(BIN / "ade-pin-workspaces.mjs"), "pin"], capture_output=True, text=True, env=env, timeout=15)
     assert res.returncode == 0, res.stderr
-    assert json.loads(pinned_log.read_text(encoding="utf-8")) == ["wks_o1", "wks_nonuuid", "wks_orphan", "wks_sym"]
+    assert json.loads(pinned_log.read_text(encoding="utf-8")) == [
+        "wks_o1", "wks_nonuuid", "wks_orphan", "wks_sym", "wks_badutf8", "wks_nl\n", "wks_nllead",
+    ]

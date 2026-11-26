@@ -1,29 +1,33 @@
 #!/usr/bin/env -S python3 -I
-"""ade-archive-retired: safely re-archive idle RETIRED and completed-handoff agents that Paseo un-archived.
+"""ade-archive-retired: safely re-archive idle structurally retired and completed-handoff agents that Paseo un-archived.
 
-Operator ruling (2026-11-23): `RETIRED ` tabs (and completed `ade-self-session` handoff
-predecessors) that Paseo un-archives on a late message should be re-archived automatically and
-safely. Dry-run by default; pass `--apply` to archive.
+Operator rulings (2026-11-23, 2026-11-25): retired agents (completed `ade-self-session` handoff
+predecessors or agents carrying explicit positive `ade.retired=1` structured labels) that Paseo
+un-archives on a late message should be re-archived automatically and safely. Dry-run by default;
+pass `--apply` to archive. Display titles (such as a bare `RETIRED ` prefix) are UI labels only
+and NEVER qualify an agent for destructive archiving without positive structured retirement proof.
 
 Selection (zero-token, idempotent, fail-closed):
-  1. List live/unarchived agents via `paseo ls -g --json`.
-  2. Candidate requires a full lowercase UUID not equal to `PASEO_AGENT_ID`, plus positive retired
-     proof: name starts with `RETIRED ` OR `ade_lead_succession.successor_of(aid)` returns a
-     completed handoff successor UUID (`status == "archived"` on this `PASEO_HOME`).
+  1. List live/unarchived agents via `paseo ls -g --json` and evaluate children before parents.
+  2. Candidate requires a full lowercase UUID not equal to `PASEO_AGENT_ID`, plus positive
+     structured retirement proof: explicit truthy `ade.retired` (`1`/`true`/`yes`, with valid
+     distinct-UUID `ade.retired_to` when set) OR `ade_lead_succession.successor_of(aid)` returning
+     a completed handoff successor UUID (`status == "archived"` on this `PASEO_HOME`).
   3. Re-verify directly via `paseo agent inspect <aid> --json` right before archiving:
      - `Id == aid`, `Archived is False`, `Status in ("idle", "closed")`, `PendingPermissions == []`
        (explicit empty list; missing/non-list/non-empty fails closed).
      - `UpdatedAt` is a valid timezone-aware ISO timestamp at least `--min-idle` seconds (default
        120, finite non-negative) in the past and not in the future.
-     - Retirement proof still holds on the fresh inspect (`Name` starts with `RETIRED ` or a
-       completed handoff record exists).
+     - Positive structured retirement proof still holds on the fresh inspect (`ade.retired=1`
+       label or a completed handoff record).
   4. Never archive the standing load watcher (`$LW_STATE_DIR/watcher.json`, fail-closed when the
      file exists and is unreadable, non-regular/symlink, malformed, has a channel other than
      `"paseo"`/`"relay"`, has a non-UUID `paseo` target, or has an invalid/mismatched
-     `paseo_home`), any candidate with a live non-`RETIRED `, non-`baton-writer=1` child in
-     `paseo ls -g --json` (`labels["paseo.parent-agent-id"]`), or any UUID listed via `--exclude` /
-     `~/.local/state/ade/helper-prune.exclude` (`ADE_HELPER_PRUNE_EXCLUDE`, fail-closed on
-     unreadable/malformed file).
+     `paseo_home`), any candidate with any unarchived non-helper (`baton-writer=1` /
+     `ade.internal=1`) child in `paseo ls -g --json` (re-checked via a fresh `paseo ls -g --json`
+     right before each archive, overriding any earlier child-archive confirmation in the sweep),
+     or any UUID listed via `--exclude` / `~/.local/state/ade/helper-prune.exclude`
+     (`ADE_HELPER_PRUNE_EXCLUDE`, fail-closed on unreadable/malformed file).
   5. Archive via `paseo agent archive <aid> --json` (no `--force`, 30 s timeout) and verify readback
      `Archived is True` via `paseo agent inspect <aid> --json`. Under `--apply`, holds a
      non-blocking exclusive flock (`archive-retired.lock`) and appends one compact JSON line per
@@ -685,7 +689,9 @@ def run_sweep(
                 summary["errors"].append({"id": aid, "what": f"child recheck failed (rc {ls2_rc}): {detail}"})
                 summary["skipped"].append({"id": aid, "reason": "child-recheck-failed"})
                 continue
-            if aid.lower() in parents_with_live_children(fresh_rows, archived_ids=confirmed_archived):
+            # Fresh listing is authoritative and overrides any earlier confirmed_archived in this sweep:
+            # if a previously archived child was revived before this parent's check, it blocks the parent.
+            if aid.lower() in parents_with_live_children(fresh_rows):
                 summary["skipped"].append({"id": aid, "reason": "has-children"})
                 continue
 

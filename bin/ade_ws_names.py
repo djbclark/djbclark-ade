@@ -198,17 +198,17 @@ def normalize_window_entry(wks: str, raw: object) -> dict:
             raise ValueError(f"mismatched windowId for {wks}: {raw['windowId']!r}")
     if "box" in raw:
         raw_box = raw["box"]
-        if not isinstance(raw_box, str) or raw_box.strip().upper() not in BOX_OF:
+        if not isinstance(raw_box, str) or "\n" in raw_box or "\r" in raw_box or raw_box.strip().upper() not in BOX_OF:
             raise ValueError(f"invalid box for {wks}: {raw_box!r}")
         out["box"] = BOX_OF[raw_box.strip().upper()]
     if "repo" in raw:
         raw_repo = raw["repo"]
-        if not isinstance(raw_repo, str) or not REPO_RE.fullmatch(raw_repo.strip()):
+        if not isinstance(raw_repo, str) or "\n" in raw_repo or "\r" in raw_repo or not REPO_RE.fullmatch(raw_repo.strip()):
             raise ValueError(f"invalid repo for {wks}: {raw_repo!r}")
         out["repo"] = raw_repo.strip()
     if "lead" in raw:
         raw_lead = raw["lead"]
-        if not isinstance(raw_lead, str) or not UUID_PAT.fullmatch(raw_lead.strip()):
+        if not isinstance(raw_lead, str) or "\n" in raw_lead or "\r" in raw_lead or not UUID_PAT.fullmatch(raw_lead.strip()):
             raise ValueError(f"invalid lead for {wks}: {raw_lead!r}")
         out["lead"] = raw_lead.strip()
     for key in ("cwd", "work"):

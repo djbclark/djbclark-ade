@@ -39,6 +39,8 @@ const WKS_RE = /^wks_[A-Za-z0-9]+$/;
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const BOX_OF = Object.freeze({ LEAD: "LEAD", WORKER: "WORKER", OTHER: "OTHER", MAIN: "LEAD", WORKERS: "WORKER", USER: "OTHER" });
 const MAX_REGISTRY_BYTES = 1_048_576;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const fullMatch = (re, s) => typeof s === "string" && !/[\r\n]/.test(s) && re.test(s);
 
 function readRegularUtf8(filePath, anchorReal) {
   if (realpathSync(path.dirname(filePath)) !== anchorReal) {
@@ -60,7 +62,7 @@ function readRegularUtf8(filePath, anchorReal) {
       if (total > MAX_REGISTRY_BYTES) throw new Error("registry file too large");
       chunks.push(Buffer.from(buf.subarray(0, n)));
     }
-    return Buffer.concat(chunks, total).toString("utf8");
+    return UTF8_DECODER.decode(Buffer.concat(chunks, total));
   } finally {
     closeSync(fd);
   }
@@ -69,7 +71,7 @@ function readRegularUtf8(filePath, anchorReal) {
 function parseRegistryBoxes(text) {
   const data = JSON.parse(text);
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("root not object");
-  if (!Array.isArray(data.windows) || !data.windows.every((w) => typeof w === "string" && WKS_RE.test(w))) {
+  if (!Array.isArray(data.windows) || !data.windows.every((w) => fullMatch(WKS_RE, w))) {
     throw new Error("bad windows list");
   }
   const idSet = new Set(data.windows);
@@ -81,16 +83,20 @@ function parseRegistryBoxes(text) {
     throw new Error("bad entries map");
   }
   for (const [wid, raw] of Object.entries(data.entries)) {
-    if (!WKS_RE.test(wid) || !idSet.has(wid)) throw new Error(`orphan entry ${wid}`);
+    if (!fullMatch(WKS_RE, wid) || !idSet.has(wid)) throw new Error(`orphan entry ${wid}`);
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`bad entry ${wid}`);
     if (Object.prototype.hasOwnProperty.call(raw, "windowId") && raw.windowId !== wid) {
       throw new Error(`mismatched windowId ${wid}`);
     }
     if (Object.prototype.hasOwnProperty.call(raw, "repo")) {
-      if (typeof raw.repo !== "string" || !REPO_RE.test(raw.repo.trim())) throw new Error(`bad repo ${wid}`);
+      if (typeof raw.repo !== "string" || /[\r\n]/.test(raw.repo) || !fullMatch(REPO_RE, raw.repo.trim())) {
+        throw new Error(`bad repo ${wid}`);
+      }
     }
     if (Object.prototype.hasOwnProperty.call(raw, "lead")) {
-      if (typeof raw.lead !== "string" || !UUID_RE.test(raw.lead.trim())) throw new Error(`bad lead ${wid}`);
+      if (typeof raw.lead !== "string" || /[\r\n]/.test(raw.lead) || !fullMatch(UUID_RE, raw.lead.trim())) {
+        throw new Error(`bad lead ${wid}`);
+      }
     }
     for (const k of ["cwd", "work"]) {
       if (Object.prototype.hasOwnProperty.call(raw, k)) {
@@ -98,7 +104,7 @@ function parseRegistryBoxes(text) {
       }
     }
     if (Object.prototype.hasOwnProperty.call(raw, "box")) {
-      if (typeof raw.box !== "string") throw new Error(`bad box ${wid}`);
+      if (typeof raw.box !== "string" || /[\r\n]/.test(raw.box)) throw new Error(`bad box ${wid}`);
       const norm = BOX_OF[raw.box.trim().toUpperCase()];
       if (!norm) throw new Error(`unknown box ${wid}`);
       parsed.set(wid, norm);
@@ -115,7 +121,7 @@ function loadRegisteredBoxes() {
   try {
     anchorReal = realpathSync(dir);
     files = readdirSync(anchorReal)
-      .filter((f) => f.endsWith(".windows.json") && UUID_RE.test(f.slice(0, -".windows.json".length)))
+      .filter((f) => f.endsWith(".windows.json") && fullMatch(UUID_RE, f.slice(0, -".windows.json".length)))
       .sort();
   } catch {
     return out;

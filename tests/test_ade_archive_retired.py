@@ -74,7 +74,8 @@ if argv[:2] == ["agent", "archive"]:
         ins = data.get("inspect", {}).get(aid)
         if isinstance(ins, dict):
             ins["Archived"] = True
-            data_path.write_text(json.dumps(data), encoding="utf-8")
+        data["agents"] = [r for r in data.get("agents", []) if r.get("id") != aid]
+        data_path.write_text(json.dumps(data), encoding="utf-8")
     print(json.dumps({"id": aid, "archived": True}))
     sys.exit(0)
 
@@ -678,3 +679,35 @@ def test_fresh_ls_recheck_blocks_parent_when_new_child_appears_before_archive(tm
     assert s["archived"] == []
     assert s["skipped"] == [{"id": parent, "reason": "has-children"}]
     assert not any(c[:2] == ["agent", "archive"] for c in env.calls())
+
+
+def test_same_sweep_revived_child_in_fresh_ls_overrides_earlier_archive_confirmation(tmp_path: Path):
+    """P1 Round 3: after a retired child is archived and readback confirms Archived=true, if a later
+    message/operator action revives that child so it reappears unarchived in the parent's fresh `paseo ls`,
+    the fresh listing MUST override `confirmed_archived` and block archiving the parent."""
+    env = Env(tmp_path)
+    parent = env.add_agent(uid(70), "Parent lead", status="idle", labels={"ade.retired": "1"})
+    child = env.add_agent(
+        uid(71),
+        "Child worker",
+        status="idle",
+        labels={"paseo.parent-agent-id": parent, "ade.retired": "1"},
+    )
+    # Child is evaluated first (children-first ordering), archived, and removed from data["agents"].
+    # When parent is inspected right afterwards, revive `child` back into data["agents"] as running/unarchived!
+    revived_snapshot = json.loads(json.dumps(env.data))
+    for r in revived_snapshot["agents"]:
+        if r["id"] == child:
+            r["status"] = "running"
+    env.data["on_inspect_write"] = {
+        parent: {"path": str(env.data_path), "content": json.dumps(revived_snapshot)},
+    }
+
+    res = env.run(apply=True)
+    assert res.returncode == 0, res.stderr
+    s = json.loads(res.stdout)
+    # Child was archived earlier in the sweep, but its revival in fresh `ls` MUST block archiving parent!
+    assert [x["id"] for x in s["archived"]] == [child]
+    assert s["skipped"] == [{"id": parent, "reason": "has-children"}]
+    assert any(c[:3] == ["agent", "archive", child] for c in env.calls())
+    assert not any(c[:3] == ["agent", "archive", parent] for c in env.calls())
