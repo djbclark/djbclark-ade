@@ -48,3 +48,10 @@ find, set up, and run it without repository-specific hunting.
 - [Plektra `qa/SETUP.md`](https://github.com/djbclark/plektra-djbclark/blob/a6b43d5eb7a3062e6afd40b5fec1ba3d5c5d8740/qa/SETUP.md)
 - Discovery pair (`qa/README.md` + `qa/SETUP.md`), scoped `qa/AGENTS.md` / `qa/CLAUDE.md`,
   and `qa/Justfile` recipes `qa-connect`, `qa-demo`, `qa-run`.
+
+## Human-in-the-loop (HITL) operator prompts (2026-11-26)
+
+Whenever starting a QA or HITL run that requires the human to interact (applies to existing starts too, not just handoffs),
+include the exact Paseo designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus the workspace ID
+(`wks_…`) for the actual tab/window the human needs, and explicitly state where the interaction occurs (for example, phone
+overlay vs Paseo tab). See [docs/ref-labels.md](ref-labels.md).

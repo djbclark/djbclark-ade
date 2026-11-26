@@ -97,10 +97,13 @@ the task, and the ambiguity is copied into every slice.² ³ Every brief has:
 5. **Output format:** the report shape, `CHANGED:` / `SKIPPED:` / `NOTES:`.
 6. **Acceptance check:** the command or observation that proves it.
 7. **Boundaries:** the concurrency contract, and what is out of scope.
-8. **Names with ids (2026-10-23; strengthened by operator rulings 2026-11-23, 2026-11-25):** whenever a brief, reply, message, or report
+8. **Names with ids (2026-10-23; strengthened by operator rulings 2026-11-23, 2026-11-25, 2026-11-26):** whenever a brief, reply, message, or report
    references a Paseo agent or tab, **always** give all four fields: **both the 7-char tab-tooltip prefix and full agent ID**
    formatted as `<7-char> (<full-UUID>)` (e.g. `86df0a5 (86df0a5f-33ea-4365-999c-74ab63cc173a)`), **workspace ID** (`wks_…`),
-   **window name** (e.g. `WORKER <repo> (<work>)`), and **tab name** — never a bare short ID alone. A GUI rename makes a name
+   **window name** (e.g. `WORKER <repo> (<work>)`), and **tab name** — never a bare short ID alone. Whenever starting
+   something requiring human interaction (applies to existing starts too, not just handoffs), include the exact Paseo
+   designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus workspace ID for the actual
+   tab/window the human needs, and state where the interaction occurs (e.g., phone overlay vs Paseo tab). A GUI rename makes a name
    alone unreliable, a bare short ID is ambiguous, and including the 7-char prefix matches Paseo's tab tooltip directly
    (see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
 9. **The delivery footer** ([docs/dispatch-footer.md](dispatch-footer.md)): where the report goes, the `.done`

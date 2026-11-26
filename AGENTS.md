@@ -129,10 +129,12 @@ The weakness is accepted (docs/threat-model.md section 5 item 9; docs/code-revie
    `ref <BOT>` (one `<BOT>` arg only, never a Paseo UUID) or `ref-append <BOT> FILE`; never invent or reuse an id (the Claude Code
    Stop hook `claude/hooks/ref_integrity_gate.py` checks it; `ref lookup ID` reads one). Follow
    the document's short-progress/emoji exceptions (operator, 2026-11-17).
-   **Full Paseo agent/tab references (operator rulings 2026-11-23, 2026-11-25):** whenever referencing a
+   **Full Paseo agent/tab references (operator rulings 2026-11-23, 2026-11-25, 2026-11-26):** whenever referencing a
    Paseo agent or tab in replies or reports, always give **both the 7-char tab-tooltip prefix and full agent ID**
    as `<7-char> (<full-UUID>)` (e.g. `86df0a5 (86df0a5f-33ea-4365-999c-74ab63cc173a)`), plus **workspace ID,
-   window name, and tab name** — never bare short IDs alone ([docs/ref-labels.md](docs/ref-labels.md)).
+   window name, and tab name** — never bare short IDs alone. Whenever starting anything requiring human interaction
+   (existing starts too, not just handoffs), include the exact designation `{<7-char> (<full-UUID>) <project>/<window>/<tab>}`
+   and workspace ID for the actual tab/window the human needs, and say where the interaction occurs (e.g., phone overlay vs Paseo tab) ([docs/ref-labels.md](docs/ref-labels.md)).
 6. **Flag best-practice deviations** and propose the improvement, but don't
    relitigate decisions the operator made knowingly.
 7. **Routing discipline**: route per `bin/route_agent.py policy --md`, the one copy of the numbers (2026-11-07: built

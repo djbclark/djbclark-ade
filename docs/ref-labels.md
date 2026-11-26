@@ -114,7 +114,7 @@ character up to 35, two up to 1295, three characters from 1296 (`100`) on.
    the decisions log cover the questions that come up. Write one when a second
    TUI gets enforcement.
 
-## Paseo agent and tab references (operator rulings 2026-11-23, 2026-11-25)
+## Paseo agent and tab references (operator rulings 2026-11-23, 2026-11-25, 2026-11-26)
 
 Whenever referencing a Paseo agent or tab in replies or reports, **always** give
 all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/agent-id`):
@@ -123,6 +123,10 @@ all four fields (see also [docs/agent-identity.md](agent-identity.md) and `bin/a
 2. **Workspace ID** (`wks_…`)
 3. **Window name** (the Paseo workspace/window title, e.g. `WORKER djbclark-ade (post-hold)`)
 4. **Tab name** (the agent tab title, e.g. `worker <slice> <lead-id> [wt: <worktree>]`)
+
+**Human-interaction starts (operator ruling 2026-11-26, relayed via `bdd829df`):** whenever starting something that requires the human to interact — including existing/ordinary starts, not just handoffs — always include the exact Paseo designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus the workspace ID (`wks_…`) for the **actual** tab/window the human needs, and explicitly state **where the interaction occurs** (for example, phone overlay vs Paseo tab). Example:
+
+`{d4ab1e4 (d4ab1e4f-4334-4056-b09e-b9480e3e1f70) plektra-djbclark/WORKER plektra-djbclark (workers)/worker HandQA Neon qualification}`, workspace `wks_b06299d82e6672e7` (interaction occurs in the phone overlay / Paseo tab).
 
 ## Install
 
