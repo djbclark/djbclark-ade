@@ -1,0 +1,66 @@
+# Paseo Workspace Setup & Scripts Evaluation (Carried #125)
+
+**Date:** 2026-11-26  
+**Status:** Study complete; no live `paseo.json` or `~/.paseo/config.json` changes applied.  
+**Scope:** Evaluate Paseo's `paseo.json` workspace setup, lifecycle hooks, auto-terminals, service ports, and service proxy (`~/src/paseo`) across our repositories (`djbclark-ade`, `paseo`, `tendcf`, `cfengine-all`, `plektra-djbclark`, `aiuse`, `sudo-secretspec`, `superbrain`, etc.) against our existing worktree, `.worktreeinclude`, `site-public-djbclark/registry/ports.yml`, `bgrun`/CI-first, RAM, and trust rules.
+
+## 1. Executive Verdict
+
+**Do not adopt Paseo `worktree.setup`, `worktree.teardown`, or `worktree.terminals` across our repos.** They are redundant with our `git worktree add` + `ade_claims` + `WORKER` box workflow, bypass `bgrun` / `load-watch` / CI-first rules, add background RAM pressure on `bigmac` (32 GB), and carry untrusted-repo auto-execution risk on non-PR checkouts.
+
+**Selectively opt in ONLY to on-demand `scripts` (`type: "service"`) in owned, multi-worktree HTTP/web app repos** (for example `superbrain` if running parallel worktree dev servers), using Paseo's default OS ephemeral `findFreePort()` allocator (or a single reserved range claimed once in `site-public-djbclark/registry/ports.yml`) and Paseo's built-in `*.localhost:7263` service proxy. Do **not** add `paseo.json` to `djbclark-ade`, `tendcf`, `cfengine-all`, `plektra-djbclark`, `aiuse`, or `sudo-secretspec`, and leave upstream `~/src/paseo/paseo.json` untouched (standing order 8).
+
+## 2. How Paseo's Workspace Setup & Scripts Actually Work
+
+Verified directly against `~/src/paseo` (`frdminc/paseo` / `getpaseo/paseo`) and live `~/.paseo/config.json` on `bigmac` (2026-11-26):
+
+| Feature (`paseo.json` key) | Trigger & Scope | Source Evidence (`~/src/paseo`) |
+|---|---|---|
+| `worktree.setup` (`string \| string[]`) | Runs **automatically in the background** via shell invocation whenever Paseo creates a **Paseo-owned** worktree (`isolation: "worktree"`). Injects `PASEO_SOURCE_CHECKOUT_PATH` / `PASEO_ROOT_PATH`, `PASEO_WORKTREE_PATH`, `PASEO_BRANCH_NAME`, `PASEO_WORKTREE_PORT`. Does **not** run on `git worktree add` or `local_checkout` workspaces. | `packages/protocol/src/paseo-config-schema.ts:46-53`; `packages/server/src/server/worktree-session.ts:380-413, 556-582`; `packages/server/src/utils/worktree.ts:635-736` |
+| `worktree.teardown` (`string \| string[]`) | Runs when Paseo archives and deletes a **Paseo-owned** worktree (`backing.isPaseoOwnedWorktree`). Never runs on `local_checkout` or manual `git worktree add` trees. | `packages/server/src/server/workspace-archive-service.ts:356-388`; `packages/server/src/utils/worktree.ts:738-790` |
+| `worktree.terminals` | Auto-spawns interactive PTY terminals and injects their startup commands immediately after `worktree.setup` completes. | `packages/server/src/server/worktree-bootstrap.ts:327-356`; `packages/server/src/server/worktree-session.ts:583-590` |
+| `scripts.<name>` (one-shot or `type: "service"`) | **Explicitly on-demand** in **any** Paseo workspace (`local_checkout` or `worktree`), started/stopped via Paseo UI, daemon RPC, or Paseo MCP (`list_workspace_scripts`, `start_workspace_script`, `stop_workspace_script`). Never auto-started on workspace creation. | `packages/server/src/server/session/workspace-scripts/workspace-scripts-service.ts:42-277`; `packages/server/src/server/agent/tools/paseo-tools.ts:2364-2439` |
+| `worktree.servicePorts` / daemon `worktrees.servicePorts` | Port allocation for `type: "service"` scripts: optional `{ range: "START-END" }` or `{ portScript }`, falling back to OS ephemeral `findFreePort()` (`server.listen(0, "127.0.0.1")`). Injects `HOST` (`127.0.0.1` when daemon listens on loopback), `PASEO_PORT`, `PASEO_URL`, `PASEO_SERVICE_<NAME>_PORT`, `PASEO_SERVICE_<NAME>_URL`. Currently unset in `~/.paseo/config.json`. | `packages/server/src/server/workspace-service-port-allocator.ts:25-129`; `packages/server/src/server/workspace-service-env.ts:25-73`; `packages/server/src/server/service-proxy.ts:1021-1040`; `packages/server/src/server/persisted-config.ts:84` |
+| Service proxy (`*.localhost:<daemonPort>`) | Reverse-proxies HTTP and WebSocket upgrades for each running `type: "service"` script over the daemon's existing listener (`http://<script>--<branch>--<project>.localhost:7263` on `bigmac`, plus optional public base URL) with health monitoring. | `packages/server/src/server/service-proxy.ts:124-200, 274-400` |
+| Untrusted PR/MR gate (`untrustedSource`) | Blocks `worktree.setup`, `worktree.teardown`, and `scripts` when a worktree was created via Paseo's change-request checkout (`intent.kind === "checkout-change-request"`). **Does not block** ordinary branch/worktree checkouts of cloned or forked third-party repos. | `packages/server/src/server/paseo-worktree-service.ts:108-118`; `packages/server/src/server/workspace-automation-gate.ts:1-50` |
+
+### Note on `.worktreeinclude`
+
+Paseo's server source (`~/src/paseo/packages/server/src`) has **no `.worktreeinclude` reader**. When creating a Paseo worktree, Paseo copies only `paseo.json` (`seedPaseoConfigFile`, `packages/server/src/utils/worktree.ts:792-800, 1250`) and expects `worktree.setup` to copy any ignored files from `$PASEO_SOURCE_CHECKOUT_PATH`. `.worktreeinclude` in this repo is read by Claude Code and `bin/ade_fork_controller.py` (and is intentionally empty here because secrets come from `sudo-secretspec`).
+
+## 3. Comparison Against Existing ADE & Ops Rules
+
+1. **Worktree workflow & `ade_claims` (`AGENTS.md` order 9, `docs/workspace-layout.md`):**
+   Most ADE slices use explicit `git worktree add -b <branch> ~/src/<repo>-<slug>-wt origin/<base>` + `ade_claims.py new` inside the lead's reused `WORKER <repo> (<work>)` window rather than `paseo run --new-workspace worktree`. Because `worktree.setup`, `worktree.teardown`, and `worktree.terminals` only run for Paseo-owned worktrees, they are inert for our primary workflow — and using `worktree.teardown` as a rescue gate (proposed in the superseded 2026-10-30 `docs/paseo-only-rearchitecture.md`) fails on manual worktrees and upstream forks.
+2. **CI-first & `bgrun` load-gating (`~/CLAUDE.md` items 34 & 37):**
+   `worktree.setup` runs arbitrary shell commands directly under the Paseo daemon, completely bypassing `~/ops/site-private-djbclark/bin/bgrun`, `load-watch`, and our CI-first rule. Upstream `~/src/paseo/paseo.json` illustrates the hazard: its `worktree.setup` runs `npm ci`, `npm run build:server`, and `npm run build --workspace=@getpaseo/expo-two-way-audio` on every Paseo worktree create. Heavy installs/builds (`npm ci`, `cargo build`, `gradle`, `make`) must never auto-run on `bigmac` during worktree creation.
+3. **Site port registry (`site-public-djbclark/registry/ports.yml`, `~/CLAUDE.md` item 34):**
+   - **Where Paseo helps:** Paseo's default `findFreePort()` binds an OS ephemeral loopback port (`0`) and exposes it through the already-registered Paseo daemon listener (`127.0.0.1:7263`) at `http://<script>--<branch>--<project>.localhost:7263`. This aligns cleanly with `ports.yml`'s `ephemeral_processes` policy (`ports.yml:227-236`) and avoids claiming fixed `188xx` rows per worktree when testing multiple web/API branches in parallel.
+   - **Where Paseo can violate `ports.yml`:** Fixed `port:` fields in `scripts.<name>`, unvetted `servicePorts.range` values, or scripts that ignore `HOST` / fall back to unregistered defaults can collide with registered ports. For example, upstream `~/src/paseo/paseo.json:14-26` binds `0.0.0.0:${PASEO_PORT:-6768}` (ignoring `HOST=127.0.0.1` and falling back to `6768`, which `ports.yml` assigns to `orca-app`).
+   - **Proxy header caveat:** `service-proxy.ts:302-311` documents that `Host` / `x-forwarded-port` are unauthenticated client-supplied headers; this is benign on loopback `127.0.0.1:7263`, but services must not trust forwarded authority headers when fronted via Tailscale (`:3333`).
+4. **RAM budget (`bigmac` 32 GB, RAM relief P1–P3):**
+   `worktree.terminals` spawns persistent PTY shells/daemons automatically on worktree creation, directly conflicting with our RAM discipline. On-demand `scripts` (`start_workspace_script` / `stop_workspace_script`) are explicitly bounded and stoppable, provided agents stop them after verification.
+5. **Security & upstream-fork hygiene (`AGENTS.md` Trust & order 8):**
+   Paseo's `untrustedSource` gate protects only Paseo-initiated PR/MR checkouts, not manually cloned or checked-out untrusted branches. Adding local `paseo.json` files to third-party forks (`paseo`, `plektra-djbclark`, `cfengine-core`, `paseo-plugins-omercnet`) also introduces merge carry against upstream (order 8).
+
+## 4. Repo-by-Repo Assessment
+
+| Repository | Current Setup / Build / Dev-Server Model | Recommendation |
+|---|---|---|
+| `djbclark-ade` | Pure Python stdlib + shell scripts, `justfile`, empty `.worktreeinclude`, pytest via `bgrun`/CI, no HTTP dev server (`list_workspace_scripts` currently `[]`). | **Do not add `paseo.json`.** Zero value; redundant with `justfile` and `bgrun`. |
+| `paseo` (`frdminc/paseo` fork) | Upstream ships `paseo.json` with heavy `worktree.setup` (`npm ci` + server/audio builds) and on-demand `scripts` (`daemon`, `app`, `desktop`, `ios-simulator`, `typecheck`). | **Keep upstream `paseo.json` untouched** (order 8). Continue creating worktrees via `git worktree add` (avoiding Paseo worktree auto-setup on `bigmac`) and building via CI. If ever launching upstream `scripts` on-demand for interactive UI QA, verify ephemeral `PASEO_PORT` is injected (never fallback `6768`) and stop when done. |
+| `tendcf` | Go/Python/docs; CI-first + `bgrun`; no local HTTP dev server. | **Do not add `paseo.json`.** |
+| `cfengine-all` | Coordination/docs/linuxgate harness; heavy C/VM builds run on CI/linuxgate/Hyades, never Mac auto-setup; no HTTP dev server. | **Do not add `paseo.json`.** |
+| `plektra-djbclark` | Upstream Android/Kotlin Gradle fork; strict one-Gradle-build-machine-wide rule (`~/CLAUDE.md` item 34); ADB/HandQA workflow, no HTTP dev server. | **Do not add `paseo.json`.** Running Gradle in `worktree.setup` would violate item 34 and order 8. |
+| `aiuse` / `sudo-secretspec` | Python (`uv`) / Rust (`cargo`, CI-first); `justfile`; `aiuse serve` already has claimed port `28787` in `ports.yml` and is not multi-worktree. | **Do not add `paseo.json`.** |
+| `superbrain` (and future owned multi-worktree web/API repos) | FastAPI backend (`:5001` prod in `ports.yml`) + Expo/web/extension frontends. | **Candidate for selective opt-in ONLY** if actively running parallel worktree dev servers: add **on-demand `scripts` (`type: "service"`) only**, binding `${HOST:-127.0.0.1}:${PASEO_PORT}` with default OS ephemeral `findFreePort()` (no `worktree.setup`, no `worktree.terminals`, no fixed unregistered `port:`). |
+
+## 5. Guardrails If Opting In Later
+
+If an owned web/HTTP repo later opts into Paseo on-demand `scripts`:
+
+1. **On-demand `scripts` only:** omit `worktree.setup` (or restrict to sub-second, zero-install metadata checks) and omit `worktree.terminals`; never put `npm ci`, `cargo build`, `gradle`, `make`, or `uv sync` in `worktree.setup`.
+2. **Port-registry compliance:** leave `port` unset so Paseo uses OS ephemeral `findFreePort()` (`127.0.0.1:0`, compliant with `ports.yml` ephemeral listeners) and always bind `${HOST:-127.0.0.1}:${PASEO_PORT}`. If a deterministic port block is ever preferred, claim one contiguous block in `site-public-djbclark/registry/ports.yml` first and configure `worktrees.servicePorts.range` in `~/.paseo/config.json` once.
+3. **Wrap any build/test one-shot script in `bgrun`:** or keep tests on `just` + `bgrun` / CI-first.
+4. **Stop services after verification:** call `stop_workspace_script` when finished so dev servers do not consume RAM on `bigmac`.
+5. **No `paseo.json` in untrusted or upstream-fork repos:** keep third-party forks clean (order 8), and do not create Paseo-owned worktrees of untrusted checkouts outside Paseo's change-request flow.
