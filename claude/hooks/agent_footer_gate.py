@@ -97,6 +97,11 @@ DENY_REASON = (
     "Paste the filled delivery contract from docs/dispatch-footer.md (it starts with '## Delivery "
     "contract') at the end of the prompt with {report} set to <scratchpad>/<name>-report.md, and launch "
     "again; then read that report file, not the final message.")
+REFUSED_NAME_REASON = (
+    "This sub-agent prompt named report path `{report}`, whose basename starts with `{word}`: Claude Code "
+    "refuses Write on basenames starting with report/summary/findings/analysis (acp-dispatch parity). "
+    "Rename the report path (or add a safe sibling line) and launch again, e.g.:\n"
+    "Report path: {sibling}")
 
 DENY_REASON_RO = (
     "This sub-agent type cannot write files and its prompt has no read-only delivery footer; the hook could not build one. "
@@ -125,6 +130,18 @@ RESUME_REASON = (
 def check_report_name(report: str) -> bool:
     """False when Claude Code would refuse Write on this report basename (acp-dispatch parity)."""
     return CLAUDE_REFUSED_BASENAME.match(Path(report).name) is None
+
+
+def refused_report_word(report: str) -> str | None:
+    """The leading word (report/summary/findings/analysis) that caused Write refusal, or None."""
+    m = CLAUDE_REFUSED_BASENAME.match(Path(report).name)
+    return m.group(1) if m else None
+
+
+def safe_report_sibling(report: str) -> str:
+    """A safe sibling report path prefixed with `task-` so Claude Code allows Write on it."""
+    p = Path(report)
+    return str(p.with_name(f"task-{p.name}"))
 
 
 def slug(text):
@@ -208,9 +225,12 @@ def report_path(data, tool_input):
         return named
     session = slug(str(data.get("session_id") or "session"))
     name = slug(str(tool_input.get("name") or tool_input.get("description") or ""))
+    filename = f"{name}-report.md"
+    if not check_report_name(filename):
+        filename = f"task-{filename}"
     d = Path(os.environ.get("AGENT_FOOTER_REPORT_DIR") or Path.home() / ".local/state/agent-reports") / session
     d.mkdir(parents=True, exist_ok=True)
-    return str(d / f"{name}-report.md")
+    return str(d / filename)
 
 
 def relaunch_reason(prompt):
@@ -488,8 +508,11 @@ try:
     except OSError:
         text = None
     if text is None:
+        word = refused_report_word(report) if report else None
+        reason = (REFUSED_NAME_REASON.format(report=report, word=word, sibling=safe_report_sibling(report))
+                  if word else DENY_REASON)
         print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": DENY_REASON}}))
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}))
         sys.exit(0)
     updated = dict(tool_input, prompt=str(tool_input.get("prompt") or "").rstrip() + "\n\n" + text + "\n")
     print(json.dumps({"hookSpecificOutput": {

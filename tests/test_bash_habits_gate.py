@@ -1428,25 +1428,61 @@ def _budget_env(seconds):
     return dict(os.environ, BASH_HABITS_GATE_BUDGET=str(seconds))
 
 
-def test_gate_fails_closed_when_it_exceeds_its_time_budget():
-    """`$((` x 2000 takes the unbudgeted gate past 60 s (also on master): with the budget lowered it must end in a deny, fast."""
-    command = "echo " + "$((" * 2000
+def test_deep_unclosed_and_nested_arithmetic_finishes_in_linear_time():
+    """Carried #113: `$((` x 2000 used to scan quadratically (>60 s) and hit the time budget; it must finish well under 1 s."""
+    for command, expect_deny in [
+        ("echo " + "$((" * 2000, False),
+        ("echo " + "$((" * 2000 + "))" * 2000, False),
+        ("echo " + "$((" * 2000 + ")" * 2000, False),
+        ("echo " + "$((1 + " * 1000 + "0" + "))" * 1000, False),
+        ("echo " + "$((" * 500 + "$(gh pr checks 1 --watch)", True),
+    ]:
+        started = time.monotonic()
+        out = run(command, env=_budget_env(5))
+        elapsed = time.monotonic() - started
+        assert elapsed < 1.5, f"too slow ({elapsed:.3f}s) for len={len(command)}"
+        if expect_deny:
+            assert out and out["permissionDecision"] == "deny", out
+            assert "time budget" not in out["permissionDecisionReason"], out
+        else:
+            assert out is None, out
+
+
+def _write_slow_hook_driver(tmp_path):
+    driver = tmp_path / "slow_hook_driver.py"
+    driver.write_text(
+        "import importlib.util, sys, time\n"
+        f"spec = importlib.util.spec_from_file_location('bhg_slow', {str(HOOK)!r})\n"
+        "mod = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(mod)\n"
+        "mod.check = lambda cmd: time.sleep(60)\n"
+        "mod.main()\n")
+    return driver
+
+
+def test_gate_fails_closed_when_it_exceeds_its_time_budget(tmp_path):
+    """When check() outruns the budget, the hook must still end in a fail-closed deny fast (backstop kept after #113)."""
+    driver = _write_slow_hook_driver(tmp_path)
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
     started = time.monotonic()
-    out = run(command, env=_budget_env(2))
+    r = subprocess.run([sys.executable, str(driver)], input=payload,
+                       capture_output=True, text=True, timeout=30, env=_budget_env(1))
     elapsed = time.monotonic() - started
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
     assert out and out["permissionDecision"] == "deny", out
     assert "time budget" in out["permissionDecisionReason"] and "split or simplify" in out["permissionDecisionReason"]
-    assert 1.5 < elapsed < 15, elapsed
+    assert 0.8 < elapsed < 15, elapsed
 
 
-def test_time_budget_deny_works_for_the_cursor_and_codex_forms_too():
-    command = "echo " + "$((" * 2000
-    cursor = subprocess.run([sys.executable, str(HOOK), "--cursor"], input=json.dumps({"command": command}),
-                            capture_output=True, text=True, timeout=30, env=_budget_env(2))
+def test_time_budget_deny_works_for_the_cursor_and_codex_forms_too(tmp_path):
+    driver = _write_slow_hook_driver(tmp_path)
+    cursor = subprocess.run([sys.executable, str(driver), "--cursor"], input=json.dumps({"command": "echo hi"}),
+                            capture_output=True, text=True, timeout=30, env=_budget_env(1))
     assert cursor.returncode == 0 and json.loads(cursor.stdout)["permission"] == "deny"
-    codex = subprocess.run([sys.executable, str(HOOK), "--codex"],
-                           input=json.dumps({"tool_name": "shell", "tool_input": {"command": command}}),
-                           capture_output=True, text=True, timeout=30, env=_budget_env(2))
+    codex = subprocess.run([sys.executable, str(driver), "--codex"],
+                           input=json.dumps({"tool_name": "shell", "tool_input": {"command": "echo hi"}}),
+                           capture_output=True, text=True, timeout=30, env=_budget_env(1))
     assert codex.returncode == 2 and "time budget" in codex.stderr
 
 

@@ -170,6 +170,12 @@ GOOD_BOT = (
     ('[meta]\nschema = 1\n' + GOOD_BOT.replace('rest_login = "xbot[bot]"', 'rest_login = "xbot"'), "[bot]"),
     ('[meta]\nschema = 1\n' + GOOD_BOT.replace('graphql_login = "xbot"', 'graphql_login = 7'), "string"),
     ('[meta]\nschema = 1\n' + GOOD_BOT + 'thread_markers = "oops"\n', "list"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = "oops"\n', "list"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = ["not-a-table"]\n', "table"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = [{ name = "Only Name" }]\n', "missing"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = [{ app = "only-app" }]\n', "missing"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = [{ name = "X", app = "y", extra = "z" }]\n', "unknown key"),
+    ('[meta]\nschema = 1\n' + GOOD_BOT + 'check_runs = [{ name = "", app = "y" }]\n', "string"),
     ('[meta]\nschema = 1\n' + GOOD_BOT + 'review_body_patterns = ["("]\n', "regex"),
     ('[meta]\nschema = 1\n' + GOOD_BOT + GOOD_BOT, "duplicate"),
     ('[meta]\nschema = 1\n' + GOOD_BOT.replace('id = "x"', 'id = "X Y"'), "slug"),
@@ -502,6 +508,32 @@ def test_check_apps_match_by_slug() -> None:
           'check_apps = ["app-slug"]\n')
     v = evaluate(FakeGh(checks=[run_of("Anything", "in_progress", "2026-11-14T21:59:00Z", app="app-slug")], override=ov))
     assert v["pending"] == ["app"]
+
+
+def test_check_runs_require_both_name_and_app_slug() -> None:
+    # Carried #115: AND-paired check_runs prevent an outside workflow job with a matching name from spoofing pending.
+    ov = ('[meta]\nschema = 1\n[[add]]\nid = "paired"\nname = "P"\nrest_login = "p-bot[bot]"\ngraphql_login = "p-bot"\n'
+          'check_runs = [{ name = "Paired Review", app = "paired-app" }]\n')
+    spoof_app = run_of("Paired Review", "in_progress", "2026-11-14T21:59:00Z", app="github-actions")
+    no_app = {"name": "Paired Review", "status": "in_progress", "conclusion": None,
+              "started_at": "2026-11-14T21:59:00Z", "app": None}
+    other_name = run_of("Paired Other", "in_progress", "2026-11-14T21:59:00Z", app="paired-app")
+    real = run_of("Paired Review", "in_progress", "2026-11-14T21:59:00Z", app="paired-app")
+    assert evaluate(FakeGh(checks=[spoof_app, no_app, other_name], override=ov))["state"] == "clear"
+    v = evaluate(FakeGh(checks=[real], override=ov))
+    assert v["state"] == "pending" and v["pending"] == ["paired"]
+
+    # Built-in defaults: cursor-bugbot and macroscope pin name + app slug via check_runs.
+    spoof_cursor = run_of("Cursor Bugbot", "in_progress", "2026-11-14T21:59:00Z", app="github-actions")
+    assert evaluate(FakeGh(checks=[spoof_cursor]))["state"] == "clear"
+    real_cursor = run_of("Cursor Bugbot", "in_progress", "2026-11-14T21:59:00Z", app="cursor")
+    v_cursor = evaluate(FakeGh(checks=[real_cursor]))
+    assert v_cursor["state"] == "pending" and v_cursor["pending"] == ["cursor-bugbot"]
+
+    spoof_macro = run_of(MACROSCOPE_CHECK, "in_progress", "2026-11-14T21:59:00Z", app="github-actions")
+    no_app_macro = {"name": MACROSCOPE_CHECK, "status": "in_progress", "conclusion": None,
+                    "started_at": "2026-11-14T21:59:00Z", "app": None}
+    assert evaluate(FakeGh(checks=[spoof_macro, no_app_macro]))["state"] == "clear"
 
 
 # ------------------------------------------------------------------ Macroscope (2026-11-22): trusted, but a scarce paid reviewer

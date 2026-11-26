@@ -591,14 +591,22 @@ def _in_prose(text: str, spans: list[tuple[int, int, str]], pos: int) -> bool:
     return False
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=64)
+def _closing_paren_table(text: str, n: int) -> dict[tuple[int, bool], int]:
+    return {}
+
+
 def _closing_paren(text: str, i: int, arithmetic: bool = False, limit: int | None = None) -> int:
     """Index of the `)` that closes a `$(` whose body starts at `i`, or len(text) if unclosed. With `limit`, the text
     is read only up to there (a caller that scans a region of its own) and `limit` stands for an unclosed one."""
     n = len(text) if limit is None else min(limit, len(text))
     # Explicit call frames keep deeply nested substitutions off Python's call
-    # stack. Results are pure offsets, including the arithmetic trial parse.
-    results = {}
+    # stack. Results are pure offsets, including the arithmetic trial parse;
+    # sharing one table per (text, n) makes repeated scans (e.g. `$((` x 2000
+    # in `_heredoc_introducers`) linear instead of quadratic.
+    results = _closing_paren_table(text, n)
+    if (i, arithmetic) in results:
+        return results[(i, arithmetic)]
     frames = [[i, arithmetic, i, 1, []]]
     while frames:
         frame = frames[-1]
@@ -670,11 +678,12 @@ def _closing_paren(text: str, i: int, arithmetic: bool = False, limit: int | Non
     return results[(i, arithmetic)]
 
 
-def _is_arithmetic_expansion(text: str, opening: int) -> bool:
+def _is_arithmetic_expansion(text: str, opening: int, limit: int | None = None) -> bool:
     if not text.startswith("$((", opening):
         return False
-    inner = _closing_paren(text, opening + 3, True)
-    return inner < len(text) and _arithmetic_close(text, inner)
+    n = len(text) if limit is None else min(limit, len(text))
+    inner = _closing_paren(text, opening + 3, True, limit=limit)
+    return inner + 1 < n and _arithmetic_close(text, inner)
 
 
 def live_bodies(text: str) -> list[str]:
@@ -682,20 +691,27 @@ def live_bodies(text: str) -> list[str]:
     them, not in single quotes, comments or after a backslash. `strip_literals` blanks a double-quoted
     string whole, so command_views never sees a substitution there, and it does not split backticks."""
     out: list[str] = []
-    i, n, dq = 0, len(text), False
-    while i < n:
+    # Explicit span frames avoid Python recursion limits and quadratic string
+    # slicing on deeply nested `$((...))` arithmetic expressions.
+    frames = [[0, len(text), 0, False]]
+    while frames:
+        frame = frames[-1]
+        i, n, span_start, dq = frame
+        if i >= n:
+            frames.pop()
+            continue
         ch = text[i]
         if ch == "\\":
-            i += 2
+            frame[0] = i + 2
         elif not dq and ch == "'":
-            k = text.find("'", i + 1)
-            i = n if k < 0 else k + 1
-        elif not dq and ch == "#" and (i == 0 or text[i - 1].isspace() or text[i - 1] in ";&|("):
-            k = text.find("\n", i)
-            i = n if k < 0 else k
+            k = text.find("'", i + 1, n)
+            frame[0] = n if k < 0 else k + 1
+        elif not dq and ch == "#" and (i == span_start or text[i - 1].isspace() or text[i - 1] in ";&|("):
+            k = text.find("\n", i, n)
+            frame[0] = n if k < 0 else k
         elif ch == '"':
-            dq = not dq
-            i += 1
+            frame[3] = not dq
+            frame[0] = i + 1
         elif ch == "`":
             j, body = i + 1, []
             while j < n and text[j] != "`":
@@ -704,19 +720,23 @@ def live_bodies(text: str) -> list[str]:
                 body.append(text[j])
                 j += 1
             out.append("".join(body))
-            i = j + 1
-        elif ch == "$" and text[i + 1:i + 2] == "(":
-            arithmetic = _is_arithmetic_expansion(text, i)
-            end = _closing_paren(text, i + 2, arithmetic)
+            frame[0] = j + 1
+        elif ch == "$" and i + 1 < n and text[i + 1] == "(":
+            lim = n if (dq and n < len(text)) else None
+            arithmetic = _is_arithmetic_expansion(text, i, lim)
+            end = min(_closing_paren(text, i + 2, arithmetic, limit=lim), n)
+            frame[0] = end + 1                         # its inside is scanned fresh, by the next frame/caller
             if arithmetic:
                 # Arithmetic operators are not shell redirections. Only nested
                 # command substitutions/backticks inside the expression execute.
-                out.extend(live_bodies(text[i + 3:max(i + 3, end - 1)]))
+                inner_start = i + 3
+                inner_end = max(inner_start, end - 1)
+                if inner_start < inner_end:
+                    frames.append([inner_start, inner_end, inner_start, False])
             else:
                 out.append(text[i + 2:end])
-            i = end + 1                               # its inside is scanned fresh, by the recursion
         else:
-            i += 1
+            frame[0] = i + 1
     return out
 
 
@@ -1406,7 +1426,7 @@ def bg_operator(plain: str) -> bool:
 
 def check(cmd: str) -> tuple[str | None, str | None]:
     """(deny reason, warning) for a Bash command line."""
-    _closing_paren.cache_clear()
+    _closing_paren_table.cache_clear()
     # Raw-command check first: strip_literals skips heredoc bodies, so this cannot live in the
     # per-stage loop below (it must see the body to notice a missing terminator).
     hd = unterminated_heredoc_reason(cmd)

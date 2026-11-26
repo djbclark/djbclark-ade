@@ -76,13 +76,40 @@ def test_footer_that_cannot_be_built_still_denies(tmp_path):
 
 
 def test_refused_report_basename_still_denies(tmp_path):
-    """Parity with acp-dispatch check_report_name: do not launch an undeliverable Write path."""
+    """Parity with acp-dispatch check_report_name: a prompt-named refused basename denies and names the path, word, and safe sibling."""
     env = footer_env(tmp_path)
     out = run({"prompt": "write /tmp/analysis-report.md please"}, env=env)
     assert out["permissionDecision"] == "deny"
-    out = run({"description": "Summary", "prompt": "do the work"}, env=env)
-    # derived name is summary-report.md — also refused
+    reason = out["permissionDecisionReason"]
+    assert "/tmp/analysis-report.md" in reason
+    assert "analysis" in reason
+    assert "Report path: /tmp/task-analysis-report.md" in reason
+
+
+@pytest.mark.parametrize("fields,expected_name", [
+    ({"description": "Summary"}, "task-summary-report.md"),
+    ({"description": "Summary of recent changes"}, "task-summary-of-recent-changes-report.md"),
+    ({"description": "Findings: check hooks"}, "task-findings-check-hooks-report.md"),
+    ({"description": "Analysis of quota"}, "task-analysis-of-quota-report.md"),
+    ({"name": "Report"}, "task-report-report.md"),
+])
+def test_derived_refused_basename_is_prefixed_with_task_instead_of_denying(tmp_path, fields, expected_name):
+    """Carried #109: derived basenames starting with report/summary/findings/analysis get prefixed with task- instead of denying."""
+    env = footer_env(tmp_path)
+    out = run({**fields, "prompt": "do the work"}, env=env)
+    assert "permissionDecision" not in out
+    expected_path = str(tmp_path / "reports" / "s1" / expected_name)
+    assert f"report: {expected_path}" in out["updatedInput"]["prompt"]
+    assert expected_path in out["additionalContext"]
+
+
+def test_derived_prefixed_report_still_triggers_resume_guard(tmp_path):
+    """Resume guard must inspect the same task-prefixed derived path so unfinished runs are still caught."""
+    stub_report(tmp_path, name="task-summary-report.md", done=False)
+    out = run({"description": "Summary", "prompt": "do the work"}, env=footer_env(tmp_path))
     assert out["permissionDecision"] == "deny"
+    assert "task-summary-report.md" in out["permissionDecisionReason"]
+    assert "resume from where you stopped" in out["permissionDecisionReason"]
 
 
 def test_footer_present_or_exempt_or_other_tool_passes():
