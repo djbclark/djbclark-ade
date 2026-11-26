@@ -280,7 +280,7 @@ target = "desktop-build-3"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10622"
 trial_required = true
-order = 65
+order = 66
 notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): closed upstream in favor of #10651, retained queued for Build 3 per djbclark on top of #10651 for orthogonal 58.9s->3.7s slow-link compression"
 
 [[pick]]
@@ -294,7 +294,7 @@ target = "desktop-build-3"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10651"
 trial_required = true
-order = 66
+order = 65
 notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): merged to upstream/main 2026-11-25T04:02Z (cfcf0dc7d11957199730d6722653e729cfa571b2), post-v0.17.4 so still needed for v0.17.4 Build 3"
 
 [[pick]]

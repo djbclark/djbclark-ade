@@ -131,6 +131,7 @@ def test_shipped_registry_is_valid():
     assert by_id["paseo-unistyles-cssom-portal-perf"]["expected_head"] == "efd819959ef0113a1dc23af7bfe2db889725e703"
     assert "58.9s->3.7s" in by_id["paseo-ws-permessage-deflate"]["notes"]
     assert "cfcf0dc7d11957199730d6722653e729cfa571b2" in by_id["paseo-ws-chunked-transfers"]["notes"]
+    assert by_id["paseo-ws-chunked-transfers"]["order"] < by_id["paseo-ws-permessage-deflate"]["order"]
     assert by_id["paseo-android-idle-repaints"]["pr"] == 7556
     assert by_id["paseo-android-idle-repaints"]["targets"] == ["desktop-build-3", "android-build-3"]
     assert by_id["paseo-android-idle-repaints"]["trial_required"] is True
