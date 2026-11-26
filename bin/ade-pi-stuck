@@ -58,7 +58,7 @@ def account_of(model):
     if not model:
         return "unknown"
     for pre in ("openrouter/","opencode-go-djbclark/","opencode-go-t-e/","opencode-go/",
-                "clinepass/","cursor/","anthropic/","google/","openai/","deepseek/","qwen/"):
+                "clinepass/","cursor/","anthropic/","google/","openai/","deepseek/","qwen/","venice/","rfab/"):
         if model.startswith(pre):
             return pre.rstrip("/")
     return model.split("/")[0] if "/" in model else model
@@ -75,6 +75,8 @@ POOL_TO_ACCOUNT = {
     "google:gemini": "google",
     "google:gemini_argon": "google",
     "clinepass:default": "clinepass",
+    "venice:default": "venice",
+    "rfab:default": "rfab",
 }
 
 # Pools where one pool_id bills several accounts. aiuse names the account in its

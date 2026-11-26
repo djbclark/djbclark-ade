@@ -111,24 +111,26 @@ def test_normalize_work_strips_what_the_repo_prefix_leaves():  # F8
 
 
 def test_tab_name_has_no_worktree_part_without_a_worktree():
-    assert wsn.tab_name("WORKER", "s", LEAD) == f"worker s {LEAD}"
-    assert wsn.tab_name("LEAD", "s", LEAD) == f"worker s {LEAD}"  # a worker in the lead's window is still `worker ...`
-    assert wsn.tab_name("OTHER", "s", LEAD) == f"other s {LEAD}"
+    # Operator ruling 2026-11-25: lead ownership lives in `ade.lead` label, not the tab title.
+    assert wsn.tab_name("WORKER", "s", LEAD) == "worker s"
+    assert wsn.tab_name("WORKER", "s") == "worker s"
+    assert wsn.tab_name("LEAD", "s", LEAD) == "worker s"  # a worker in the lead's window is still `worker ...`
+    assert wsn.tab_name("OTHER", "s", LEAD) == "other s"
     assert wsn.tab_name("WORKER", "s", LEAD, None) == wsn.tab_name("WORKER", "s", LEAD, "")
     assert set(wsn.TAB_PREFIX) == set(wsn.KINDS)
 
 
 def test_tab_name_names_the_worktree_directory():
-    assert wsn.tab_name("WORKER", "s", LEAD, "/x/djbclark-ade-foo-wt") == f"worker s {LEAD} [wt: djbclark-ade-foo-wt]"
-    assert wsn.tab_name("WORKER", "s", LEAD, "/x/djbclark-ade-foo-wt/") == f"worker s {LEAD} [wt: djbclark-ade-foo-wt]"
-    assert wsn.tab_name("OTHER", "s", LEAD, "/x/y-wt") == f"other s {LEAD} [wt: y-wt]"
+    assert wsn.tab_name("WORKER", "s", LEAD, "/x/djbclark-ade-foo-wt") == "worker s [wt: djbclark-ade-foo-wt]"
+    assert wsn.tab_name("WORKER", "s", LEAD, "/x/djbclark-ade-foo-wt/") == "worker s [wt: djbclark-ade-foo-wt]"
+    assert wsn.tab_name("OTHER", "s", LEAD, "/x/y-wt") == "other s [wt: y-wt]"
 
 
 def test_tab_name_shortens_an_overlong_worktree_name_with_a_tilde():
     name = wsn.tab_name("WORKER", "s", LEAD, "/x/" + "w" * 200)
-    assert len(name) == wsn.NAME_LIMIT and name.endswith("~]") and name.startswith(f"worker s {LEAD} [wt: www")
+    assert len(name) == wsn.NAME_LIMIT and name.endswith("~]") and name.startswith("worker s [wt: www")
     # a worktree name that only just fits is not shortened
-    base = f"worker s {LEAD}"
+    base = "worker s"
     room = wsn.NAME_LIMIT - len(base) - len(" [wt: ]")
     fits = "d" * room
     assert wsn.tab_name("WORKER", "s", LEAD, f"/x/{fits}") == f"{base} [wt: {fits}]"
@@ -136,6 +138,80 @@ def test_tab_name_shortens_an_overlong_worktree_name_with_a_tilde():
 
 
 def test_tab_name_drops_the_worktree_part_when_there_is_no_room_and_strips_brackets():
-    long_slice = "s" * (wsn.NAME_LIMIT - len(f"worker  {LEAD}") - 3)  # leaves too little room for any `[wt: x]`
-    assert wsn.tab_name("WORKER", long_slice, LEAD, "/x/dir") == f"worker {long_slice} {LEAD}"
-    assert wsn.tab_name("WORKER", "s", LEAD, "/x/a[b]c") == f"worker s {LEAD} [wt: abc]"
+    long_slice = "s" * (wsn.NAME_LIMIT - len("worker ") - 3)  # leaves too little room for any `[wt: x]`
+    assert wsn.tab_name("WORKER", long_slice, LEAD, "/x/dir") == f"worker {long_slice}"
+    assert wsn.tab_name("WORKER", "s", LEAD, "/x/a[b]c") == "worker s [wt: abc]"
+
+
+def test_window_registry_roundtrip_and_backward_compatibility(tmp_path):
+    p = tmp_path / f"{LEAD}.windows.json"
+    # Missing file -> empty
+    assert wsn.read_window_registry(p) == (set(), {})
+    # Legacy format without `entries` still loads cleanly
+    p.write_text('{"windows": ["wks_old1"]}', encoding="utf-8")
+    assert wsn.read_window_registry(p) == ({"wks_old1"}, {})
+    # New format stores both `"windows"` and structured `"entries"` atomically
+    wsn.write_window_registry(
+        p,
+        {"wks_w1", "wks_o1"},
+        {
+            "wks_w1": {"windowId": "wks_w1", "box": "WORKER", "repo": "djbclark-ade", "lead": LEAD, "work": "Wave 9"},
+            "wks_o1": {"windowId": "wks_o1", "box": "OTHER", "repo": "tendcf", "lead": LEAD},
+            "wks_dropped": {"windowId": "wks_dropped", "box": "WORKER"},
+        },
+    )
+    ids, entries = wsn.read_window_registry(p)
+    assert ids == {"wks_w1", "wks_o1"}
+    assert entries["wks_w1"]["box"] == "WORKER" and entries["wks_w1"]["repo"] == "djbclark-ade"
+    assert entries["wks_o1"]["box"] == "OTHER" and "wks_dropped" not in entries
+    all_reg = wsn.all_registered_windows(tmp_path)
+    assert all_reg["wks_w1"]["box"] == "WORKER" and all_reg["wks_w1"]["lead"] == LEAD
+
+
+def test_window_registry_rejects_malformed_authority_symlinks_and_fifos(tmp_path):
+    """P2 Round 2: strict validation fails closed on corrupt authority, symlinks (including dangling),
+    FIFOs, and anchor escapes."""
+    import os
+
+    p = tmp_path / f"{LEAD}.windows.json"
+    bad_payloads = [
+        '{"windows": ["wks_w1"], "entries": null}',  # explicit null entries != legacy omitted entries
+        '{"windows": ["wks_w1"], "entries": []}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": "GARBAGE"}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": ""}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": null}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_other", "box": "WORKER"}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_orphan": {"windowId": "wks_orphan", "box": "WORKER"}}}',
+    ]
+    for raw in bad_payloads:
+        p.write_text(raw, encoding="utf-8")
+        with pytest.raises(ValueError):
+            wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Valid-target symlink must be rejected (ELOOP)
+    real_file = tmp_path / "real.json"
+    real_file.write_text('{"windows": ["wks_w1"]}', encoding="utf-8")
+    p.unlink()
+    p.symlink_to(real_file)
+    with pytest.raises(OSError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Dangling symlink must ALSO raise OSError (never silently treated as missing)
+    p.unlink()
+    p.symlink_to(tmp_path / "does-not-exist.json")
+    with pytest.raises(OSError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # FIFO must fail immediately without hanging
+    p.unlink()
+    os.mkfifo(p)
+    with pytest.raises(ValueError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Anchor escape rejected
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    outside = other_dir / f"{LEAD}.windows.json"
+    outside.write_text('{"windows": ["wks_w1"]}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        wsn.read_window_registry(outside, anchor_dir=tmp_path)

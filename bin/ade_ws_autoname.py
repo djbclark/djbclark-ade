@@ -46,7 +46,10 @@ import ade_ws_names as names  # noqa: E402
 
 WORK_LIMIT = 50  # characters of work text; the whole name stays under ade_ws_names.NAME_LIMIT
 _UUID = names.UUID_RE
-_WORKER_TAB_RE = re.compile(rf"^(?:worker|other)\s+(.+?)\s+{_UUID}(?:\s+\[wt: [^\]]*\])?$")
+# Display-text tidying ONLY (never authoritative metadata, 2026-11-25 ruling): strip redundant tab prefixes when
+# falling back to an agent's title because structured `labels.slice` is absent.
+_LEGACY_WORKER_TAB_RE = re.compile(rf"^(?:worker|other)\s+(.+?)\s+{_UUID}(?:\s+\[wt: [^\]]*\])?$")
+_CONCISE_WORKER_TAB_RE = re.compile(r"^(?:worker|other)\s+([A-Za-z0-9][A-Za-z0-9._-]*)(?:\s+\[wt: [^\]]*\])?$")
 _LEAD_TAB_RE = re.compile(r"^(?:LEAD|MAIN)\s+(.+)$")  # the tab names `LEAD <repo> <work>`; an ordinary "Lead the migration" stays
 PLACEMENT_KINDS = {"lead": "LEAD", "main": "LEAD", "worker": "WORKER", "workers": "WORKER", "other": "OTHER", "user": "OTHER"}
 
@@ -57,8 +60,14 @@ def skip(reason: str, retry: bool = False) -> dict:
 
 
 def kind_for(agent: dict) -> str:
-    """WORKER for an agent with a parent or lead; LEAD/WORKER/OTHER only as the explicit `ade.placement` label says; else LEAD."""
+    """Decide LEAD/WORKER/OTHER strictly from structured agent metadata (never from display titles).
+
+    Priority: `ade.box` label -> `ade.placement` label -> `parentAgentId` or `ade.lead` label -> LEAD.
+    """
     labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
+    raw_box = str(labels.get("ade.box") or "").strip().upper()
+    if raw_box in names.BOX_OF:
+        return names.BOX_OF[raw_box]
     placement = PLACEMENT_KINDS.get(str(labels.get("ade.placement") or "").strip().lower())
     if placement:
         return placement
@@ -67,26 +76,52 @@ def kind_for(agent: dict) -> str:
     return "LEAD"
 
 
+def _clean_work_text(raw: str, repo: str) -> str | None:
+    text = " ".join(raw.split())  # one line, single spaces, no control characters
+    text = "".join(ch for ch in text if ch.isprintable())
+    if text.startswith(repo + " "):
+        text = text[len(repo) + 1:]
+    text = text.replace("(", "[").replace(")", "]").strip(" -:")  # a work text is formatted inside `(...)`
+    if len(text) > WORK_LIMIT:
+        cut = text[:WORK_LIMIT].rsplit(" ", 1)[0] or text[:WORK_LIMIT]
+        text = cut.rstrip(" -:,;")
+    return text if text and text != repo else None
+
+
 def work_from_title(title: object, repo: str) -> str | None:
-    """A short single-line work text from an agent tab title, or None when nothing usable is left."""
+    """A short single-line work text from an agent display title, or None when nothing usable is left."""
     if not isinstance(title, str):
         return None
-    text = " ".join(title.split())  # one line, single spaces, no control characters
+    text = " ".join(title.split())
     text = "".join(ch for ch in text if ch.isprintable())
-    m = _WORKER_TAB_RE.match(text)
+    m = _LEGACY_WORKER_TAB_RE.match(text) or _CONCISE_WORKER_TAB_RE.match(text)
     if m:
         text = m.group(1)
     else:
         m = _LEAD_TAB_RE.match(text)
         if m:
             text = m.group(1)
-    if text.startswith(repo + " "):
-        text = text[len(repo) + 1:]
-    text = text.replace("(", "[").replace(")", "]").strip(" -:")  # a work text is read back by a `(.+)$` parser
-    if len(text) > WORK_LIMIT:
-        cut = text[:WORK_LIMIT].rsplit(" ", 1)[0] or text[:WORK_LIMIT]
-        text = cut.rstrip(" -:,;")
-    return text if text and text != repo else None
+    return _clean_work_text(text, repo)
+
+
+def work_for_agent(agent: dict, repo: str) -> str | None:
+    """Derive `<work>` from structured labels first (`slice`), falling back to display title text."""
+    labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
+    raw_slice = labels.get("slice")
+    if isinstance(raw_slice, str) and raw_slice.strip():
+        cleaned = _clean_work_text(raw_slice, repo)
+        if cleaned:
+            return cleaned
+    return work_from_title(agent.get("title"), repo)
+
+
+def repo_for_agent(agent: dict, cwd: str) -> str:
+    """Prefer structured `ade.repo` label when valid, else inspect git/cwd via `ade_ws_names.repo_of`."""
+    labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
+    raw_repo = labels.get("ade.repo")
+    if isinstance(raw_repo, str) and names.REPO_RE.fullmatch(raw_repo.strip()):
+        return raw_repo.strip()
+    return names.repo_of(cwd)
 
 
 def decide(info: dict) -> dict:
@@ -108,12 +143,12 @@ def decide(info: dict) -> dict:
     labels = agent.get("labels") if isinstance(agent.get("labels"), dict) else {}
     if labels.get("slice") and labels.get("ade.lead"):
         return skip("a bin/ade-worker-run launch (slice + ade.lead labels): it names its own window")
-    repo = names.repo_of(cwd)
+    repo = repo_for_agent(agent, cwd)
     try:
         names.check_repo(repo)
     except ValueError:
         return skip(f"repo name {repo!r} is not a valid window-name part")
-    work = work_from_title(agent.get("title"), repo)
+    work = work_for_agent(agent, repo)
     if not work:
         return skip("no agent title yet to take the work text from", retry=True)
     kind = kind_for(agent)

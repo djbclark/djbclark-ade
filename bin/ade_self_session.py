@@ -260,9 +260,13 @@ NO_INHERITED_THINKING = ('', '-', 'auto', 'default')
 BOOTSTRAP_TITLE = re.compile(r'Self-handoff\b')  # the prompt-derived title of a successor created before st-01
 ROLE_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}')
 TITLE_LIMIT = 200  # Paseo's MAX_EXPLICIT_AGENT_TITLE_CHARS
-# A retired predecessor is renamed `RETIRED <its old name> (-> <successor id>)` (2026-11-22): the successor keeps the inherited
-# name (st-01), so without it the sidebar shows the live lead and every retired one under one name.
+# A retired predecessor is marked with structured labels (`ade.retired=1`, `ade.retired_to=<successor>`) and durable
+# record state (`record['retired']`, `status == 'archived'`). For human sidebar readability it is also renamed
+# `RETIRED <its old name> (-> <successor id>)` when its title matches the successor's; `RETIRED_PREFIX` is purely a
+# human visual cue (read as a legacy-only fallback for pre-2026-11-25 tabs, never an inter-agent metadata channel).
 RETIRED_PREFIX = 'RETIRED '
+RETIRED_LABEL = 'ade.retired'
+RETIRED_TO_LABEL = 'ade.retired_to'
 LEAD_WINDOW = re.compile(r'LEAD \S+ \(.+\)')  # the current window name `ade-worker-run rename-lead` gives a lead
 # Matches `bin/ade_ws_names.py` (`REPO_RE` and `NAME_LIMIT`) so advised `rename-lead` flags are always accepted.
 WS_REPO_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
@@ -1150,6 +1154,71 @@ class Service:
                 return rec['identity']
         return None
 
+    def _agent_state_labels(self, agent_id):
+        """Read structured labels from `$PASEO_HOME/agents/*/<agent_id>.json`, else {} (never raises)."""
+        try:
+            for path in sorted((self.home / 'agents').glob(f'*/{ident(agent_id)}.json')):
+                data = json.loads(read_regular(path, 262144))
+                labels = data.get('labels') if isinstance(data, dict) else None
+                if isinstance(labels, dict):
+                    return labels
+        except (OSError, ValueError, SessionError, AttributeError, RecursionError):
+            pass
+        return {}
+
+    def _merged_labels(self, agent_id, row=None):
+        """Merge agent state labels with inspect/list row labels (row wins over state file)."""
+        merged = dict(self._agent_state_labels(agent_id))
+        if isinstance(row, dict):
+            for key in ('labels', 'Labels'):
+                cand = row.get(key)
+                if isinstance(cand, dict):
+                    merged.update(cand)
+        return merged
+
+    def has_retired_label(self, agent_id, row=None):
+        """True when explicit positive `ade.retired` (`1`/`true`/`yes`) is present (and `ade.retired_to`, if set,
+        is a valid distinct UUID). Never treats bare `ade.retired_to` alone as retired."""
+        labels = self._merged_labels(agent_id, row)
+        if str(labels.get(RETIRED_LABEL) or '').strip().lower() not in ('1', 'true', 'yes'):
+            return False
+        if RETIRED_TO_LABEL in labels and labels[RETIRED_TO_LABEL] is not None:
+            rt = labels[RETIRED_TO_LABEL]
+            if not isinstance(rt, str):
+                return False
+            try:
+                rt_norm = ident(rt.strip().lower())
+            except SessionError:
+                return False
+            if rt_norm == str(agent_id).lower():
+                return False
+        return True
+
+    def has_complete_retired_labels(self, agent_id, successor, row=None):
+        """True only when BOTH positive `ade.retired` AND exact `ade.retired_to == successor` are present."""
+        if not self.has_retired_label(agent_id, row):
+            return False
+        labels = self._merged_labels(agent_id, row)
+        rt = labels.get(RETIRED_TO_LABEL)
+        return isinstance(rt, str) and rt.strip().lower() == str(successor).strip().lower()
+
+    def is_agent_retired(self, agent_id, row=None):
+        """True when structured state (`handoff-<id>.json` archived/retired) or structured `ade.retired` label
+        marks `agent_id` as retired (2026-11-25 ruling: authoritative structured state, never display-name only)."""
+        if self.has_retired_label(agent_id, row):
+            return True
+        try:
+            rec_path = self.state / f'handoff-{ident(agent_id)}.json'
+            if rec_path.is_file():
+                rec = json.loads(read_regular(rec_path, 262144))
+                if (isinstance(rec, dict) and rec.get('home') == str(self.home)
+                        and rec.get('kind') == 'handoff' and rec.get('predecessor') == agent_id
+                        and (rec.get('status') == 'archived' or isinstance(rec.get('retired'), dict))):
+                    return True
+        except (OSError, ValueError, SessionError, RecursionError):
+            pass
+        return False
+
     def plan_identity(self, source, predecessor, requested_title=None, requested_role=None):
         """Title and labels the successor takes over, with where each came from (recorded, never secret).
 
@@ -1157,10 +1226,7 @@ class Service:
         name is still the prompt-derived bootstrap one), else a derived `Lead <role>` / `Lead (self-handoff
         successor)`. A generated title never holds an agent id: paseo#9668 resolves `agent archive SHORTID`
         by partial title match when the id is missing from the listing, so an id prefix in a lead's title
-        would let that fallback pick the live lead. (The one id-bearing title is the RETIRED predecessor's, set after its
-        archive. While it stays archived a title match meets it as AGENT_ALREADY_ARCHIVED; once an operator message revives it,
-        a manual `agent archive|reload|detach SUCCESSOR_ID` acts on it, as an ordinary agent, when the successor is missing from
-        the listing: the same class as a `worker <slice> <lead id>` tab, and never the live lead.)
+        would let that fallback pick the live lead.
         Labels: `ade.predecessor`; `ade.chain` (the first lead's id, carried from the predecessor's record,
         else the predecessor itself); `ade.role` from --role or the predecessor's record.
         """
@@ -1177,8 +1243,16 @@ class Service:
         except SessionError:
             role_source = None
         name = source.get('Name')
-        live = None if not isinstance(name, str) or name.strip() in ('', '-') or BOOTSTRAP_TITLE.match(name.strip()) \
-            or name.startswith(RETIRED_PREFIX) else usable_title(name)  # a revived RETIRED name is not the lead's title
+        # Check structured retirement first; `RETIRED_PREFIX` is kept only as a legacy display-title filter so a
+        # pre-2026-11-25 retired tab's banner is never inherited as the live lead's display title.
+        is_retired_source = self.is_agent_retired(predecessor, source)
+        live = None if (
+            not isinstance(name, str)
+            or name.strip() in ('', '-')
+            or BOOTSTRAP_TITLE.match(name.strip())
+            or is_retired_source
+            or name.startswith(RETIRED_PREFIX)
+        ) else usable_title(name)
         derived = f'Lead {labels["ade.role"]}' if 'ade.role' in labels else 'Lead (self-handoff successor)'
         title, title_source = next((t, s) for t, s in (
             (requested_title, 'requested'), (live, 'predecessor-name'), (usable_title(prior.get('title')),
@@ -1718,6 +1792,11 @@ class Service:
                 break
             self.reassert_identity(record, 'finish')
             record['status'] = 'archived'
+            record.setdefault('retired', {
+                'agent': record['predecessor'],
+                'successor': record['successor'],
+                'at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            })
             self.resolve_native_error(record)
             self.save(target, record)
             self.rebind_claims(record, target)
@@ -1728,16 +1807,15 @@ class Service:
             return record
 
     def retire_predecessor_name(self, record, target):
-        """Rename the archived predecessor `RETIRED <old name> (-> <successor id>)` when it carries the successor's own title.
+        """Record structured retirement labels (`ade.retired=1`, `ade.retired_to=<successor>`) on the archived
+        predecessor, and rename its display title `RETIRED <old name> (-> <successor id>)` when it clashes with the
+        successor's own title.
 
-        The successor inherits the predecessor's name (st-01), so the sidebar showed the live lead and every retired one under one
-        name (2026-11-22: three agents named `fork-release-alerts`), and an operator who typed into a retired one (Paseo un-archives
-        on a message) could not tell. The rename comes AFTER the archive is confirmed: Paseo's `agent update` on an archived agent
-        rewrites only the stored title (`writeStoredMetadata` keeps `archivedAt`), and a readback proves `Archived` still holds; a
-        rename of a still-live predecessor would also lie while the archive is retried. Outcome in `identity.checks.retire_rename`:
-        `ok` (renamed, or already `RETIRED ...`), `skipped` or `failed`, the reason in `identity.retire_rename` (`reason`, `name`,
-        `native_error`). Never fails finish, and a re-run retries anything but `ok` and a final skip. A record without an `identity`
-        block (before st-01) is left alone."""
+        Operator ruling 2026-11-25: retirement metadata is carried by durable state (`handoff-<pred>.json` `status ==
+        'archived'` + `record['retired']`) and structured agent labels (`ade.retired=1`, `ade.retired_to=<successor>`),
+        NEVER solely by `RETIRED_PREFIX` in the display title. The `RETIRED ` display rename stays purely as a human
+        sidebar cue so the live lead and archived predecessor do not look identical; legacy `RETIRED ` prefixes are
+        recognised only as a harmless fallback so we do not double-prefix a pre-existing retired tab."""
         identity = record.get('identity')
         if not isinstance(identity, dict) or not isinstance(record.get('successor'), str):
             return
@@ -1758,16 +1836,37 @@ class Service:
                 predecessor, successor = record['predecessor'], record['successor']
                 row = self.inspect(predecessor)
                 name = usable_title(row.get('Name'))
+                label_args = ['--label', f'{RETIRED_LABEL}=1', '--label', f'{RETIRED_TO_LABEL}={successor}']
                 if row.get('Archived') is not True:
                     state, detail = 'skipped', {'reason': 'predecessor-not-archived'}
                 elif name is not None and name.startswith(RETIRED_PREFIX):
-                    state, detail = 'ok', {'reason': 'already-retired', 'name': name}
+                    if not self.has_complete_retired_labels(predecessor, successor, row):
+                        op = 'agent update'
+                        self.native('agent', 'update', predecessor, *label_args)
+                        op = 'agent inspect'
+                        after = self.inspect(predecessor)
+                        if after.get('Archived') is not True:
+                            detail = {'reason': 'rename-unarchived-predecessor', 'name': name}
+                        else:
+                            state, detail = 'ok', {'reason': 'already-retired', 'name': name}
+                    else:
+                        state, detail = 'ok', {'reason': 'already-retired', 'name': name}
                 elif name != title:
-                    state, detail = 'skipped', {'reason': 'names-differ'}  # already told apart: nothing to mark
+                    if not self.has_complete_retired_labels(predecessor, successor, row):
+                        op = 'agent update'
+                        self.native('agent', 'update', predecessor, *label_args)
+                        op = 'agent inspect'
+                        after = self.inspect(predecessor)
+                        if after.get('Archived') is not True:
+                            detail = {'reason': 'rename-unarchived-predecessor', 'name': name}
+                        else:
+                            state, detail = 'skipped', {'reason': 'names-differ'}
+                    else:
+                        state, detail = 'skipped', {'reason': 'names-differ'}  # already told apart: human name kept; structured labels present
                 else:
                     new = retired_title(name, successor)
                     op = 'agent update'
-                    self.native('agent', 'update', predecessor, '--name=' + new)
+                    self.native('agent', 'update', predecessor, '--name=' + new, *label_args)
                     op = 'agent inspect'
                     after = self.inspect(predecessor)
                     if after.get('Archived') is not True:

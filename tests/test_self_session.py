@@ -1240,11 +1240,19 @@ def archive_calls(native):
 
 
 def only_reads_and_archive(native):
-    """The wait never forces, never archives a workspace, never sends the predecessor anything."""
+    """The wait never forces, never archives a workspace, never sends the predecessor anything;
+    structured retirement labels (`agent update --label ade.retired=1 ...`) occur only after `agent archive`."""
+    archived_seen = False
     for argv, _ in native.calls:
         if argv[0] == 'paseo':
-            assert argv[4:6] in (['agent', 'inspect'], ['agent', 'ls'], ['agent', 'archive'],
-                                 ['provider', 'ls'], ['workspace', 'ls'], ['agent', 'run']), argv
+            if argv[4:6] == ['agent', 'archive']:
+                archived_seen = True
+            if argv[4:6] == ['agent', 'update']:
+                assert archived_seen, f'agent update before archive: {argv}'
+                assert '--label' in argv and 'ade.retired=1' in argv, argv
+            else:
+                assert argv[4:6] in (['agent', 'inspect'], ['agent', 'ls'], ['agent', 'archive'],
+                                     ['provider', 'ls'], ['workspace', 'ls'], ['agent', 'run']), argv
             assert '--force' not in argv and 'send' not in argv
 
 
@@ -1714,7 +1722,8 @@ def test_successor_keeps_predecessor_title_and_chain_labels_through_accept_and_f
     finished = service.finish(path)
     assert finished['status'] == 'archived' and finished['identity']['checks']['finish'] == 'ok'
     retired = f'RETIRED Lead tendcf (cfengine) (-> {SUCC})'
-    assert native.updates == [[PRED, '--name=' + retired]] and native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
+    assert native.updates == [[PRED, '--name=' + retired, '--label', 'ade.retired=1', '--label', f'ade.retired_to={SUCC}']]
+    assert native.rows[SUCC]['Name'] == 'Lead tendcf (cfengine)'
     assert native.rows[PRED]['Name'] == retired and native.rows[PRED]['Archived'] is True
     assert finished['identity']['checks']['retire_rename'] == 'ok'
     assert finished['identity']['retire_rename'] == {'reason': 'renamed', 'name': retired}
@@ -1813,7 +1822,9 @@ def test_finish_repairs_a_successor_paseo_retitled_after_accept(setup):
     assert finished['identity']['checks'] == {'create': 'requested', 'accept': 'ok', 'finish': 'repaired',
                                               'retire_rename': 'skipped'}  # the predecessor had no name to clash with
     assert native.rows[SUCC]['Name'] == record['identity']['title']
-    assert [u[1] for u in native.updates] == ['--name=' + record['identity']['title']]  # labels were intact
+    succ_updates = [u for u in native.updates if u[0] == SUCC]
+    assert [u[1] for u in succ_updates] == ['--name=' + record['identity']['title']]  # labels were intact
+    assert PRED in native.labels.get('ade.retired=1', set())
 
 
 def test_a_paseo_refusal_to_rename_is_recorded_and_not_fatal_then_resolved(setup):
@@ -2918,7 +2929,10 @@ def test_a_predecessor_already_told_apart_is_not_renamed(setup):
     finished = settle(service, native, record, Path(record['record']))
     assert finished['identity']['checks']['retire_rename'] == 'skipped'
     assert finished['identity']['retire_rename'] == {'reason': 'names-differ'}
-    assert native.updates == [] and native.rows[PRED]['Name'] == 'Lead other'
+    assert native.rows[PRED]['Name'] == 'Lead other'
+    assert not any(any(a.startswith('--name=') for a in u) for u in native.updates)
+    assert PRED in native.labels.get('ade.retired=1', set())
+    assert PRED in native.labels.get(f'ade.retired_to={SUCC}', set())
 
 
 def test_an_already_retired_predecessor_name_is_kept(setup):
@@ -2929,7 +2943,9 @@ def test_an_already_retired_predecessor_name_is_kept(setup):
     finished = service.finish(path)
     assert finished['identity']['checks']['retire_rename'] == 'ok'
     assert finished['identity']['retire_rename']['reason'] == 'already-retired'
-    assert native.updates == [] and native.rows[PRED]['Name'] == 'RETIRED by hand'
+    assert native.rows[PRED]['Name'] == 'RETIRED by hand'
+    assert not any(any(a.startswith('--name=') for a in u) for u in native.updates)
+    assert PRED in native.labels.get('ade.retired=1', set())
 
 
 def test_a_refused_rename_is_recorded_not_fatal_and_a_rerun_retries_it(setup):
@@ -3277,6 +3293,8 @@ def test_lead_window_advice_command_parses_and_passes_ade_worker_run_rename_lead
         'args = sys.argv[1:]\n'
         f'if args == ["workspace", "ls", "--json"]:\n'
         f'    print(json.dumps([{{"workspaceId": {WS!r}, "name": "MAIN ops (stale)", "cwd": {str(repo_dir)!r}}}]))\n'
+        'elif args == ["ls", "-g", "--json"]:\n'
+        '    print("[]")\n'
         'elif args[:2] == ["workspace", "rename"]:\n'
         '    print("{}")\n'
         'else:\n'
@@ -3284,7 +3302,7 @@ def test_lead_window_advice_command_parses_and_passes_ade_worker_run_rename_lead
         '    sys.exit(1)\n'
     )
     fake_paseo.chmod(0o755)
-    env = {**os.environ, 'PATH': f'{fake_bin}:{os.environ.get("PATH", "")}',
+    env = {**os.environ, 'ADE_PASEO_BIN': str(fake_paseo),
            'PASEO_HOME': str(paseo_home), 'PASEO_AGENT_ID': SUCC,
            'ADE_WORKER_RUN_STATE': str(state_dir)}
     res = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
@@ -4122,6 +4140,66 @@ def test_q122_malformed_paseo_agent_id_keeps_strict_ident_error(setup):
         service.handoff(checkpoint, quiesced=True)
     assert str(exc.value) == 'a full UUID is required'
     assert native.calls == []
+
+
+def test_q126_retirement_recorded_and_checked_via_structured_state_and_labels(setup):
+    """Carried #126 (2026-11-25): finish records durable `retired` state and sets structured
+    `ade.retired=1` / `ade.retired_to=<successor>` labels even when a human renamed the predecessor tab,
+    and plan_identity treats a structurally retired agent as retired without relying on `RETIRED ` prefix."""
+    service, native, record, path = named_chain(setup, name='LEAD djbclark-ade')
+    # Human renamed the predecessor tab before finish: display name must not be clobbered,
+    # yet structured retirement state and labels MUST be recorded.
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.rows[PRED]['Name'] = 'Daniel debugging Venice'
+    finished = service.finish(path)
+    assert finished['status'] == 'archived'
+    assert finished['retired']['agent'] == PRED and finished['retired']['successor'] == SUCC
+    assert native.rows[PRED]['Name'] == 'Daniel debugging Venice'
+    assert PRED in native.labels.get('ade.retired=1', set())
+    assert PRED in native.labels.get(f'ade.retired_to={SUCC}', set())
+
+    # If a predecessor carries structured `ade.retired=1` with a custom human name (no `RETIRED ` prefix),
+    # plan_identity still recognises it as retired and never inherits its display name.
+    source_with_label = dict(native.rows[PRED], Name='My custom tab', Labels={'ade.retired': '1'})
+    planned = service.plan_identity(source_with_label, PRED)
+    assert planned['title_source'] == 'derived' and planned['title'] != 'My custom tab'
+
+
+def test_q126_round2_consistent_retired_labels_and_readback_on_label_only_update(setup):
+    """Round 2: `has_retired_label` requires positive `ade.retired` (never bare `ade.retired_to`),
+    `retire_predecessor_name` stamps BOTH `ade.retired=1` and `ade.retired_to=<successor>` when either is
+    missing on `names-differ`/`already-retired`, and verifies archived readback after label-only updates."""
+    service, native, record, path = named_chain(setup, name='LEAD djbclark-ade')
+    # Bare `ade.retired_to` without truthy `ade.retired` must NOT count as retired.
+    assert service.has_retired_label(PRED, {'Labels': {'ade.retired_to': SUCC}}) is False
+    assert service.has_retired_label(PRED, {'Labels': {'ade.retired': '0', 'ade.retired_to': SUCC}}) is False
+    assert service.has_retired_label(PRED, {'Labels': {'ade.retired': '1', 'ade.retired_to': 'not-a-uuid'}}) is False
+    assert service.has_complete_retired_labels(PRED, SUCC, {'Labels': {'ade.retired': '1'}}) is False
+
+    # Predecessor already has `ade.retired=1` (missing `ade.retired_to`) and a custom human name ->
+    # finish MUST still stamp both labels and run archived readback.
+    accept(service, record, path)
+    native.rows[PRED]['Status'] = 'idle'
+    native.rows[PRED]['Name'] = 'Custom human name'
+    native.rows[PRED]['Labels'] = {'ade.retired': '1'}
+    finished = service.finish(path)
+    assert finished['identity']['checks']['retire_rename'] == 'skipped'
+    assert finished['identity']['retire_rename']['reason'] == 'names-differ'
+    assert PRED in native.labels.get('ade.retired=1', set())
+    assert PRED in native.labels.get(f'ade.retired_to={SUCC}', set())
+
+    # If a label-only update unarchives the predecessor on `already-retired`, readback MUST catch it.
+    native.rows[PRED]['Name'] = 'RETIRED already'
+    native.rows[PRED]['Labels'] = {}
+    native.rename_unarchives = True
+    # Reset retire_rename check to re-run it
+    finished['identity']['checks'].pop('retire_rename', None)
+    finished['identity'].pop('retire_rename', None)
+    service.save(path, finished)
+    res = service.finish(path)
+    assert res['identity']['checks']['retire_rename'] == 'failed'
+    assert res['identity']['retire_rename']['reason'] == 'rename-unarchived-predecessor'
 
 
 @pytest.mark.parametrize('workspace_override', [None, ''])

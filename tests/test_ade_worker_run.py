@@ -159,7 +159,7 @@ def test_first_launch_creates_and_renames(env):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out.pop("reportPath").endswith("/alpha-report.md") and out.pop("donePath").endswith("/alpha-report.md.done")
-    assert out == {"agentId": AGENT, "workspaceId": "wks_abc123", "windowName": WIN, "tabName": f"worker alpha {LEAD}"}
+    assert out == {"agentId": AGENT, "workspaceId": "wks_abc123", "windowName": WIN, "tabName": "worker alpha"}
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     assert run[run.index("--new-workspace") + 1] == "local" and "--workspace" not in run
     assert run[run.index("--cwd") + 1] == os.path.realpath("/repo")
@@ -168,7 +168,7 @@ def test_first_launch_creates_and_renames(env):
     rename = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["workspace", "rename"])
     assert rename == ["workspace", "rename", "wks_abc123", WIN]
     update = next(c["argv"] for c in env.calls() if c["argv"][:2] == ["agent", "update"])
-    assert update == ["agent", "update", AGENT, "--name", f"worker alpha {LEAD}"]
+    assert update == ["agent", "update", AGENT, "--name", "worker alpha"]
 
 
 def test_second_launch_reuses_the_window(env):
@@ -180,7 +180,7 @@ def test_second_launch_reuses_the_window(env):
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     assert run[run.index("--workspace") + 1] == "wks_abc123" and "--new-workspace" not in run
     assert ["workspace", "rename"] not in env.verbs()
-    assert json.loads(r.stdout)["tabName"] == f"worker beta {LEAD}"
+    assert json.loads(r.stdout)["tabName"] == "worker beta"
 
 
 def test_two_matching_windows_refuse(env):
@@ -242,7 +242,7 @@ def test_labels_present(env):
     assert launch(env).returncode == 0
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
     labels = [run[i + 1] for i, x in enumerate(run) if x == "--label"]
-    assert labels == [f"ade.lead={LEAD}", "slice=alpha"]
+    assert labels == [f"ade.lead={LEAD}", "slice=alpha", "ade.box=WORKER", "ade.repo=repo"]
 
 
 @pytest.mark.parametrize("bad", [["--workspace", "wks_x"], ["--new-workspace", "local"], ["--cwd", "/x"],
@@ -515,8 +515,8 @@ def test_on_behalf_of_lead_allows_it(env, monkeypatch):
     r = launch(env, "alpha", "--on-behalf-of-lead")  # mints the window
     assert r.returncode == 0
     run = next(c["argv"] for c in env.calls() if c["argv"][0] == "run")
-    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=alpha"]
-    assert json.loads(r.stdout)["tabName"] == f"worker alpha {LEAD}"
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=alpha", "ade.box=WORKER", "ade.repo=repo"]
+    assert json.loads(r.stdout)["tabName"] == "worker alpha"
     env.data = json.loads(env.data_path.read_text())  # keep the stub's rename
     assert archive(env, "--on-behalf-of-lead", "--dry-run").returncode == 0
 
@@ -563,7 +563,7 @@ def test_repo_comes_from_the_main_checkout_even_in_a_linked_worktree(env, tmp_pa
     r = env.run("--lead", LEAD, "--slice", "a", "--window-middle", "Wave 7", "--cwd", str(wt), "--", "--no-wait", f"work in {wt}")
     assert r.returncode == 0, r.stderr
     assert rename_calls(env)[0][3] == "WORKER my-repo (Wave 7)"
-    assert json.loads(r.stdout)["tabName"] == f"worker a {LEAD} [wt: my-repo-feature-wt]"  # a --cwd that is a linked worktree is named
+    assert json.loads(r.stdout)["tabName"] == "worker a [wt: my-repo-feature-wt]"  # a --cwd that is a linked worktree is named
 
 
 def test_first_launch_without_a_middle_opens_the_default_work_box(env):
@@ -580,7 +580,8 @@ def test_legacy_window_matched_and_renamed_before_launch(env, legacy):
     env.data["workspaces"] = [{"workspaceId": "wks_old1", "name": legacy, "cwd": "/repo"}]
     r = launch(env, "beta")
     assert r.returncode == 0, r.stderr
-    assert env.verbs() == [["ls"], ["workspace", "ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"], ["agent", "inspect"]]  # rename first (2nd ls: name-free check)
+    # foreign_agents (`ls`) runs before rename/launch even on legacy migration (2nd workspace ls: name-free check)
+    assert env.verbs() == [["ls"], ["workspace", "ls"], ["ls"], ["workspace", "ls"], ["workspace", "rename"], ["run"], ["agent", "update"], ["agent", "inspect"]]
     assert rename_calls(env) == [["workspace", "rename", "wks_old1", WIN]]  # `repo ` prefix of the middle is folded into KIND repo
     run = run_argv(env)
     assert run[run.index("--workspace") + 1] == "wks_old1" and "--new-workspace" not in run
@@ -869,15 +870,16 @@ def test_main_placement_launches_into_the_leads_window(main_env, flag):
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out.pop("reportPath").endswith("/op1-report.md") and out.pop("donePath").endswith("/op1-report.md.done")
-    assert out == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": LEAD_NAME, "tabName": f"worker op1 {LEAD}"}
+    assert out == {"agentId": AGENT, "workspaceId": LEAD_WKS, "windowName": LEAD_NAME, "tabName": "worker op1"}
     run = run_argv(main_env)
     assert run[run.index("--workspace") + 1] == LEAD_WKS and "--new-workspace" not in run
     assert run[run.index("--cwd") + 1] == "/repo/lead"
-    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=op1", "ade.placement=main"]
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"][:3] == [f"ade.lead={LEAD}", "slice=op1", "ade.box=LEAD"]
+    assert "ade.placement=main" in [run[i + 1] for i, x in enumerate(run) if x == "--label"]
     assert rename_calls(main_env) == []  # an already-LEAD window is not renamed by a launch
     assert LEAD_WKS not in registry(LEAD)  # the record means "WORKER windows": a LEAD launch never writes it
     assert all(c["env"]["PASEO_WORKSPACE_ID"] is None for c in main_env.calls())
-    assert ["agent", "update", AGENT, "--name", f"worker op1 {LEAD}"] in [c["argv"] for c in main_env.calls()]
+    assert ["agent", "update", AGENT, "--name", "worker op1"] in [c["argv"] for c in main_env.calls()]
 
 
 def test_main_placement_uses_the_agent_record_not_the_ambient_workspace_id(main_env, monkeypatch):
@@ -898,13 +900,29 @@ def test_main_placement_migrates_a_2026_11_13_main_name_to_lead_first(main_env, 
     assert json.loads(r.stdout)["windowName"] == LEAD_NAME
 
 
-@pytest.mark.parametrize("name", ["djbclark-ade Wave 7", "master", "MAINTAIN x", "Main x", "WORKER repo (Wave 7)",
-                                  "OTHER repo (Wave 7)", "WORKERS repo (Wave 7)", "USER repo (Wave 7)", f"workers repo Wave 7 {LEAD}"])
-def test_main_placement_refuses_a_window_that_is_not_main(main_env, name):
-    main_env.data["workspaces"][0]["name"] = name
-    r = interactive(main_env, "--interactive")
-    assert r.returncode == 1 and ("rename-main" in r.stderr or "rename it by hand" in r.stderr)
-    assert ["run"] not in main_env.verbs() and rename_calls(main_env) == []
+@pytest.mark.parametrize("name", ["Daniel debugging Venice", "djbclark-ade Wave 7", "master", "MAINTAIN x", "Main x"])
+def test_main_placement_accepts_human_renamed_lead_window(no_path_main_env, name):
+    """Carried #126 (2026-11-25, no PATH mutation): --placement lead resolves the lead's window from its agent record and
+    never refuses just because a human renamed the window away from `LEAD ...`."""
+    no_path_main_env.data["workspaces"][0]["name"] = name
+    r = interactive(no_path_main_env, "--interactive")
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["workspaceId"] == LEAD_WKS and out["windowName"] == name
+    assert rename_calls(no_path_main_env) == []
+
+
+def test_main_placement_refuses_structurally_registered_worker_or_other_box(no_path_main_env):
+    """Structured metadata (not display name, no PATH mutation) prevents launching --placement lead into a registered WORKER/OTHER box."""
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / f"{LEAD}.windows.json").write_text(json.dumps({
+        "windows": [LEAD_WKS],
+        "entries": {LEAD_WKS: {"windowId": LEAD_WKS, "box": "WORKER", "repo": "repo", "lead": LEAD}},
+    }))
+    r = interactive(no_path_main_env, "--interactive")
+    assert r.returncode == 1 and "registered as a WORKER box" in r.stderr
+    assert ["run"] not in no_path_main_env.verbs() and rename_calls(no_path_main_env) == []
 
 
 def test_main_placement_needs_the_lead_to_be_the_caller(main_env, monkeypatch):
@@ -1927,7 +1945,7 @@ def test_a_minted_window_sits_in_the_primary_checkout_not_the_claimed_worktree(e
     assert run[run.index("--cwd") + 1] == os.path.realpath(main)
     out = json.loads(r.stdout)
     assert out["windowName"] == "WORKER libntech (strictjson)"
-    assert out["tabName"] == f"worker s {LEAD} [wt: libntech-strictjson-wt]"  # the claimed worktree is named in the tab
+    assert out["tabName"] == "worker s [wt: libntech-strictjson-wt]"  # the claimed worktree is named in the tab
     assert out["cwd"] == os.path.realpath(main) and out["requestedCwd"] == os.path.realpath(wt)  # said, not silent
     assert "primary checkout" in r.stderr
     # the placement check compares with the primary checkout: a worker that started there passes, one elsewhere is stopped
@@ -2227,7 +2245,7 @@ def test_one_box_is_reused_across_slices_and_window_middles(env):
     assert r2.returncode == 0 and r3.returncode == 0, (r2.stderr, r3.stderr)
     outs = [json.loads(r.stdout) for r in (r1, r2, r3)]
     assert {o["workspaceId"] for o in outs} == {"wks_abc123"} and {o["windowName"] for o in outs} == {WIN}
-    assert [o["tabName"] for o in outs] == [f"worker {x} {LEAD}" for x in "abc"]
+    assert [o["tabName"] for o in outs] == [f"worker {x}" for x in "abc"]
     assert run_places(env) == [(None, True), ("wks_abc123", False), ("wks_abc123", False)]  # one workspace create
     assert rename_calls(env) == [["workspace", "rename", "wks_abc123", WIN]]  # named once, when it was opened
     assert registry(LEAD) == {"wks_abc123"}
@@ -2285,8 +2303,8 @@ def test_worker_placement_spellings_all_land_in_the_worker_box(env, flag):
     r = mw(env, "a", *flag, middle="Wave 7")
     assert r.returncode == 0, r.stderr
     run = run_argv(env)
-    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=a"]  # no placement label
-    assert json.loads(r.stdout)["windowName"] == WIN and json.loads(r.stdout)["tabName"] == f"worker a {LEAD}"
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=a", "ade.box=WORKER", "ade.repo=repo"]
+    assert json.loads(r.stdout)["windowName"] == WIN and json.loads(r.stdout)["tabName"] == "worker a"
 
 
 @pytest.mark.parametrize("flag", [["--placement", "other"], ["--other"]])
@@ -2294,16 +2312,16 @@ def test_other_placement_opens_the_other_box_and_reuses_it(env, flag):
     r = mw(env, "p1", *flag)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert out["windowName"] == OTHER_WIN and out["tabName"] == f"other p1 {LEAD}" and out["workspaceId"] == "wks_abc123"
+    assert out["windowName"] == OTHER_WIN and out["tabName"] == "other p1" and out["workspaceId"] == "wks_abc123"
     run = run_argv(env)
-    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=p1", "ade.placement=other"]
+    assert [run[i + 1] for i, x in enumerate(run) if x == "--label"] == [f"ade.lead={LEAD}", "slice=p1", "ade.box=OTHER", "ade.repo=repo", "ade.placement=other"]
     assert rename_calls(env) == [["workspace", "rename", "wks_abc123", OTHER_WIN]]
-    assert ["agent", "update", AGENT, "--name", f"other p1 {LEAD}"] in [c["argv"] for c in env.calls()]
+    assert ["agent", "update", AGENT, "--name", "other p1"] in [c["argv"] for c in env.calls()]
     assert registry(LEAD) == {"wks_abc123"}
     reload(env)
     r = mw(env, "p2", *flag, middle="probe")  # a second OTHER launch reuses it: --window-middle never opens another
     assert r.returncode == 0, r.stderr
-    assert run_places(env) == [(None, True), ("wks_abc123", False)] and json.loads(r.stdout)["tabName"] == f"other p2 {LEAD}"
+    assert run_places(env) == [(None, True), ("wks_abc123", False)] and json.loads(r.stdout)["tabName"] == "other p2"
 
 
 def test_worker_and_other_launches_never_land_in_each_others_box(env):
@@ -2318,9 +2336,9 @@ def test_worker_and_other_launches_never_land_in_each_others_box(env):
     names = {w["workspaceId"]: w["name"] for w in env.data["workspaces"]}
     assert names == {"wks_abc123": OTHER_WIN, "wks_def456": WIN}
     r = mw(env, "p2", "--other")  # and an OTHER launch finds its own box again, not the WORKER one
-    assert json.loads(r.stdout)["workspaceId"] == "wks_abc123" and json.loads(r.stdout)["tabName"] == f"other p2 {LEAD}"
+    assert json.loads(r.stdout)["workspaceId"] == "wks_abc123" and json.loads(r.stdout)["tabName"] == "other p2"
     r = mw(env, "w2")
-    assert json.loads(r.stdout)["workspaceId"] == "wks_def456" and json.loads(r.stdout)["tabName"] == f"worker w2 {LEAD}"
+    assert json.loads(r.stdout)["workspaceId"] == "wks_def456" and json.loads(r.stdout)["tabName"] == "worker w2"
     assert run_places(env) == [(None, True), (None, True), ("wks_abc123", False), ("wks_def456", False)]
 
 
@@ -2352,7 +2370,7 @@ def test_a_lead_placement_launch_leaves_the_worker_and_other_boxes_alone(main_en
 def test_tab_name_names_the_worktree_given_with_dash_dash_worktree(env):
     r = launch(env, "s", "--worktree", "/x/djbclark-ade-foo-wt")
     assert r.returncode == 0, r.stderr
-    tab = f"worker s {LEAD} [wt: djbclark-ade-foo-wt]"
+    tab = "worker s [wt: djbclark-ade-foo-wt]"
     assert json.loads(r.stdout)["tabName"] == tab
     assert ["agent", "update", AGENT, "--name", tab] in [c["argv"] for c in env.calls()]
     assert "--worktree" not in run_argv(env) and "djbclark-ade-foo-wt" not in " ".join(run_argv(env)[:-1])  # a name only, not passed on
@@ -2360,25 +2378,25 @@ def test_tab_name_names_the_worktree_given_with_dash_dash_worktree(env):
 
 def test_tab_name_has_no_worktree_part_without_one(env):
     r = launch(env, "s")  # --cwd /repo is not a git checkout at all
-    assert json.loads(r.stdout)["tabName"] == f"worker s {LEAD}"
+    assert json.loads(r.stdout)["tabName"] == "worker s"
 
 
 def test_tab_name_names_a_linked_worktree_given_as_cwd_but_not_a_primary_checkout(env, tmp_path):
     main, wt = make_repo(tmp_path)
     r = mint(env, wt, slice_name="s")
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["tabName"] == f"worker s {LEAD} [wt: libntech-strictjson-wt]"
+    assert json.loads(r.stdout)["tabName"] == "worker s [wt: libntech-strictjson-wt]"
     reload(env)
     r = env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "strictjson", "--cwd", str(main), "--", "--no-wait", "go")
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["tabName"] == f"worker s2 {LEAD}"  # the primary checkout is no worktree: unchanged name
+    assert json.loads(r.stdout)["tabName"] == "worker s2"  # the primary checkout is no worktree: unchanged name
 
 
 def test_an_explicit_worktree_wins_over_the_cwd_and_names_the_other_box_tab(env, tmp_path):
     main, wt = make_repo(tmp_path)
     r = env.run("--lead", LEAD, "--slice", "p", "--other", "--worktree", "/x/mine-wt", "--cwd", str(wt), "--", "--no-wait", f"in {wt}")
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout)["tabName"] == f"other p {LEAD} [wt: mine-wt]"
+    assert json.loads(r.stdout)["tabName"] == "other p [wt: mine-wt]"
 
 
 def test_an_overlong_worktree_name_is_shortened_with_a_tilde_to_fit_the_tab_name(env):
@@ -2386,12 +2404,12 @@ def test_an_overlong_worktree_name_is_shortened_with_a_tilde_to_fit_the_tab_name
     r = launch(env, "s", "--worktree", f"/x/{long_dir}")
     assert r.returncode == 0, r.stderr
     tab = json.loads(r.stdout)["tabName"]
-    assert len(tab) == 100 and tab.startswith(f"worker s {LEAD} [wt: www") and tab.endswith("~]")
+    assert len(tab) == 100 and tab.startswith("worker s [wt: www") and tab.endswith("~]")
     assert ["agent", "update", AGENT, "--name", tab] in [c["argv"] for c in env.calls()]
 
 
 def test_a_slice_too_long_for_the_tab_prefix_is_refused_before_anything_runs(env):
-    r = env.run("--lead", LEAD, "--slice", "s" * 60, "--", "--no-wait", "BRIEF")
+    r = env.run("--lead", LEAD, "--slice", "s" * 96, "--", "--no-wait", "BRIEF")
     assert r.returncode == 1 and "exceeds 100 characters" in r.stderr and not env.calls()
 
 
@@ -3265,3 +3283,264 @@ def test_a_window_the_old_bug_renamed_is_fixed_with_repo_and_work(main_env):
     assert r.returncode == 0 and json.loads(r.stdout)["renamed"] is False  # a current-form name is left alone without flags
     r = rename_lead(main_env, "--repo", "tendcf", "--window-middle", "Wave 7")
     assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD tendcf (Wave 7)"]]
+
+
+class NoPathEnv:
+    """Rule-2-clean test harness: injects the fake `paseo` binary explicitly via `ADE_PASEO_BIN`
+    without ever reordering or mutating `PATH`."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self.tmp = tmp_path
+        self.data_path = tmp_path / "data.json"
+        self.calls_path = tmp_path / "calls.jsonl"
+        self.home = tmp_path / "paseo-home"
+        self.data = {"workspaces": [], "created_id": "wks_abc123", "agents": [],
+                     "run_out": {"agentId": AGENT, "status": "running"},
+                     "run_err": "Created workspace wks_abc123 - master (master)\nTip: pass --workspace <id>\n"}
+        stub = tmp_path / "fake-paseo"
+        stub.write_text(STUB)
+        stub.chmod(0o755)
+        monkeypatch.setenv("ADE_PASEO_BIN", str(stub))
+        monkeypatch.setenv("FAKE_DATA", str(self.data_path))
+        monkeypatch.setenv("FAKE_CALLS", str(self.calls_path))
+        monkeypatch.setenv("PASEO_HOME", str(self.home))
+        monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(tmp_path / "state"))
+        monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", str(tmp_path / "reports"))
+        monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(tmp_path / "self-session"))
+        monkeypatch.setenv("PASEO_AGENT_ID", LEAD)
+        monkeypatch.setenv("PASEO_AGENT_CWD", "/ambient/cwd")
+        monkeypatch.setenv("PASEO_WORKSPACE_ID", "wks_ambient")
+        self.flush()
+
+    def flush(self):
+        self.data_path.write_text(json.dumps(self.data))
+
+    def state(self, agent_id, workspace_id, labels=None):
+        p = self.home / "agents/proj" / f"{agent_id}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"id": agent_id, "workspaceId": workspace_id, "labels": labels or {}}))
+
+    def run(self, *args, cwd=None):
+        self.flush()
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd or self.tmp)
+
+    def calls(self):
+        if not self.calls_path.exists():
+            return []
+        return [json.loads(x) for x in self.calls_path.read_text().splitlines()]
+
+    def verbs(self):
+        return [c["argv"][:2] if c["argv"][0] in ("workspace", "agent") else c["argv"][:1] for c in self.calls()]
+
+
+@pytest.fixture
+def no_path_env(tmp_path, monkeypatch):
+    return NoPathEnv(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def no_path_main_env(no_path_env):
+    no_path_env.state(LEAD, LEAD_WKS)
+    no_path_env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": LEAD_NAME, "cwd": "/repo/lead"}]
+    no_path_env.data["run_err"] = ""
+    return no_path_env
+
+
+def test_q126_human_renamed_lead_window_never_breaks_lead_placement(no_path_main_env):
+    """Carried #126 (2026-11-25, no PATH mutation): `--placement lead` succeeds on a human-renamed LEAD window
+    without refusing or clobbering the title."""
+    no_path_main_env.data["workspaces"][0]["name"] = "Daniel debugging Venice"
+    r_lead = interactive(no_path_main_env, "--placement", "lead")
+    assert r_lead.returncode == 0, r_lead.stderr
+    out_lead = json.loads(r_lead.stdout)
+    assert out_lead["workspaceId"] == LEAD_WKS and out_lead["windowName"] == "Daniel debugging Venice"
+    assert out_lead["tabName"] == "worker op1"
+    assert rename_calls(no_path_main_env) == []
+
+
+def test_q126_human_renamed_worker_and_other_windows_reuse_and_archive(no_path_env):
+    """Carried #126 (2026-11-25, no PATH mutation): renaming WORKER and OTHER windows to arbitrary human strings
+    never breaks worker box reuse, OTHER box reuse, or `archive-window`."""
+    # 1. Mint a WORKER box, then simulate a human renaming it to "Daniel debugging Venice".
+    r1 = no_path_env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Wave 9", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r1.returncode == 0, r1.stderr
+    wks_w = json.loads(r1.stdout)["workspaceId"]
+    reload(no_path_env)
+    next(w for w in no_path_env.data["workspaces"] if w["workspaceId"] == wks_w)["name"] = "Daniel debugging Venice"
+    # Second launch reuses the human-renamed WORKER box (does NOT mint a second window or overwrite the title).
+    no_path_env.calls_path.unlink()
+    r2 = no_path_env.run("--lead", LEAD, "--slice", "beta", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r2.returncode == 0, r2.stderr
+    out2 = json.loads(r2.stdout)
+    assert out2["workspaceId"] == wks_w and out2["windowName"] == "Daniel debugging Venice" and out2["tabName"] == "worker beta"
+    assert "--new-workspace" not in run_argv(no_path_env) and rename_calls(no_path_env) == []
+    # `archive-window` finds and archives the human-renamed WORKER box cleanly.
+    r_arch = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_arch.returncode == 0, r_arch.stderr
+    assert json.loads(r_arch.stdout) == {"archived": True, "workspaceId": wks_w, "windowName": "Daniel debugging Venice", "blockers": []}
+
+    # 2. Same for OTHER box renamed to "My custom side tasks".
+    no_path_env.data["workspaces"] = []
+    no_path_env.data["created_id"] = "wks_other9"
+    no_path_env.data["run_err"] = "Created workspace wks_other9 - master (master)\n"
+    r3 = no_path_env.run("--lead", LEAD, "--slice", "probe", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r3.returncode == 0, r3.stderr
+    reload(no_path_env)
+    next(w for w in no_path_env.data["workspaces"] if w["workspaceId"] == "wks_other9")["name"] = "My custom side tasks"
+    no_path_env.calls_path.unlink()
+    r4 = no_path_env.run("--lead", LEAD, "--slice", "probe2", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r4.returncode == 0, r4.stderr
+    assert json.loads(r4.stdout)["workspaceId"] == "wks_other9" and json.loads(r4.stdout)["tabName"] == "other probe2"
+    r_arch_o = no_path_env.run("archive-window", "--lead", LEAD, "--placement", "other")
+    assert r_arch_o.returncode == 0, r_arch_o.stderr
+    assert json.loads(r_arch_o.stdout)["workspaceId"] == "wks_other9"
+
+
+def test_q126_round2_lead_placement_and_rename_lead_foreign_and_legacy_refusals(no_path_main_env):
+    """Round 2 P1 (no PATH mutation): `--placement lead` and `rename-lead` refuse registered WORKER/OTHER,
+    ID-only legacy registry records, foreign-lead occupants, and WORKER/OTHER-labelled occupants."""
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    reg_file = state / f"{LEAD}.windows.json"
+
+    # 1. Registered OTHER box
+    reg_file.write_text(json.dumps({
+        "windows": [LEAD_WKS],
+        "entries": {LEAD_WKS: {"windowId": LEAD_WKS, "box": "OTHER", "repo": "repo", "lead": LEAD}},
+    }))
+    assert interactive(no_path_main_env, "--placement", "lead").returncode == 1
+    assert rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9").returncode == 1
+
+    # 2. Legacy ID-only registry record (no `entries` map)
+    reg_file.write_text(json.dumps({"windows": [LEAD_WKS]}))
+    r_leg = interactive(no_path_main_env, "--placement", "lead")
+    assert r_leg.returncode == 1 and "legacy window registry" in r_leg.stderr
+    r_leg_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_leg_ren.returncode == 1 and "legacy window registry" in r_leg_ren.stderr
+    reg_file.unlink()
+
+    # 3. Unregistered window holding foreign lead's agent (even with WORKER title)
+    no_path_main_env.data["workspaces"][0]["name"] = "WORKER repo (Other)"
+    no_path_main_env.data["agents"] = [{"id": "foreign1", "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
+    no_path_main_env.state("foreign1", LEAD_WKS, {"ade.lead": OTHER_LEAD})
+    r_for = interactive(no_path_main_env, "--placement", "lead")
+    assert r_for.returncode == 1 and "another lead's agents" in r_for.stderr
+    r_for_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_for_ren.returncode == 1 and "another lead's agents" in r_for_ren.stderr
+
+    # 4. Unregistered window holding own live agent explicitly labelled ade.box=WORKER
+    no_path_main_env.data["agents"] = [{"id": "w_own", "status": "idle", "labels": {"ade.lead": LEAD, "ade.box": "WORKER"}}]
+    no_path_main_env.state("w_own", LEAD_WKS, {"ade.lead": LEAD, "ade.box": "WORKER"})
+    r_lbl = interactive(no_path_main_env, "--placement", "lead")
+    assert r_lbl.returncode == 1 and "labelled as a WORKER box" in r_lbl.stderr
+    r_lbl_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_lbl_ren.returncode == 1 and "labelled as a WORKER box" in r_lbl_ren.stderr
+
+
+def test_q126_round2_unproven_legacy_archive_refused_chain_lead_veto_and_label_beats_title(no_path_env):
+    """Round 2 P1/P2 (no PATH mutation):
+    1. An unproven legacy ID-only window with a non-scheme human title resolves to `unknown` and is NEVER archived.
+    2. A closed predecessor's human-renamed LEAD window is vetoed chain-wide even if listed in legacy registry.
+    3. On a legacy registered window holding a live `ade.box=WORKER` agent, structured label BEATS display title `OTHER ...`.
+    4. Corrupted registry (`entries: null` or invalid `box`) fails closed.
+    """
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    reg_file = state / f"{LEAD}.windows.json"
+
+    # 1. Unproven legacy ID-only window with non-scheme human title -> refused (`unknown`, never defaulted to WORKER)
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_unproven", "name": "Daniel scratch window", "cwd": "/repo"}]
+    reg_file.write_text(json.dumps({"windows": ["wks_unproven"]}))
+    r_unp = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_unp.returncode == 1 and "no WORKER box" in r_unp.stderr
+
+    # 2. Closed predecessor's human-renamed LEAD window in legacy registry -> chain-wide LEAD veto refuses archive
+    pred_lead = "00000000-0000-0000-0000-000000000077"
+    ss_dir = Path(os.environ["ADE_SELF_SESSION_STATE"])
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / f"handoff-{pred_lead}.json").write_text(json.dumps({
+        "kind": "handoff",
+        "predecessor": pred_lead,
+        "successor": LEAD,
+        "home": str(no_path_env.home.resolve()),
+        "status": "archived",
+        "ack": {"agent_id": LEAD},
+    }))
+    no_path_env.state(pred_lead, "wks_predlead")
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_predlead", "name": "Old lead custom name", "cwd": "/repo"}]
+    reg_file.write_text(json.dumps({
+        "windows": ["wks_predlead"],
+        "entries": {"wks_predlead": {"windowId": "wks_predlead", "box": "WORKER", "repo": "repo", "lead": LEAD}},
+    }))
+    r_pred = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_pred.returncode == 1 and "no WORKER box" in r_pred.stderr
+
+    # 3. Legacy registered window with explicit `ade.box=WORKER` agent and user title formatted as `OTHER repo (oops)`:
+    #    structured agent label BEATS display title!
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_clash", "name": "OTHER repo (oops)", "cwd": "/repo"}]
+    no_path_env.data["agents"] = [{"id": "w_clash", "status": "idle", "labels": {"ade.lead": LEAD, "ade.box": "WORKER"}}]
+    no_path_env.state("w_clash", "wks_clash", {"ade.lead": LEAD, "ade.box": "WORKER"})
+    reg_file.write_text(json.dumps({"windows": ["wks_clash"]}))
+    r_other = no_path_env.run("archive-window", "--lead", LEAD, "--placement", "other", "--idle-handled")
+    assert r_other.returncode == 1 and "no OTHER box" in r_other.stderr
+    r_worker = no_path_env.run("archive-window", "--lead", LEAD, "--idle-handled")
+    assert r_worker.returncode == 0, r_worker.stderr
+    assert json.loads(r_worker.stdout)["workspaceId"] == "wks_clash"
+
+    # 4. Corrupted registry (`entries: null`) fails closed
+    reg_file.write_text(json.dumps({"windows": ["wks_clash"], "entries": None}))
+    r_bad = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_bad.returncode == 1 and "unreadable" in r_bad.stderr
+
+
+def test_q126_round3_legacy_migration_foreign_occupants_chain_lead_veto_and_resolved_box(no_path_env):
+    """Round 3 P1 (Rule-2-clean NoPathEnv, no PATH mutation):
+    1. Legacy `workers ... <LEAD>` window holding foreign-lead occupants is refused by `foreign_agents`
+       even though migration sets `rename_to` (never renamed, never launched into).
+    2. Chain LEAD window outside `members` (no registry, no labelled workers) whose human title matches
+       legacy `workers ... <LEAD>` is vetoed ahead of legacy migration (never renamed, never reused as WORKER).
+    3. Reusing a window with resolved structural box `WORKER` whose display title uses a conflicting
+       2026-11-13 kind (`USER repo (Wave 7)`) migrates its title to `WORKER repo (Wave 7)` (resolved box, not `OTHER`).
+    """
+    # 1. Legacy migration window holding foreign lead's agent -> refused before rename/launch
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": "wks_legfor", "name": f"workers repo Wave 7 {LEAD}", "cwd": "/repo"},
+    ]
+    no_path_env.data["agents"] = [{"id": "for1", "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
+    no_path_env.state("for1", "wks_legfor", {"ade.lead": OTHER_LEAD})
+    r_for = no_path_env.run("--lead", LEAD, "--slice", "s1", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_for.returncode == 1 and "another lead's agents" in r_for.stderr
+    assert rename_calls(no_path_env) == [] and ["run"] not in no_path_env.verbs()
+
+    # 2. Chain LEAD window outside `members` with a legacy `workers ... <LEAD>` title -> vetoed!
+    no_path_env.data["agents"] = []
+    no_path_env.state(LEAD, LEAD_WKS)  # current lead's own window, NOT in registry or member workers
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": LEAD_WKS, "name": f"workers repo Wave 7 {LEAD}", "cwd": "/repo"},
+    ]
+    no_path_env.data["created_id"] = "wks_freshw"
+    no_path_env.data["run_err"] = "Created workspace wks_freshw - master (master)\n"
+    no_path_env.calls_path.unlink()
+    r_lead = no_path_env.run("--lead", LEAD, "--slice", "s2", "--window-middle", "Wave 7", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_lead.returncode == 0, r_lead.stderr
+    out_lead = json.loads(r_lead.stdout)
+    assert out_lead["workspaceId"] == "wks_freshw"  # minted a new WORKER box instead of hijacking LEAD_WKS!
+    assert all(c[2] != LEAD_WKS for c in rename_calls(no_path_env))
+
+    # 3. Resolved structural box `WORKER` beats conflicting 2026-11-13 kind `USER repo (Wave 7)` on migration
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / f"{LEAD}.windows.json").write_text(json.dumps({
+        "windows": ["wks_userkind"],
+        "entries": {"wks_userkind": {"windowId": "wks_userkind", "box": "WORKER", "repo": "repo", "lead": LEAD, "work": "Wave 7"}},
+    }))
+    no_path_env.data["workspaces"] = [
+        {"workspaceId": "wks_userkind", "name": "USER repo (Wave 7)", "cwd": "/repo"},
+    ]
+    no_path_env.calls_path.unlink()
+    r_mig = no_path_env.run("--lead", LEAD, "--slice", "s3", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    assert r_mig.returncode == 0, r_mig.stderr
+    out_mig = json.loads(r_mig.stdout)
+    assert out_mig["workspaceId"] == "wks_userkind"
+    assert out_mig["windowName"] == "WORKER repo (Wave 7)"
+    assert rename_calls(no_path_env) == [["workspace", "rename", "wks_userkind", "WORKER repo (Wave 7)"]]

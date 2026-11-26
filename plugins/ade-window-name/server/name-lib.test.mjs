@@ -493,3 +493,21 @@ test("an invalid name from the decision script is never written", async () => {
     assert.deepEqual(d.state.calls, [], String(bad));
   }
 });
+
+test("structured labels drive naming and human-renamed windows are never overwritten", async () => {
+  const labeled = agentRec({
+    cwd: gitDir.repo,
+    title: "My custom tab",
+    labels: { "ade.box": "OTHER", "ade.repo": "explicit-repo", slice: "venice-probe" },
+  });
+  const d1 = fakeDaemon({ windowTitle: null, agents: [labeled] });
+  const r1 = await handleAgentEvent(hookAgent(labeled), { paseo: d1.paseo }, baseDeps());
+  assert.equal(r1.outcome, "renamed");
+  assert.deepEqual(d1.state.titles, ["OTHER explicit-repo (venice-probe)"]);
+
+  const renamedWin = agentRec({ cwd: gitDir.repo, title: "My custom tab" });
+  const d2 = fakeDaemon({ windowTitle: "Daniel debugging Venice", agents: [renamedWin] });
+  const r2 = await handleAgentEvent(hookAgent(renamedWin), { paseo: d2.paseo }, baseDeps());
+  assert.equal(r2.outcome, "skip");
+  assert.deepEqual(d2.state.titles, []);
+});
