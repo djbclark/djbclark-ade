@@ -1,0 +1,11 @@
+#!/usr/bin/env -S python3 -I
+"""Look up or record the current lead agent of a repository (`bin/ade_lead_of.py`)."""
+from pathlib import Path
+import sys
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ade_lead_of import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

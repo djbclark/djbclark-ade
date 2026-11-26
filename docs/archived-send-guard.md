@@ -38,7 +38,12 @@ record's successor chain) or refused, and never resurrect it.
    only the operator sends to the live predecessor, with `ADE_ALLOW_REPLACED_SEND=<predecessor's full id>`.
 3. `refuse`: the target is archived, nothing replaced it, and the sender neither owns it nor named the override; or its replacement
    is archived too; or the ledger is cyclic. The reason says the sender's own worker would have passed and this one is not provably
-   its own. A plain archived target (nothing replaced it) is let through in two cases only: the sender's own worker (logged, below)
+   its own. For an archived unreplaced target or an archived successor (Carried #107, 2026-11-26), `guard()` consults
+   `bin/ade_lead_of.py` (`candidates_hint_for_refusal`) to append any recorded live lead for the target's repo (together with the
+   `ade-self-session link --predecessor ... --successor ... --operator-attested` command) or unverified live candidate leads
+   for the repo (formatted as `<7-char> (<full-UUID>)` plus workspace/window/tab) to the refusal text — **purely as
+   informational guidance, never as an automatic redirect**. A lookup failure is swallowed so the refusal still stands cleanly.
+   A plain archived target (nothing replaced it) is let through in two cases only: the sender's own worker (logged, below)
    and the operator's `ADE_ALLOW_ARCHIVED_SEND=<its full id>`.
 
 ### Own archived workers (operator ruling, 2026-11-21)

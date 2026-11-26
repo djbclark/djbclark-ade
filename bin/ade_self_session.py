@@ -1734,6 +1734,7 @@ class Service:
                 self.rebind_claims(record, target)  # idempotent: a re-run after a failed rebind retries it
                 self.repoint_supervisor_lead(record, target)  # idempotent: a re-run after a failed write retries it
                 self.repoint_net_resume_plist(record, target)  # idempotent: a re-run after a failed write/reload retries it
+                self.record_repo_lead(record, target, source='finish')  # idempotent: updates repo-keyed lead record
                 self.retire_predecessor_name(record, target)  # a re-run after a failed or skipped-too-early rename retries it
                 self.advise_lead_window(record, target)
                 return record
@@ -1855,8 +1856,153 @@ class Service:
             self.rebind_claims(record, target)
             self.repoint_supervisor_lead(record, target)
             self.repoint_net_resume_plist(record, target)
+            self.record_repo_lead(record, target, source='finish')
             self.retire_predecessor_name(record, target)
             self.advise_lead_window(record, target)
+            return record
+
+    def record_repo_lead(self, record, target, *, repo=None, source='finish', agent_row=None):
+        """Record the successor as the current lead of its repo (`bin/ade_lead_of.py`, Carried #106).
+
+        Writes `${ADE_REPO_LEADS_DIR:-<state>/repo-leads}/<repo>.json` atomically. Never fails `finish` or
+        `link` once the handoff record is written; outcomes are saved under `record['repo_lead']`
+        (`recorded`, `skipped-no-repo`, `error`) and retried on re-run."""
+        info = {'status': 'skipped-no-repo'}
+        try:
+            lead_of = _load_sibling('ade_lead_of')
+            successor = record.get('successor')
+            repo_name = None
+            if repo is not None:
+                repo_name = lead_of.validate_repo(repo)
+            elif isinstance(record.get('repo'), str) and record['repo']:
+                repo_name = lead_of.validate_repo(record['repo'])
+            else:
+                repo_name = checkpoint_frontmatter_repo(record.get('checkpoint'))
+                if not repo_name and isinstance(agent_row, dict):
+                    repo_name = lead_of.infer_repo_from_agent(agent_row, allow_title_fallback=False)
+                if not repo_name:
+                    identity = record.get('identity') if isinstance(record.get('identity'), dict) else {}
+                    repo_name = lead_of.infer_repo_from_agent(
+                        {'Cwd': record.get('cwd'), 'Name': identity.get('title')},
+                        allow_title_fallback=False,
+                    )
+            if repo_name:
+                lead_of.write_repo_lead(
+                    repo_name,
+                    successor,
+                    source=source,
+                    predecessor=record.get('predecessor'),
+                    cwd=record.get('cwd'),
+                    state_dir=self.state,
+                    home=self.home,
+                    env=self.env,
+                )
+                info = {'status': 'recorded', 'repo': repo_name, 'lead': successor}
+                prev = record.get('repo_lead')
+                if not (isinstance(prev, dict) and prev.get('status') == 'recorded'
+                        and prev.get('repo') == repo_name and prev.get('lead') == successor):
+                    self.progress(f'repo lead record updated: {repo_name} -> {successor[:7]} ({successor})')
+        except Exception as exc:  # noqa: BLE001 - recorded, never raised
+            info = {'status': 'error', 'reason': bounded(f'{type(exc).__name__}: {exc}', MESSAGE_LIMIT)}
+        record['repo_lead'] = info
+        self.save(target, record)
+
+    def link(self, predecessor, successor, *, operator_attested=False, repo=None, reason=''):
+        """Record an operator-attested completed succession link for a hand-replaced lead (Carried #105).
+
+        Does not require `PASEO_AGENT_ID` (operators run this from their shell or a lead). Requires
+        `--operator-attested`, archived `predecessor`, live (`Archived: false`) `successor`, and no cycle in
+        `ade_lead_succession`. Writes the completed `handoff-<predecessor>.json` record (`status: archived`,
+        `ack.agent_id: successor`) accepted by `ade_lead_succession`, `ade_send_guard`, and `ade_claims`, then
+        repoints `supervisor/lead`, legacy `com.djbclark.ade-net-resume.plist`, and the repo-keyed lead record."""
+        if not operator_attested:
+            raise SessionError('--operator-attested is required to record a manual succession link')
+        pred = ident(predecessor)
+        succ_id = ident(successor)
+        if pred == succ_id:
+            raise SessionError('predecessor and successor must be different agent IDs')
+        clean_repo = None
+        if repo is not None:
+            try:
+                clean_repo = _load_sibling('ade_lead_of').validate_repo(repo)
+            except ValueError as exc:
+                raise SessionError(str(exc)) from None
+        clean_reason = bounded(reason.strip(), MESSAGE_LIMIT) if isinstance(reason, str) and reason.strip() else ''
+
+        pred_row = self.inspect(pred)
+        if pred_row.get('Archived') is not True:
+            raise SessionError(f'predecessor {pred} is not archived; use normal handoff or archive it first')
+        succ_row = self.inspect(succ_id)
+        if succ_row.get('Archived') is not False:
+            raise SessionError(f'successor {succ_id} is not live (Archived must be false)')
+
+        succ_mod = _load_sibling('ade_lead_succession')
+
+        def check_cycle():
+            try:
+                existing_chain = succ_mod.chain(succ_id, self.state, self.home)
+            except succ_mod.SuccessionError as exc:
+                raise SessionError(str(exc)) from None
+            if pred in existing_chain:
+                raise SessionError(f'linking {pred} -> {succ_id} would create a succession cycle')
+
+        check_cycle()
+        with self.transaction('handoff-' + pred) as (target, existing):
+            if existing is not None:
+                ack = existing.get('ack') if isinstance(existing, dict) else None
+                same_link = (
+                    isinstance(existing, dict)
+                    and existing.get('home') == str(self.home)
+                    and existing.get('kind') == 'handoff'
+                    and existing.get('predecessor') == pred
+                    and existing.get('status') == 'archived'
+                    and existing.get('successor') == succ_id
+                    and isinstance(ack, dict)
+                    and ack.get('agent_id') == succ_id
+                )
+                if not same_link:
+                    raise SessionError(f'handoff record for {pred} already exists with a different status or successor')
+                self.repoint_supervisor_lead(existing, target)
+                self.repoint_net_resume_plist(existing, target)
+                self.record_repo_lead(existing, target, repo=clean_repo, source='link', agent_row=succ_row)
+                return existing
+            check_cycle()
+            now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            cwd = succ_row.get('Cwd') if isinstance(succ_row.get('Cwd'), str) else pred_row.get('Cwd')
+            record = {
+                'schema_version': 1,
+                'kind': 'handoff',
+                'mode': 'operator-link',
+                'operator_attested': True,
+                'token': str(uuid.uuid4()),
+                'predecessor': pred,
+                'successor': succ_id,
+                'home': str(self.home),
+                'cwd': cwd,
+                'status': 'archived',
+                'created_at': now,
+                'acknowledged_at': now,
+                'ack': {
+                    'agent_id': succ_id,
+                    'operator_attested': True,
+                    'at': now,
+                },
+                'retired': {
+                    'agent': pred,
+                    'successor': succ_id,
+                    'at': now,
+                    'mode': 'operator-link',
+                },
+                'record': str(target),
+            }
+            if clean_reason:
+                record['reason'] = clean_reason
+            if clean_repo:
+                record['repo'] = clean_repo
+            self.save(target, record)
+            self.repoint_supervisor_lead(record, target)
+            self.repoint_net_resume_plist(record, target)
+            self.record_repo_lead(record, target, repo=clean_repo, source='link', agent_row=succ_row)
             return record
 
     def retire_predecessor_name(self, record, target):

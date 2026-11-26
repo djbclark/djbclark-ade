@@ -1094,3 +1094,115 @@ def test_the_hook_reads_the_sender_from_its_environment_never_from_the_command_t
     assert denial(run_hook(world, "Bash", cmd))  # no sender in the hook's own environment
     own = run_hook(world, "Bash", {"command": f"paseo send --no-wait -- {A} hi"}, env={**world.env, guard.SENDER_ENV: LEAD})
     assert own is None  # the same send from the owner's own environment passes
+
+
+def test_refusal_lists_recorded_live_lead_and_never_redirects(tmp_path):
+    """Carried #107: when an archived target has no completed handoff link, guard() lists the recorded live lead
+    for its repo in the refusal reason (with the `ade-self-session link` command) and NEVER redirects."""
+    import ade_lead_of as lead_of
+
+    state, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    home.mkdir()
+    repo_dir = tmp_path / "myrepo"
+    repo_dir.mkdir()
+    wks = "wks_1111111111111111"
+    lead_of.write_repo_lead("myrepo", B, source="manual", state_dir=state, home=home)
+
+    fake = tmp_path / "fake-paseo"
+    fake.write_text(f"""#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:2] == ["agent", "inspect"]:
+    if a[2] == {A!r}:
+        print(json.dumps({{"Id": {A!r}, "Archived": True, "ParentAgentId": None, "Cwd": {str(repo_dir)!r}}}))
+        sys.exit(0)
+    if a[2] == {B!r}:
+        print(json.dumps({{"Id": {B!r}, "Archived": False, "ParentAgentId": None, "Cwd": {str(repo_dir)!r}, "Name": "LEAD myrepo", "WorkspaceId": {wks!r}}}))
+        sys.exit(0)
+if a[:2] == ["workspace", "ls"]:
+    print(json.dumps([{{"workspaceId": {wks!r}, "name": "LEAD myrepo (wave)"}}]))
+    sys.exit(0)
+sys.exit(1)
+""")
+    fake.chmod(0o755)
+    env = {
+        **os.environ,
+        "ADE_PASEO_TRANSPORT": "cli",
+        "ADE_SELF_SESSION_STATE": str(state),
+        "PASEO_HOME": str(home),
+        "ADE_WORKER_RUN_STATE": str(tmp_path / "empty-ws"),
+    }
+    env.pop(guard.SENDER_ENV, None)
+    env.pop(guard.ALLOW_ENV, None)
+    env.pop("ADE_REPO_LEADS_DIR", None)
+
+    d = guard.guard(A, paseo=str(fake), env=env, state_dir=state, home=home)
+    assert d.action == guard.REFUSE and d.target == A
+    assert f"{B[:7]} ({B})" in d.reason
+    assert "not auto-redirected" in d.reason
+    assert f"ade-self-session link --predecessor {A} --successor {B} --operator-attested" in d.reason
+
+
+def test_refusal_lists_unverified_live_candidates_and_never_redirects(tmp_path):
+    """Carried #107: with no repo-lead record, guard() lists live non-worker candidates for the repo and NEVER redirects."""
+    state, home = tmp_path / "self-session", tmp_path / "paseo-home"
+    home.mkdir()
+    repo_dir = tmp_path / "otherrepo"
+    repo_dir.mkdir()
+    wks = "wks_2222222222222222"
+
+    fake = tmp_path / "fake-paseo"
+    fake.write_text(f"""#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+if a[:2] == ["agent", "inspect"] and a[2] == {A!r}:
+    print(json.dumps({{"Id": {A!r}, "Archived": True, "ParentAgentId": None, "Cwd": {str(repo_dir)!r}}}))
+    sys.exit(0)
+if a[:2] == ["ls", "-g"]:
+    print(json.dumps([
+        {{"id": {C!r}, "archived": False, "workspaceId": {wks!r}, "cwd": {str(repo_dir)!r}, "title": "LEAD otherrepo"}},
+        {{"id": {D!r}, "archived": False, "workspaceId": {wks!r}, "cwd": {str(repo_dir)!r}, "title": "worker slice", "labels": {{"ade.lead": {C!r}}}}},
+    ]))
+    sys.exit(0)
+if a[:2] == ["workspace", "ls"]:
+    print(json.dumps([{{"workspaceId": {wks!r}, "name": "LEAD otherrepo (active)"}}]))
+    sys.exit(0)
+sys.exit(1)
+""")
+    fake.chmod(0o755)
+    env = {
+        **os.environ,
+        "ADE_PASEO_TRANSPORT": "cli",
+        "ADE_SELF_SESSION_STATE": str(state),
+        "PASEO_HOME": str(home),
+        "ADE_WORKER_RUN_STATE": str(tmp_path / "empty-ws"),
+    }
+    env.pop(guard.SENDER_ENV, None)
+    env.pop(guard.ALLOW_ENV, None)
+    env.pop("ADE_REPO_LEADS_DIR", None)
+
+    d = guard.guard(A, paseo=str(fake), env=env, state_dir=state, home=home)
+    assert d.action == guard.REFUSE and d.target == A
+    assert f"{C[:7]} ({C})" in d.reason
+    assert "not redirected" in d.reason
+    assert D not in d.reason
+
+
+def test_archived_successor_refusal_lists_candidate_and_swallows_lookup_errors(world):
+    write_link(world.state, world.home, A, B)
+    d = decide(
+        world, A, {A: True, B: True},
+        find_candidates=lambda rec: f" Unverified live candidate lead(s) for demo: {C[:7]} ({C}).",
+    )
+    assert d.action == guard.REFUSE and d.target == A
+    assert f"{C[:7]} ({C})" in d.reason
+
+    # A failing candidate lookup never breaks a refusal (both archived-successor and plain-archived paths).
+    def explode(_rec):
+        raise RuntimeError("boom")
+
+    d2 = decide(world, A, {A: True, B: True}, find_candidates=explode)
+    assert d2.action == guard.REFUSE and d2.target == A
+    d3 = decide(world, D, {D: True}, find_candidates=explode)
+    assert d3.action == guard.REFUSE and d3.target == D
+

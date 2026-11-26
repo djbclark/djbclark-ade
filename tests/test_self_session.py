@@ -4390,3 +4390,215 @@ def test_cross_agent_requester_can_verify_turn_retry_and_reconcile_but_successor
     reconciled = service.reconcile(rec_path)
     assert reconciled['status'] == 'awaiting-ack' and reconciled['successor'] == SUCC
 
+
+def test_link_records_operator_attested_succession_and_repoints_everything(tmp_path):
+    """Carried #105 + #106: `ade-self-session link` works without PASEO_AGENT_ID, writes a completed record
+    accepted by ade_lead_succession/ade_claims/ade_send_guard, and repoints supervisor/lead, net-resume plist,
+    and repo-leads/<repo>.json; re-running with the same pair is idempotent."""
+    import plistlib
+    import ade_claims
+    import ade_lead_of as lead_of
+    import ade_lead_succession as succ
+    import ade_send_guard as send_guard
+
+    repo_dir = tmp_path / 'sample-repo'
+    repo_dir.mkdir()
+    state = tmp_path / 'state'
+    home = tmp_path / 'paseo-home'
+    home.mkdir()
+    sup_dir = tmp_path / 'sup'
+    sup_dir.mkdir()
+    sup_lead = sup_dir / 'lead'
+    sup_lead.write_text(PRED + '\n')
+    plist_path = tmp_path / 'com.djbclark.ade-net-resume.plist'
+    plist_path.write_bytes(plistlib.dumps({
+        'Label': 'com.djbclark.ade-net-resume',
+        'ProgramArguments': ['/usr/bin/python3', '/bin/ade-net-resume', '--lead', PRED],
+    }))
+
+    native = Native(repo_dir)
+    native.rows[PRED] = {'Id': PRED, 'Archived': True, 'Cwd': str(repo_dir), 'Name': 'LEAD sample-repo'}
+    native.rows[SUCC] = {'Id': SUCC, 'Archived': False, 'Cwd': str(repo_dir), 'Name': 'LEAD sample-repo'}
+
+    # Deliberately omit PASEO_AGENT_ID: operator shell runs `link`.
+    env = {'PASEO_HOME': str(home), 'ADE_SUPERVISOR_STATE_DIR': str(sup_dir)}
+    reloaded = []
+    service = ss.Service(
+        state, home, env=env, runner=native,
+        net_resume_plist=plist_path,
+        net_resume_reloader=lambda p, label: reloaded.append((p, label)),
+    )
+
+    rec = service.link(PRED, SUCC, operator_attested=True, reason='hand-replaced lead')
+    assert rec['kind'] == 'handoff'
+    assert rec['status'] == 'archived'
+    assert rec['mode'] == 'operator-link'
+    assert rec['operator_attested'] is True
+    assert rec['predecessor'] == PRED
+    assert rec['successor'] == SUCC
+    assert rec['ack']['agent_id'] == SUCC
+    assert rec['reason'] == 'hand-replaced lead'
+    assert rec['supervisor_lead'] == 'repointed'
+    assert rec['net_resume_plist'] == 'repointed'
+    assert rec['repo_lead'] == {'status': 'recorded', 'repo': 'sample-repo', 'lead': SUCC}
+
+    # Downstream readers all accept the record.
+    assert succ.chain(PRED, state, home) == [PRED, SUCC]
+    assert succ.effective_lead(PRED, state, home) == SUCC
+    verified = ade_claims._verified_handoff(Path(rec['record']), PRED, SUCC, state)
+    assert verified['successor'] == SUCC
+    decision = send_guard.decide(
+        PRED,
+        lambda aid: native.rows[aid],
+        state_dir=state,
+        home=home,
+    )
+    assert decision.action == send_guard.REDIRECT and decision.target == SUCC
+
+    # Side effects persisted.
+    assert sup_lead.read_text().strip() == SUCC
+    assert plistlib.loads(plist_path.read_bytes())['ProgramArguments'][-1] == SUCC
+    assert len(reloaded) == 1
+    repo_rec = lead_of.read_repo_lead('sample-repo', state_dir=state, home=home)
+    assert repo_rec is not None and repo_rec['lead'] == SUCC and repo_rec['source'] == 'link'
+
+    # Idempotent re-run succeeds without rewriting or failing.
+    again = service.link(PRED, SUCC, operator_attested=True)
+    assert again['status'] == 'archived' and again['successor'] == SUCC
+
+
+def test_link_refuses_invalid_states_cycles_and_conflicts(tmp_path):
+    repo_dir = tmp_path / 'sample-repo'
+    repo_dir.mkdir()
+    state = tmp_path / 'state'
+    home = tmp_path / 'paseo-home'
+    home.mkdir()
+    native = Native(repo_dir)
+    native.rows[PRED] = {'Id': PRED, 'Archived': True, 'Cwd': str(repo_dir)}
+    native.rows[SUCC] = {'Id': SUCC, 'Archived': False, 'Cwd': str(repo_dir)}
+    native.rows[OTHER] = {'Id': OTHER, 'Archived': False, 'Cwd': str(repo_dir)}
+    service = ss.Service(state, home, env={'PASEO_HOME': str(home)}, runner=native)
+
+    with pytest.raises(ss.SessionError, match='--operator-attested'):
+        service.link(PRED, SUCC, operator_attested=False)
+
+    with pytest.raises(ss.SessionError, match='different'):
+        service.link(PRED, PRED, operator_attested=True)
+
+    with pytest.raises(ss.SessionError, match='invalid repo'):
+        service.link(PRED, SUCC, operator_attested=True, repo='../escape')
+
+    # Live predecessor refused.
+    native.rows[PRED]['Archived'] = False
+    with pytest.raises(ss.SessionError, match='not archived'):
+        service.link(PRED, SUCC, operator_attested=True)
+    native.rows[PRED]['Archived'] = True
+
+    # Archived successor refused.
+    native.rows[SUCC]['Archived'] = True
+    with pytest.raises(ss.SessionError, match='not live'):
+        service.link(PRED, SUCC, operator_attested=True)
+    native.rows[SUCC]['Archived'] = False
+
+    # Link PRED -> SUCC, then refuse conflicting PRED -> OTHER.
+    service.link(PRED, SUCC, operator_attested=True)
+    with pytest.raises(ss.SessionError, match='already exists'):
+        service.link(PRED, OTHER, operator_attested=True)
+
+    # Refuse cycle: if SUCC is archived and PRED were unarchived, SUCC -> PRED would cycle.
+    native.rows[SUCC]['Archived'] = True
+    native.rows[PRED]['Archived'] = False
+    with pytest.raises(ss.SessionError, match='cycle'):
+        service.link(SUCC, PRED, operator_attested=True)
+
+
+def test_finish_records_repo_lead_from_cwd_and_frontmatter(tmp_path):
+    """Carried #106: `ade-self-session finish` updates repo-leads/<repo>.json."""
+    import ade_lead_of as lead_of
+
+    repo_dir = tmp_path / 'repo-alpha'
+    repo_dir.mkdir()
+    state = tmp_path / 'state'
+    home = tmp_path / 'paseo-home'
+    home.mkdir()
+    env = {'PASEO_AGENT_ID': PRED, 'PASEO_AGENT_CWD': str(repo_dir), 'PASEO_WORKSPACE_ID': WS, 'PASEO_HOME': str(home)}
+    native = Native(repo_dir)
+    service = ss.Service(
+        state, home, env=env, runner=native,
+        planner=lambda p, c, **k: {'status': 'ready', 'provider': 'claude', 'mode_id': 'bypassPermissions', 'provider_options': {}},
+        verifier=lambda plan, row: {'ok': row['Mode'] == plan['mode_id'], 'reason': 'readback'},
+        clock=native.clock, sleep=native.clock.sleep,
+    )
+    cp = tmp_path / 'brief.md'
+    cp.write_text('---\nrepo: custom-repo\n---\nGoal and next steps.\n')
+    record = service.handoff(cp, quiesced=True)
+    rec_path = Path(record['record'])
+
+    service.env['PASEO_AGENT_ID'] = SUCC
+    ack_file = tmp_path / 'ack.json'
+    ack_file.write_text(json.dumps({
+        'token': record['token'],
+        'checkpoint_sha256': record['checkpoint_sha256'],
+        'head': record['head'],
+        'next_action': 'continue work',
+    }))
+    service.accept(rec_path, ack_file)
+    native.rows[PRED]['Status'] = 'idle'
+    finished = service.finish(rec_path, stable=0, timeout=0, poll=0.5)
+    assert finished['status'] == 'archived'
+    assert finished['repo_lead'] == {'status': 'recorded', 'repo': 'custom-repo', 'lead': SUCC}
+
+    stored = lead_of.read_repo_lead('custom-repo', state_dir=state, home=home)
+    assert stored is not None and stored['lead'] == SUCC and stored['source'] == 'finish'
+
+
+def test_link_cli_subcommand_and_no_title_fallback_repo_write(tmp_path):
+    """INFO-1 + LOW-1: CLI `bin/ade-self-session link` works end to end without PASEO_AGENT_ID,
+    and `record_repo_lead` does NOT persist an authoritative repo record from a display title alone."""
+    import ade_lead_of as lead_of
+
+    state = tmp_path / 'state'
+    home = tmp_path / 'paseo-home'
+    home.mkdir()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    fake_paseo = bindir / 'paseo'
+    fake_paseo.write_text(f"""#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+# argv: --home DIR --json agent inspect ID
+if 'inspect' in a:
+    aid = a[a.index('inspect') + 1]
+    if aid == {PRED!r}:
+        print(json.dumps({{'Id': {PRED!r}, 'Archived': True, 'Cwd': {str(Path.home())!r}, 'Name': 'LEAD notes'}}))
+        sys.exit(0)
+    if aid == {SUCC!r}:
+        print(json.dumps({{'Id': {SUCC!r}, 'Archived': False, 'Cwd': {str(Path.home())!r}, 'Name': 'LEAD notes'}}))
+        sys.exit(0)
+sys.exit(1)
+""")
+    fake_paseo.chmod(0o755)
+    env = {
+        **os.environ,
+        'PATH': f'{bindir}:{os.environ["PATH"]}',
+        'ADE_SUPERVISOR_STATE_DIR': str(tmp_path / 'sup'),
+        'ADE_NET_RESUME_PLIST': str(tmp_path / 'no-plist'),
+    }
+    env.pop('PASEO_AGENT_ID', None)
+    env.pop('ADE_REPO_LEADS_DIR', None)
+
+    cli = str(REPO / 'bin' / 'ade-self-session')
+    r = subprocess.run(
+        [cli, '--state-dir', str(state), '--paseo-home', str(home), 'link',
+         '--predecessor', PRED, '--successor', SUCC, '--operator-attested', '--reason', 'cli test'],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out['status'] == 'archived' and out['successor'] == SUCC and out['reason'] == 'cli test'
+    # LOW-1: Cwd=~ and title='LEAD notes' must NOT write an authoritative repo-leads/notes.json.
+    assert out['repo_lead'] == {'status': 'skipped-no-repo'}
+    assert lead_of.read_repo_lead('notes', state_dir=state, home=home) is None
+
+
+
