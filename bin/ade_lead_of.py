@@ -108,12 +108,11 @@ def _write_atomic(path: Path, data: bytes) -> None:
         raise OSError(f"refusing to overwrite symlink {path}")
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        try:
-            os.fchmod(fd, 0o600)
-            os.write(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -234,8 +233,8 @@ def _clean_cwd_repo(cwd: Any) -> str | None:
     return name
 
 
-def infer_repo_from_agent(record: Mapping[str, Any] | None) -> str | None:
-    """Derive a repo name from an inspected/listed Paseo agent record (labels -> Cwd -> display title)."""
+def infer_repo_from_agent(record: Mapping[str, Any] | None, *, allow_title_fallback: bool = False) -> str | None:
+    """Derive a repo name from an inspected/listed Paseo agent record (labels -> Cwd -> optional display title)."""
     if not isinstance(record, Mapping):
         return None
     labels = record.get("Labels") if isinstance(record.get("Labels"), Mapping) else record.get("labels")
@@ -247,18 +246,23 @@ def infer_repo_from_agent(record: Mapping[str, Any] | None) -> str | None:
     from_cwd = _clean_cwd_repo(cwd)
     if from_cwd:
         return from_cwd
-    title = record.get("Name") if isinstance(record.get("Name"), str) else record.get("title")
-    if isinstance(title, str) and title.strip():
-        m = _RETIRED_LEAD_TITLE_RE.match(title.strip())
-        if m and REPO_RE.fullmatch(m.group(1)):
-            return m.group(1)
+    if allow_title_fallback:
+        title = record.get("Name") if isinstance(record.get("Name"), str) else record.get("title")
+        if isinstance(title, str) and title.strip():
+            m = _RETIRED_LEAD_TITLE_RE.match(title.strip())
+            if m and REPO_RE.fullmatch(m.group(1)):
+                return m.group(1)
     return None
 
 
-def _is_worker_row(row: Mapping[str, Any]) -> bool:
+def _is_worker_row(row: Mapping[str, Any], *, is_registered_lead: bool = False) -> bool:
     labels = row.get("labels") if isinstance(row.get("labels"), Mapping) else row.get("Labels")
     labels = labels if isinstance(labels, Mapping) else {}
-    if labels.get("ade.lead") or labels.get("slice") or labels.get("ade.retired") or labels.get("baton-writer"):
+    if (labels.get("ade.lead") or labels.get("slice") or labels.get("ade.retired")
+            or labels.get("baton-writer") or labels.get("ade.internal")
+            or labels.get(paseo_client.PARENT_AGENT_ID_LABEL)):
+        return True
+    if row.get("background") is True or row.get("internal") is True:
         return True
     box = labels.get("ade.box")
     if isinstance(box, str) and box and box != "LEAD":
@@ -268,8 +272,13 @@ def _is_worker_row(row: Mapping[str, Any]) -> bool:
         return True
     if row.get("parentAgentId") or row.get("ParentAgentId"):
         return True
+    # Operator ruling 2026-11-25: display titles are human-only UI labels and must NEVER override
+    # structured lead identity (ade.box=LEAD, ade.role, ade.chain, or a registered LEAD window).
+    has_structured_lead = bool(is_registered_lead or box == "LEAD" or labels.get("ade.role") or labels.get("ade.chain"))
+    if has_structured_lead:
+        return False
     title = str(row.get("title") or row.get("name") or row.get("Name") or "").strip()
-    if _WORKER_PREFIX_RE.match(title) and not labels.get("ade.role") and not labels.get("ade.chain"):
+    if _WORKER_PREFIX_RE.match(title):
         return True
     if title.startswith("RETIRED "):
         return True
@@ -309,6 +318,7 @@ def discover_live_candidates(
     list_agents: Callable[[], list[dict[str, Any]]],
     list_workspaces: Callable[[], list[dict[str, Any]]] | None = None,
     ws_state_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
     exclude: set[str] | tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Find live (`Archived: false`, non-worker) candidate leads for `repo`. Every result is a heuristic (`verified: false`)."""
@@ -332,12 +342,21 @@ def discover_live_candidates(
         except Exception:  # noqa: BLE001
             pass
 
+    eff_ws_state_dir = ws_state_dir
+    if eff_ws_state_dir is None:
+        raw_ws_dir = _env(env).get("ADE_WORKER_RUN_STATE")
+        if isinstance(raw_ws_dir, str) and raw_ws_dir.strip():
+            eff_ws_state_dir = Path(raw_ws_dir)
+
+    reg: dict[str, dict[str, Any]] = {}
     registered_lead_ws: set[str] = set()
     try:
-        reg = ws_names.all_registered_windows(ws_state_dir)
-        for wks_id, entry in reg.items():
-            if isinstance(entry, dict) and entry.get("box") == "LEAD" and entry.get("repo") == clean:
-                registered_lead_ws.add(wks_id)
+        loaded = ws_names.all_registered_windows(eff_ws_state_dir)
+        if isinstance(loaded, dict):
+            reg = loaded
+            for wks_id, entry in reg.items():
+                if isinstance(entry, dict) and entry.get("box") == "LEAD" and entry.get("repo") == clean:
+                    registered_lead_ws.add(wks_id)
     except Exception:  # noqa: BLE001
         pass
 
@@ -349,12 +368,13 @@ def discover_live_candidates(
         aid = row.get("id") or row.get("Id")
         if not isinstance(aid, str) or not UUID_RE.fullmatch(aid) or aid in excluded or aid in seen_ids:
             continue
-        if _is_archived_row(row) or _is_worker_row(row):
+        raw_ws_id = row.get("workspaceId") if isinstance(row.get("workspaceId"), str) else row.get("WorkspaceId")
+        ws_id = raw_ws_id if isinstance(raw_ws_id, str) else None
+        is_reg_lead = bool(ws_id and ws_id in registered_lead_ws)
+        if _is_archived_row(row) or _is_worker_row(row, is_registered_lead=is_reg_lead):
             continue
         labels = row.get("labels") if isinstance(row.get("labels"), Mapping) else row.get("Labels")
         labels = labels if isinstance(labels, Mapping) else {}
-        raw_ws_id = row.get("workspaceId") if isinstance(row.get("workspaceId"), str) else row.get("WorkspaceId")
-        ws_id = raw_ws_id if isinstance(raw_ws_id, str) else None
         ws_row = ws_by_id.get(ws_id or "", {})
         raw_ws_name = ws_row.get("name") if isinstance(ws_row.get("name"), str) else ws_row.get("title")
         ws_name = raw_ws_name if isinstance(raw_ws_name, str) and raw_ws_name.strip() else None
@@ -362,10 +382,20 @@ def discover_live_candidates(
         cwd = row.get("cwd") if isinstance(row.get("cwd"), str) else row.get("Cwd")
         cwd_repo = _clean_cwd_repo(cwd)
 
+        reg_entry = reg.get(ws_id) if ws_id else None
+        reg_non_lead = bool(
+            isinstance(reg_entry, dict)
+            and (
+                reg_entry.get("box") in ("WORKER", "OTHER")
+                or (isinstance(reg_entry.get("repo"), str) and reg_entry["repo"] and reg_entry["repo"] != clean)
+            )
+        )
+
         parsed_ws = ws_names.parse(ws_name) if ws_name else None
         legacy_ws = ws_names.parse_legacy(ws_name) if (ws_name and parsed_ws is None) else None
         non_lead_window = (
-            (parsed_ws is not None and parsed_ws.box != "LEAD")
+            reg_non_lead
+            or (parsed_ws is not None and parsed_ws.box != "LEAD")
             or (legacy_ws is not None and legacy_ws.kind != "MAIN")
             or (ws_name is not None and ws_name.upper().startswith("WATCH "))
         )
@@ -374,14 +404,15 @@ def discover_live_candidates(
         tier = 99
         if labels.get("ade.repo") == clean and (labels.get("ade.box") == "LEAD" or labels.get("ade.role") or labels.get("ade.chain")):
             tier, reason = 1, "label:ade.repo"
-        elif ws_id and ws_id in registered_lead_ws:
+        elif is_reg_lead:
             tier, reason = 2, "registry:lead-window"
-        elif parsed_ws is not None and parsed_ws.box == "LEAD" and parsed_ws.repo == clean:
+        elif not reg_non_lead and parsed_ws is not None and parsed_ws.box == "LEAD" and parsed_ws.repo == clean:
             if labels.get("ade.chain") or labels.get("ade.role") or cwd_repo == clean:
                 tier, reason = 3, f"window:{parsed_ws.kind}+meta"
             else:
                 tier, reason = 4, f"window:{parsed_ws.kind}"
-        elif legacy_ws is not None and legacy_ws.kind == "MAIN" and (legacy_ws.middle == clean or cwd_repo == clean):
+        elif (not reg_non_lead and legacy_ws is not None and legacy_ws.kind == "MAIN"
+              and (legacy_ws.middle == clean or legacy_ws.middle.startswith(f"{clean} "))):
             tier, reason = 4, "window:MAIN"
         elif not non_lead_window and cwd_repo == clean and (labels.get("ade.chain") or labels.get("ade.role")):
             tier, reason = 5, "chain+cwd"
@@ -502,6 +533,8 @@ def resolve_repo_lead(
             }
         if isinstance(info, dict) and info.get("Archived") is False and resolved not in set(exclude):
             ws_id = info.get("WorkspaceId") or info.get("workspaceId")
+            if not isinstance(ws_id, str) or not ws_id:
+                ws_id = _resolve_agent_workspace_id(resolved, list_agents=list_agents, home=phome)
             ws_name = None
             if list_workspaces is not None and isinstance(ws_id, str):
                 try:
@@ -532,6 +565,7 @@ def resolve_repo_lead(
         list_agents=list_agents,
         list_workspaces=list_workspaces,
         ws_state_dir=ws_state_dir,
+        env=e,
         exclude=exclude,
     )
     if len(candidates) == 1:
@@ -569,6 +603,37 @@ def resolve_repo_lead(
     }
 
 
+def _resolve_agent_workspace_id(
+    agent_id: str,
+    *,
+    list_agents: Callable[[], list[dict[str, Any]]] | None = None,
+    home: Path | None = None,
+) -> str | None:
+    """Resolve `workspaceId` when `inspect()` omits it (both `snapshot_to_inspect_dict` and CLI `agent inspect` do)."""
+    if list_agents is not None:
+        try:
+            rows = list_agents()
+            if isinstance(rows, list):
+                for r in rows:
+                    if isinstance(r, Mapping) and (r.get("id") or r.get("Id")) == agent_id:
+                        ws = r.get("workspaceId") or r.get("WorkspaceId")
+                        if isinstance(ws, str) and ws:
+                            return ws
+        except Exception:  # noqa: BLE001
+            pass
+    if home is not None and UUID_RE.fullmatch(agent_id):
+        try:
+            for path in sorted((Path(home) / "agents").glob(f"*/{agent_id}.json")):
+                data = _read_regular_json(path)
+                if isinstance(data, dict):
+                    ws = data.get("workspaceId")
+                    if isinstance(ws, str) and ws:
+                        return ws
+        except OSError:
+            pass
+    return None
+
+
 def candidates_hint_for_refusal(
     target_record: Mapping[str, Any] | None,
     *,
@@ -582,7 +647,7 @@ def candidates_hint_for_refusal(
     env: Mapping[str, str] | None = None,
 ) -> str:
     """Build an informational refusal suffix naming recorded or live candidate leads for the target's repo (never a redirect)."""
-    repo = infer_repo_from_agent(target_record)
+    repo = infer_repo_from_agent(target_record, allow_title_fallback=True)
     if not repo:
         return ""
     target_id = str(target_record.get("Id") or "") if isinstance(target_record, Mapping) else ""
@@ -610,7 +675,7 @@ def candidates_hint_for_refusal(
             f" (or record succession: `ade-self-session link --predecessor {target_id} --successor {lead} --operator-attested`)"
             if UUID_RE.fullmatch(target_id) else ""
         )
-        return f" Recorded live lead for {repo} (not auto-redirected — verify before sending): {desig}{link_hint}."
+        return f" Recorded live lead for {repo} (not auto-redirected — verify before sending): {desig}{link_hint}"
     cands = res.get("candidates") or []
     if cands:
         formatted = "; ".join(
@@ -619,7 +684,7 @@ def candidates_hint_for_refusal(
             for c in cands[:5]
         )
         return (
-            f" Unverified live candidate lead(s) for {repo} (not redirected — verify before sending): {formatted}."
+            f" Unverified live candidate lead(s) for {repo} (not redirected — verify before sending): {formatted}"
         )
     return ""
 
@@ -635,7 +700,12 @@ def paseo_inspect_fn(paseo: str = "paseo", timeout: int = 5, env: Mapping[str, s
             try:
                 if client is None:
                     client = paseo_client.PaseoClient(env=tenv, timeout=timeout)
-                return client.inspect_agent(ident, cli_shape=True)
+                snap = client.inspect_agent(ident, cli_shape=False)
+                out = paseo_client.snapshot_to_inspect_dict(snap)
+                ws_id = snap.get("workspaceId")
+                if isinstance(ws_id, str) and ws_id:
+                    out["WorkspaceId"] = ws_id
+                return out
             except paseo_client.AgentNotFoundError as exc:
                 raise LookupError(ident) from exc
             except paseo_client.DaemonError as exc:
@@ -644,14 +714,23 @@ def paseo_inspect_fn(paseo: str = "paseo", timeout: int = 5, env: Mapping[str, s
         return inspect_daemon
 
     def inspect_cli(ident: str) -> dict[str, Any]:
-        proc = subprocess.run([paseo, "agent", "inspect", ident, "--json"], capture_output=True, text=True,
-                              timeout=timeout, check=False, env=dict(tenv))
+        try:
+            proc = subprocess.run([paseo, "agent", "inspect", ident, "--json"], capture_output=True, text=True,
+                                  timeout=timeout, check=False, env=dict(tenv))
+        except subprocess.TimeoutExpired as exc:
+            raise OSError(f"paseo agent inspect timed out after {timeout}s") from exc
         if proc.returncode != 0:
             text = (proc.stderr + proc.stdout).lower()
             if "not found" in text or "no agent" in text or "ambiguous" in text:
                 raise LookupError(ident)
             raise OSError(f"paseo agent inspect exited {proc.returncode}")
-        return json.loads(proc.stdout)
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise OSError(f"paseo agent inspect returned invalid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise OSError("paseo agent inspect did not return a JSON object")
+        return data
 
     return inspect_cli
 
@@ -675,11 +754,17 @@ def paseo_list_agents_fn(paseo: str = "paseo", timeout: int = 10, env: Mapping[s
         return ls_daemon
 
     def ls_cli() -> list[dict[str, Any]]:
-        proc = subprocess.run([paseo, "ls", "-g", "--json"], capture_output=True, text=True,
-                              timeout=timeout, check=False, env=dict(tenv))
+        try:
+            proc = subprocess.run([paseo, "ls", "-g", "--json"], capture_output=True, text=True,
+                                  timeout=timeout, check=False, env=dict(tenv))
+        except subprocess.TimeoutExpired as exc:
+            raise OSError(f"paseo ls timed out after {timeout}s") from exc
         if proc.returncode != 0:
             raise OSError(f"paseo ls exited {proc.returncode}")
-        data = json.loads(proc.stdout)
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise OSError(f"paseo ls returned invalid JSON: {exc}") from exc
         if isinstance(data, list):
             return data
         if isinstance(data, dict) and isinstance(data.get("agents"), list):
@@ -708,11 +793,17 @@ def paseo_list_workspaces_fn(paseo: str = "paseo", timeout: int = 10, env: Mappi
         return ws_daemon
 
     def ws_cli() -> list[dict[str, Any]]:
-        proc = subprocess.run([paseo, "workspace", "ls", "--json"], capture_output=True, text=True,
-                              timeout=timeout, check=False, env=dict(tenv))
+        try:
+            proc = subprocess.run([paseo, "workspace", "ls", "--json"], capture_output=True, text=True,
+                                  timeout=timeout, check=False, env=dict(tenv))
+        except subprocess.TimeoutExpired as exc:
+            raise OSError(f"paseo workspace ls timed out after {timeout}s") from exc
         if proc.returncode != 0:
             raise OSError(f"paseo workspace ls exited {proc.returncode}")
-        data = json.loads(proc.stdout)
+        try:
+            data = json.loads(proc.stdout)
+        except ValueError as exc:
+            raise OSError(f"paseo workspace ls returned invalid JSON: {exc}") from exc
         return data if isinstance(data, list) else []
 
     return ws_cli
@@ -794,10 +885,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(raw)
     sdir = args.state_dir or succ.default_state_dir()
     phome = args.paseo_home or succ.default_home()
-    rdir = args.repo_leads_dir or default_repo_leads_dir(sdir)
+    cli_env = {**os.environ, "PASEO_HOME": str(phome)} if args.paseo_home is not None else os.environ
+    rdir = args.repo_leads_dir or default_repo_leads_dir(sdir, env=cli_env)
 
     if args.cmd == "list":
-        rows = list_repo_leads(repo_leads_dir=rdir, state_dir=sdir, home=phome)
+        rows = list_repo_leads(repo_leads_dir=rdir, state_dir=sdir, home=phome, env=cli_env)
         if args.json:
             print(json.dumps(rows, indent=2, sort_keys=True))
         else:
@@ -815,22 +907,26 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
         cwd = args.cwd
         if not args.offline:
-            inspect = paseo_inspect_fn(args.paseo)
+            inspect = paseo_inspect_fn(args.paseo, env=cli_env)
             try:
                 info = inspect(args.agent_id)
             except LookupError:
                 print(f"ade-lead-of: agent {args.agent_id} not found in Paseo", file=sys.stderr)
                 return EXIT_NOT_FOUND
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 print(f"ade-lead-of: cannot inspect {args.agent_id} ({exc}); pass --offline to skip live check", file=sys.stderr)
                 return EXIT_NOT_FOUND
-            if info.get("Archived") is not False:
+            if not isinstance(info, dict) or info.get("Archived") is not False:
                 print(f"ade-lead-of: refusing to record archived agent {args.agent_id} as lead of {clean}", file=sys.stderr)
                 return EXIT_NOT_FOUND
             if cwd is None and isinstance(info.get("Cwd"), str):
                 cwd = info["Cwd"]
-        rec = write_repo_lead(clean, args.agent_id, source="manual", cwd=cwd,
-                              repo_leads_dir=rdir, state_dir=sdir, home=phome)
+        try:
+            rec = write_repo_lead(clean, args.agent_id, source="manual", cwd=cwd,
+                                  repo_leads_dir=rdir, state_dir=sdir, home=phome, env=cli_env)
+        except OSError as exc:
+            print(f"ade-lead-of: failed to write repo lead record for {clean}: {exc}", file=sys.stderr)
+            return EXIT_NOT_FOUND
         if args.json:
             print(json.dumps(rec, indent=2, sort_keys=True))
         else:
@@ -845,12 +941,13 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
     res = resolve_repo_lead(
         args.repo,
-        inspect=paseo_inspect_fn(args.paseo),
-        list_agents=paseo_list_agents_fn(args.paseo),
-        list_workspaces=paseo_list_workspaces_fn(args.paseo),
+        inspect=paseo_inspect_fn(args.paseo, env=cli_env),
+        list_agents=paseo_list_agents_fn(args.paseo, env=cli_env),
+        list_workspaces=paseo_list_workspaces_fn(args.paseo, env=cli_env),
         state_dir=sdir,
         repo_leads_dir=rdir,
         home=phome,
+        env=cli_env,
     )
     if args.json:
         print(json.dumps(res, indent=2, sort_keys=True))

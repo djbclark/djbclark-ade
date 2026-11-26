@@ -376,3 +376,225 @@ sys.exit(1)
     r_bad = subprocess.run([cli, "--paseo", str(fake_paseo), "get", "../bad"],
                            capture_output=True, text=True, env=env, timeout=30)
     assert r_bad.returncode == lead_of.EXIT_USAGE
+
+
+def test_verified_lead_resolves_workspace_and_window_when_inspect_omits_workspace_id(tmp_path):
+    """MED-1: real `snapshot_to_inspect_dict` and CLI `paseo agent inspect` omit WorkspaceId;
+    resolve_repo_lead must still populate workspace_id and window via list_agents or daemon state file."""
+    state, home = tmp_path / "state", tmp_path / "paseo-home"
+    home.mkdir()
+    lead_of.write_repo_lead("myrepo", A, source="finish", state_dir=state, home=home)
+    ws = [{"workspaceId": WKS_LEAD, "title": "LEAD myrepo (wave 7)"}]
+
+    # Case 1: inspect omits WorkspaceId; recovered via list_agents().
+    res1 = lead_of.resolve_repo_lead(
+        "myrepo",
+        inspect=_inspect_map({A: {"Id": A, "Archived": False, "Name": "LEAD myrepo"}}),
+        list_agents=lambda: [{"id": A, "workspaceId": WKS_LEAD, "archived": False}],
+        list_workspaces=lambda: ws,
+        state_dir=state,
+        home=home,
+    )
+    assert res1["verified"] is True
+    assert res1["workspace_id"] == WKS_LEAD
+    assert res1["window"] == "LEAD myrepo (wave 7)"
+
+    # Case 2: list_agents() empty; recovered via <paseo-home>/agents/<proj>/<id>.json.
+    agent_dir = home / "agents" / "proj1"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / f"{A}.json").write_text(json.dumps({"id": A, "workspaceId": WKS_LEAD}))
+    res2 = lead_of.resolve_repo_lead(
+        "myrepo",
+        inspect=_inspect_map({A: {"Id": A, "Archived": False, "Name": "LEAD myrepo"}}),
+        list_agents=lambda: [],
+        list_workspaces=lambda: ws,
+        state_dir=state,
+        home=home,
+    )
+    assert res2["verified"] is True
+    assert res2["workspace_id"] == WKS_LEAD
+    assert res2["window"] == "LEAD myrepo (wave 7)"
+
+
+def test_worker_exclusions_and_structured_identity_beats_display_title_renames(tmp_path):
+    """MED-2 + Codex P1: daemon parent-label/background/internal agents are excluded, while
+    structured lead metadata (ade.box=LEAD, registered LEAD window) survives human title renames."""
+    ws_state = tmp_path / "ws-state"
+    ws_state.mkdir()
+    ws_names.write_window_registry(
+        ws_state / f"{B}.windows.json",
+        {WKS_LEAD},
+        {WKS_LEAD: {"windowId": WKS_LEAD, "box": "LEAD", "repo": "alpha", "lead": B}},
+    )
+    repo_dir = tmp_path / "alpha"
+    repo_dir.mkdir()
+
+    # Daemon child (paseo.parent-agent-id), background, internal, and ade.internal must be excluded.
+    excluded_rows = [
+        {"id": C, "archived": False, "workspaceId": WKS_LEAD, "cwd": str(repo_dir),
+         "labels": {"paseo.parent-agent-id": A}, "title": "Interactive child"},
+        {"id": D, "archived": False, "workspaceId": WKS_LEAD, "cwd": str(repo_dir),
+         "background": True, "title": "Background helper"},
+        {"id": E, "archived": False, "workspaceId": WKS_LEAD, "cwd": str(repo_dir),
+         "internal": True, "title": "Internal agent"},
+        {"id": "ffffffff-ffff-4fff-8fff-ffffffffffff", "archived": False, "workspaceId": WKS_LEAD,
+         "cwd": str(repo_dir), "labels": {"ade.internal": "1"}, "title": "ADE internal"},
+    ]
+    assert lead_of.discover_live_candidates(
+        "alpha", list_agents=lambda: excluded_rows, list_workspaces=lambda: [], ws_state_dir=ws_state,
+    ) == []
+
+    # Structured ade.box=LEAD + ade.repo survives human rename to `RETIRED ...` or `worker ...`.
+    renamed_labelled = {
+        "id": A, "archived": False, "workspaceId": WKS_OTHER, "cwd": str(repo_dir),
+        "labels": {"ade.repo": "alpha", "ade.box": "LEAD"}, "title": "RETIRED my custom note",
+    }
+    c1 = lead_of.discover_live_candidates(
+        "alpha", list_agents=lambda: [*excluded_rows, renamed_labelled], list_workspaces=lambda: [], ws_state_dir=ws_state,
+    )
+    assert [c["id"] for c in c1] == [A]
+
+    # Registered LEAD window survives human rename to `worker ...` or `RETIRED ...`.
+    renamed_reg = {
+        "id": B, "archived": False, "workspaceId": WKS_LEAD, "cwd": str(repo_dir),
+        "title": "worker renamed-by-human",
+    }
+    c2 = lead_of.discover_live_candidates(
+        "alpha", list_agents=lambda: [*excluded_rows, renamed_reg], list_workspaces=lambda: [], ws_state_dir=ws_state,
+    )
+    assert [c["id"] for c in c2] == [B]
+
+
+def test_registered_non_lead_windows_env_ws_state_dir_and_legacy_main_repo_check(tmp_path):
+    """MED-4 + LOW-3: registered WORKER/OTHER windows beat human renames to `LEAD <repo>`,
+    resolve_repo_lead honors env['ADE_WORKER_RUN_STATE'], and `MAIN other-repo` never matches `alpha`."""
+    ws_state = tmp_path / "ws-state"
+    ws_state.mkdir()
+    ws_names.write_window_registry(
+        ws_state / f"{A}.windows.json",
+        {WKS_WORKER},
+        {WKS_WORKER: {"windowId": WKS_WORKER, "box": "WORKER", "repo": "alpha", "lead": A}},
+    )
+    repo_dir = tmp_path / "alpha"
+    repo_dir.mkdir()
+    state, home = tmp_path / "st", tmp_path / "ph"
+    home.mkdir()
+
+    # Worker window renamed by human to `LEAD alpha (notes)` must still be excluded via env['ADE_WORKER_RUN_STATE'].
+    res = lead_of.resolve_repo_lead(
+        "alpha",
+        inspect=_inspect_map({}),
+        list_agents=lambda: [
+            {"id": B, "archived": False, "workspaceId": WKS_WORKER, "cwd": str(repo_dir),
+             "labels": {"ade.chain": B}, "title": "LEAD alpha"},
+        ],
+        list_workspaces=lambda: [{"workspaceId": WKS_WORKER, "title": "LEAD alpha (notes)"}],
+        state_dir=state,
+        home=home,
+        env={"ADE_WORKER_RUN_STATE": str(ws_state)},
+    )
+    assert res["lead"] is None and res["candidates"] == []
+
+    # Legacy `MAIN other-repo` must NOT match `alpha` at Tier 4 even if cwd is `alpha`.
+    cands = lead_of.discover_live_candidates(
+        "alpha",
+        list_agents=lambda: [
+            {"id": B, "archived": False, "workspaceId": WKS_OTHER, "cwd": str(repo_dir), "title": "tab"},
+            {"id": C, "archived": False, "workspaceId": WKS_LEAD, "cwd": str(repo_dir), "labels": {"ade.chain": C}},
+        ],
+        list_workspaces=lambda: [{"workspaceId": WKS_OTHER, "name": "MAIN other-repo"}],
+        ws_state_dir=tmp_path / "empty-ws",
+    )
+    assert [c["id"] for c in cands] == [C]
+    assert cands[0]["reason"] == "chain+cwd"
+
+
+def test_infer_repo_title_fallback_opt_in_and_no_double_period(tmp_path):
+    """LOW-1 + INFO-2: title fallback is opt-in (off for authoritative writes) and refusal hints omit trailing '.'."""
+    rec = {"Id": A, "Archived": True, "Cwd": str(Path.home()), "Name": "LEAD notes"}
+    assert lead_of.infer_repo_from_agent(rec) is None
+    assert lead_of.infer_repo_from_agent(rec, allow_title_fallback=True) == "notes"
+
+    state, home = tmp_path / "st", tmp_path / "ph"
+    home.mkdir()
+    lead_of.write_repo_lead("notes", B, source="manual", state_dir=state, home=home)
+    hint = lead_of.candidates_hint_for_refusal(
+        rec,
+        inspect=_inspect_map({A: rec, B: {"Id": B, "Archived": False, "Name": "Lead B"}}),
+        list_agents=lambda: [],
+        state_dir=state,
+        home=home,
+    )
+    assert hint and not hint.endswith(".")
+
+
+def test_cli_paseo_home_forwarding_and_set_error_handling(tmp_path):
+    """MED-3 + Codex P2 + LOW-2: `--paseo-home` is forwarded to live calls, and `set` handles
+    malformed inspect JSON and symlink write failures cleanly without tracebacks."""
+    state = tmp_path / "state"
+    alt_home = tmp_path / "alt-paseo-home"
+    alt_home.mkdir()
+    default_home = tmp_path / "default-paseo-home"
+    default_home.mkdir()
+    repo_dir = tmp_path / "epsilon"
+    repo_dir.mkdir()
+    seen_homes = tmp_path / "seen-homes.txt"
+
+    fake_paseo = tmp_path / "fake-paseo"
+    fake_paseo.write_text(f"""#!/usr/bin/env python3
+import json, os, sys
+with open({str(seen_homes)!r}, "a") as fh:
+    fh.write(os.environ.get("PASEO_HOME", "") + "\\n")
+a = sys.argv[1:]
+if a[:2] == ["agent", "inspect"] and a[2] == {A!r}:
+    if os.environ.get("FAKE_BAD_JSON"):
+        print("not-json")
+        sys.exit(0)
+    print(json.dumps({{"Id": {A!r}, "Archived": False, "Cwd": {str(repo_dir)!r}, "Name": "LEAD epsilon"}}))
+    sys.exit(0)
+if a[:2] == ["ls", "-g"]:
+    print(json.dumps([{{"id": {A!r}, "archived": False, "workspaceId": {WKS_LEAD!r}, "cwd": {str(repo_dir)!r}}}]))
+    sys.exit(0)
+if a[:2] == ["workspace", "ls"]:
+    print(json.dumps([{{"workspaceId": {WKS_LEAD!r}, "title": "LEAD epsilon (live)"}}]))
+    sys.exit(0)
+sys.exit(1)
+""")
+    fake_paseo.chmod(0o755)
+    env = {
+        **os.environ,
+        "ADE_PASEO_TRANSPORT": "cli",
+        "ADE_SELF_SESSION_STATE": str(state),
+        "PASEO_HOME": str(default_home),
+        "ADE_WORKER_RUN_STATE": str(tmp_path / "empty-ws"),
+    }
+    env.pop("ADE_REPO_LEADS_DIR", None)
+    cli = str(ROOT / "bin" / "ade-lead-of")
+
+    # --paseo-home must reach fake_paseo on both set and get (not default_home).
+    r_set = subprocess.run([cli, "--paseo", str(fake_paseo), "--paseo-home", str(alt_home), "set", "epsilon", A],
+                           capture_output=True, text=True, env=env, timeout=30)
+    assert r_set.returncode == lead_of.EXIT_OK, r_set.stderr
+    r_get = subprocess.run([cli, "--paseo", str(fake_paseo), "--paseo-home", str(alt_home), "epsilon", "--json"],
+                           capture_output=True, text=True, env=env, timeout=30)
+    assert r_get.returncode == lead_of.EXIT_OK, r_get.stderr
+    d_get = json.loads(r_get.stdout)
+    assert d_get["verified"] is True and d_get["workspace_id"] == WKS_LEAD and d_get["window"] == "LEAD epsilon (live)"
+    recorded_homes = seen_homes.read_text().splitlines()
+    assert recorded_homes and all(h == str(alt_home) for h in recorded_homes)
+
+    # Malformed inspect JSON -> clean exit 1 (no Python traceback).
+    r_badjson = subprocess.run([cli, "--paseo", str(fake_paseo), "--paseo-home", str(alt_home), "set", "epsilon", A],
+                               capture_output=True, text=True, env={**env, "FAKE_BAD_JSON": "1"}, timeout=30)
+    assert r_badjson.returncode == lead_of.EXIT_NOT_FOUND
+    assert "Traceback" not in r_badjson.stderr and "cannot inspect" in r_badjson.stderr
+
+    # Symlink target on `set --offline` -> clean exit 1 (no Python traceback).
+    sym_path = lead_of.repo_record_path("symtarget", state_dir=state)
+    sym_path.parent.mkdir(parents=True, exist_ok=True)
+    os.symlink(tmp_path / "nowhere.json", sym_path)
+    r_sym = subprocess.run([cli, "--paseo-home", str(alt_home), "set", "symtarget", A, "--offline"],
+                           capture_output=True, text=True, env=env, timeout=30)
+    assert r_sym.returncode == lead_of.EXIT_NOT_FOUND
+    assert "Traceback" not in r_sym.stderr and "failed to write" in r_sym.stderr
+

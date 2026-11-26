@@ -1879,13 +1879,13 @@ class Service:
             else:
                 repo_name = checkpoint_frontmatter_repo(record.get('checkpoint'))
                 if not repo_name and isinstance(agent_row, dict):
-                    repo_name = lead_of.infer_repo_from_agent(agent_row)
+                    repo_name = lead_of.infer_repo_from_agent(agent_row, allow_title_fallback=False)
                 if not repo_name:
                     identity = record.get('identity') if isinstance(record.get('identity'), dict) else {}
-                    repo_name = lead_of.infer_repo_from_agent({
-                        'Cwd': record.get('cwd'),
-                        'Name': identity.get('title'),
-                    })
+                    repo_name = lead_of.infer_repo_from_agent(
+                        {'Cwd': record.get('cwd'), 'Name': identity.get('title')},
+                        allow_title_fallback=False,
+                    )
             if repo_name:
                 lead_of.write_repo_lead(
                     repo_name,

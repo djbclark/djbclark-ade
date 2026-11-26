@@ -4552,3 +4552,53 @@ def test_finish_records_repo_lead_from_cwd_and_frontmatter(tmp_path):
     assert stored is not None and stored['lead'] == SUCC and stored['source'] == 'finish'
 
 
+def test_link_cli_subcommand_and_no_title_fallback_repo_write(tmp_path):
+    """INFO-1 + LOW-1: CLI `bin/ade-self-session link` works end to end without PASEO_AGENT_ID,
+    and `record_repo_lead` does NOT persist an authoritative repo record from a display title alone."""
+    import ade_lead_of as lead_of
+
+    state = tmp_path / 'state'
+    home = tmp_path / 'paseo-home'
+    home.mkdir()
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    fake_paseo = bindir / 'paseo'
+    fake_paseo.write_text(f"""#!/usr/bin/env python3
+import json, sys
+a = sys.argv[1:]
+# argv: --home DIR --json agent inspect ID
+if 'inspect' in a:
+    aid = a[a.index('inspect') + 1]
+    if aid == {PRED!r}:
+        print(json.dumps({{'Id': {PRED!r}, 'Archived': True, 'Cwd': {str(Path.home())!r}, 'Name': 'LEAD notes'}}))
+        sys.exit(0)
+    if aid == {SUCC!r}:
+        print(json.dumps({{'Id': {SUCC!r}, 'Archived': False, 'Cwd': {str(Path.home())!r}, 'Name': 'LEAD notes'}}))
+        sys.exit(0)
+sys.exit(1)
+""")
+    fake_paseo.chmod(0o755)
+    env = {
+        **os.environ,
+        'PATH': f'{bindir}:{os.environ["PATH"]}',
+        'ADE_SUPERVISOR_STATE_DIR': str(tmp_path / 'sup'),
+        'ADE_NET_RESUME_PLIST': str(tmp_path / 'no-plist'),
+    }
+    env.pop('PASEO_AGENT_ID', None)
+    env.pop('ADE_REPO_LEADS_DIR', None)
+
+    cli = str(REPO / 'bin' / 'ade-self-session')
+    r = subprocess.run(
+        [cli, '--state-dir', str(state), '--paseo-home', str(home), 'link',
+         '--predecessor', PRED, '--successor', SUCC, '--operator-attested', '--reason', 'cli test'],
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert out['status'] == 'archived' and out['successor'] == SUCC and out['reason'] == 'cli test'
+    # LOW-1: Cwd=~ and title='LEAD notes' must NOT write an authoritative repo-leads/notes.json.
+    assert out['repo_lead'] == {'status': 'skipped-no-repo'}
+    assert lead_of.read_repo_lead('notes', state_dir=state, home=home) is None
+
+
+
