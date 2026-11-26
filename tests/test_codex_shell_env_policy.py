@@ -630,6 +630,35 @@ ignore_default_excludes = true
             self.assertEqual(code, 1)
             self.assertIn("cannot be allowed", err)
 
+    def test_allow_set_keys_dry_run_prints_set_key_names_and_never_values(self) -> None:
+        # Carried #86 / issue #853: dry run with --allow-set-keys must print add/remove/change key names (never values).
+        with tempfile.TemporaryDirectory() as d:
+            t = self.stale_live(d)
+            # Also mutate MCP_TIMEOUT with a secret-like canary value to exercise all three tags: add, remove, change.
+            t.write_text(t.read_text().replace('MCP_TIMEOUT = "300000"', 'MCP_TIMEOUT = "SECRET-TIMEOUT-CANARY-999"'))
+            before = t.read_bytes()
+            r = self.run_apply(
+                t,
+                "--allow-set-keys",
+                "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,CLAUDE_CODE_EXPERIMENTAL_CODE_MODE,MCP_TIMEOUT",
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(t.read_bytes(), before)  # dry run leaves target untouched
+            self.assertIn("explicit set changes in [shell_environment_policy.set] (values not shown):", r.stdout)
+            self.assertIn("  add: CLAUDE_CODE_EXPERIMENTAL_CODE_MODE", r.stdout)
+            self.assertIn("  remove: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", r.stdout)
+            self.assertIn("  change: MCP_TIMEOUT", r.stdout)
+            for secret in ("SECRET-TIMEOUT-CANARY-999", "SECRETDIGEST-0123", "SECRET-ABOVE-1", "SECRET-BELOW-2"):
+                self.assertNotIn(secret, r.stdout + r.stderr, secret)
+
+    def test_dry_run_without_set_changes_omits_explicit_set_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            t = pathlib.Path(d, "config.toml")
+            t.write_text(self.LIVE.format(home=d))
+            r = self.run_apply(t)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("explicit set changes", r.stdout)
+
     def test_a_change_between_read_and_recheck_refuses_and_keeps_the_concurrent_edit(self) -> None:
         mod = self.apply_module()
         with tempfile.TemporaryDirectory() as d:
