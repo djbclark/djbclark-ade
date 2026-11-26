@@ -13,7 +13,7 @@ Always give:
 
 Then give the placement fields for the harness the agent actually runs in:
 
-- A **Paseo** agent (a Paseo GUI/window agent): **7-char tab-tooltip prefix + full agent ID** (`<7-char> (<full-UUID>)`), **workspace ID (`wks_…`), window name** (its workspace name), and **tab name** (operator rulings 2026-11-23, 2026-11-25; see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5).
+- A **Paseo** agent (a Paseo GUI/window agent): **7-char tab-tooltip prefix + full agent ID** (`<7-char> (<full-UUID>)`), **workspace ID (`wks_…`), window name** (its workspace name), and **tab name** (operator rulings 2026-11-23, 2026-11-25; see [docs/ref-labels.md](ref-labels.md) and `AGENTS.md` Standing Order 5). Whenever starting something requiring human interaction (existing starts too, not just handoffs; operator ruling 2026-11-26), give the exact designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus workspace ID for the actual tab/window the human needs and state where the interaction occurs (e.g. phone overlay vs Paseo tab).
 - A **herdr** terminal agent (Claude Code in a herdr pane): the herdr workspace label, the tab label, and the pane id.
 
 A field that does not apply or cannot be resolved is written `?`, never invented

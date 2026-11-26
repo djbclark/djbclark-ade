@@ -48,3 +48,8 @@ find, set up, and run it without repository-specific hunting.
 - [Plektra `qa/SETUP.md`](https://github.com/djbclark/plektra-djbclark/blob/a6b43d5eb7a3062e6afd40b5fec1ba3d5c5d8740/qa/SETUP.md)
 - Discovery pair (`qa/README.md` + `qa/SETUP.md`), scoped `qa/AGENTS.md` / `qa/CLAUDE.md`,
   and `qa/Justfile` recipes `qa-connect`, `qa-demo`, `qa-run`.
+
+## Human-in-the-loop (HITL) operator prompts and placement (2026-11-26)
+
+1. **Exact designation and venue:** whenever starting a QA or HITL run that requires the human to interact (applies to existing starts too, not just handoffs), include the exact Paseo designation `{<7-char-prefix> (<full-agent-UUID>) <project>/<window>/<tab>}` plus the workspace ID (`wks_…`) for the actual tab/window the human needs, and explicitly state where the interaction occurs (for example, phone overlay vs Paseo tab).
+2. **`WORKER` boundary and placement:** reserve `WORKER` nomenclature strictly for subagents the operator will never need to interact with directly. Open human-interactive QA/HITL child sessions (such as HandQA) as descriptively named tabs in the launching agent's window when practical, retaining the parent relationship in Paseo metadata. If a separate workspace is required, `INTERACTIVE <repo> (<task>)` is a proposed human-facing label (proposed only; the `WORKER` distinction is the operator's ruling). See [docs/ref-labels.md](ref-labels.md) and [docs/workspace-layout.md](workspace-layout.md).
