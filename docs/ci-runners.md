@@ -1,58 +1,39 @@
-# CI runners: WarpBuild is opt-in only
+# CI runners: WarpBuild is fallback-only
 
-**Update 2026-11-22 (operator ruling via the lead's /steps walk, 2026-11-22, lead 41840155-eb9e-4a7d-b449-a3b439d0daee: "all four repos" move to free runners; spend cap target US$10/month):** WarpBuild is **opt-in only**. Default is GitHub-hosted:
-`macos-26` for macOS and `ubuntu-latest` for Linux, both free on public repos. **GitHub `macos-26` first; WarpBuild only if measured >= 1.5x and
-> 10 min** (the gate below). A survey of the four `frdminc` repos with any WarpBuild job (`warpbuild-pilot`, `tendcf`, `paseo`,
-`sudo-secretspec`; all public) measured **US$4.83 in 30 days** (11 jobs, 71 billed minutes, 91% macOS 6x/12x, all from branch-only or one-off
-pilot workflows, none from default-branch CI). Moved to free runners that day: `sudo-secretspec` branch `ci/base` `linux-ci.yml` macOS job and
-`paseo` branch `local/main-desktop-v0171-20261122` `fork-desktop-build.yml` (both to `macos-26`; fall back to `warp-macos-26-arm64-6x` only if
-the Electron build OOMs or times out on the 3 vCPU/7 GB runner); `warpbuild-pilot` `test.yml` is `workflow_dispatch` only (no push or PR
-trigger); the `tendcf` branch `spike/macos-check8-warp` is deleted. The WarpBuild **spend cap is an operator-chosen target of US$10/month** for the
-`frdminc` org (2026-11-22), **not yet set**: the WarpBuild sign-in was refused, so an agent could not set it, and a hard-cap setting is
-unconfirmed (the operator sets it in the console at <https://app.warpbuild.com>; per-job cost is on Insights > Spend, CI tab; the app may
-offer only budget alerts, so confirm the setting exists before relying on it). Billing rounds each job up to whole minutes with a 1-minute floor.
+**Update 2026-11-25 (operator ruling via Paseo fork build 3 lead `afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)`):** *"Let's change the rules to only use warpbuild if github isn't available or is failing. As I recall the speedup was not that substantial?"*
 
-Snapshot **2026-11-13** (operator rulings, card answers; superseded as the default by the update above, still the gate for any opt-in). A GitHub Actions job moves to
-[WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) runners only when **both** hold:
+- **Active rule:** Default and stay on GitHub-hosted runners (`macos-26` for macOS and `ubuntu-latest` for Linux, both free on public repos). Use [WarpBuild](https://www.warpbuild.com/docs/ci/quick-start) **only as a fallback when GitHub-hosted runners are unavailable or failing** (for example: a GitHub Actions runner outage, missing runner capacity/architecture, or a job that OOMs or fails on the GitHub-hosted runner's 3 vCPU / 7 GB spec).
+- **Speedup promotion rule removed:** The prior `> 10 min` and `>= 1.5x` (50% faster) promotion gate is retired. Do not move passing GitHub-hosted jobs to WarpBuild for speed alone; revert fallback jobs back to GitHub-hosted once GitHub runners are available and passing.
+- On 2026-11-25, Paseo's `fork-desktop-build.yml` was also switched from `warp-macos-26-arm64-6x` back to free GitHub-hosted `macos-26`.
 
-1. It takes **more than 10 minutes** on GitHub-hosted runners.
-2. A measured pilot shows WarpBuild **at least 50% faster** (operator, 2026-11-13: "Let's put a minimum 50% faster and each project can see
-   if its stuff gets past that gate"). Faster means GitHub-hosted time divided by WarpBuild time is at least 1.5, so the WarpBuild run takes
-   at most two thirds as long.
+**History (superseded defaults):** On 2026-11-22 (operator ruling via lead `4184015 (41840155-eb9e-4a7d-b449-a3b439d0daee)`), all four `frdminc` repos with any WarpBuild job (`warpbuild-pilot`, `tendcf`, `paseo`, `sudo-secretspec`; all public) were audited (**US$4.83 in 30 days**, 11 jobs, 71 billed minutes, 91% macOS 6x/12x, all from branch-only or one-off pilot workflows, none from default-branch CI) and moved to free runners (`sudo-secretspec` `ci/base` `linux-ci.yml`, `paseo` `fork-desktop-build.yml`; `warpbuild-pilot` `test.yml` is `workflow_dispatch` only; `tendcf` `spike/macos-check8-warp` deleted). The WarpBuild **spend cap is an operator-chosen target of US$10/month** for the `frdminc` org (2026-11-22), **not yet set**: the WarpBuild sign-in was refused, so an agent could not set it, and a hard-cap setting is unconfirmed (the operator sets it in the console at <https://app.warpbuild.com>; per-job cost is on Insights > Spend, CI tab; the app may offer only budget alerts, so confirm the setting exists before relying on it). Billing rounds each job up to whole minutes with a 1-minute floor.
 
-Everything else stays on GitHub-hosted runners. Each project measures its own jobs (section B) and moves only the jobs that pass. Applies to the
-operator's active repositories (not archived ones, third-party forks, or repos with no recent CI). djbclark-ade itself failed the gate
-(section C pilot: 1.07x Linux, 1.22x macOS) and stays on GitHub-hosted runners under `djbclark`.
+The earlier **2026-11-13** snapshot (which promoted jobs `> 10 min` and `>= 1.5x` / 50% faster on WarpBuild) is superseded by the 2026-11-25 fallback-only rule above. In the 2026-11-13 pilot (section C), `djbclark-ade` measured only 1.07x on Linux and 1.22x on macOS and stays on GitHub-hosted runners under `djbclark`.
 
 ## A. Labels (WarpBuild's own mapping, `mcp__warpbuild__suggest_runner_labels`)
 
-Use a `warp-*` label only for a job that passed the gate (opt-in); mapping `ubuntu-latest` to `warp-4x` for a job that did not costs more than free.
+Use a `warp-*` label only as a fallback when GitHub-hosted runners are unavailable or failing; mapping `ubuntu-latest` or `macos-26` to WarpBuild for jobs GitHub-hosted runners already run costs more than free.
 
 | GitHub-hosted | WarpBuild |
 |---|---|
 | `ubuntu-latest`, `ubuntu-24.04` | `warp-ubuntu-2404-x64-4x` |
 | `macos-latest`, `macos-26` | `warp-macos-26-arm64-6x` |
 
-Same-size mapping for other labels; go bigger (`8x`, `12x`) only where a measured gain justifies it. Change only `runs-on`.
+Same-size mapping for other labels; go bigger (`8x`, `12x`) only when a smaller runner cannot complete the job (for example, OOM). Change only `runs-on`.
 Leave self-hosted labels and `runs-on` expressions alone and list them in the PR.
 
-## B. How to switch a repository
+## B. How to use WarpBuild as a fallback
 
-1. The WarpBuild GitHub app must be installed on the **organization** and have access to the repository.
-2. Public repo: the org's Default runner group (id 1, where WarpBuild registers) must allow public repositories
+1. Confirm GitHub-hosted runners are actually unavailable or failing for the job (record the outage, error, OOM, or failed run link). Do not switch passing jobs for speed.
+2. The WarpBuild GitHub app must be installed on the **organization** and have access to the repository. A personal-account repo cannot use WarpBuild (section C).
+3. Public repo: the org's Default runner group (id 1, where WarpBuild registers) must allow public repositories
    (`gh api -X PATCH orgs/<org>/actions/runner-groups/1 -F allows_public_repositories=true`, needs `admin:org`: add it with
    `gh auth refresh -s admin:org` and drop it afterwards, or use the web UI). That opens every runner in the group to every repo the group
-   reaches, so also set group 1 to `visibility=selected` listing only the switched repos, and install the app on "Only select repositories".
-3. Measure before moving anything: copy the repo's tree (secret-free workflows only) into `frdminc/warpbuild-pilot` (add it nowhere else),
-   run each job over 10 minutes once on its `warp-*` label and once on its GitHub-hosted label, and compare job durations
-   (`gh run view --json jobs`). Only jobs at 1.5x or better pass the gate. A personal-account repo that passes needs a transfer to an
-   organization first (section C; the operator decides per repo, and the transfer audit has to cover the merge-gate App, rulesets and the
-   org's installed apps).
-4. Edit `runs-on` of each passing job, open a PR titled "Switch CI to WarpBuild runners", confirm a job starts on a `warp-*` runner and
-   compare durations again, then merge.
+   reaches, so also set group 1 to `visibility=selected` listing only the fallback repos, and install the app on "Only select repositories".
+4. Edit `runs-on` on only the affected secret-free job(s), confirm the fallback job starts on a `warp-*` runner, and switch `runs-on` back to GitHub-hosted once GitHub-hosted runners recover or the job passes there.
 5. MCP server (user scope): `claude mcp add --transport http --scope user warpbuild https://mcp.warpbuild.com/mcp && claude mcp login warpbuild`
    (the old `docs/apply-toolchain-prompt.md` is archived under `docs/history/`, so the entry lives here). Prefer `--scope local` in the repo
-   being switched, or `claude mcp remove warpbuild` after setup: at user scope its vendor-written instructions load into every session, and
+   being configured, or `claude mcp remove warpbuild` after setup: at user scope its vendor-written instructions load into every session, and
    `send_setup_report` sends repo details to WarpBuild.
 
 ## C. Personal accounts are not supported
@@ -89,8 +70,7 @@ value: the UUID first stored there got 403 from `/runner_instance` and `/reports
 
 ## E. Cost and exposure
 
-WarpBuild bills per minute; the 4x Linux and 6x macOS sizes cost more per minute than GitHub-hosted and are only worth it where the job is
-long. Moving a job gives WarpBuild (a third party) its VM, so it sees every secret and token in the job.
+WarpBuild bills per minute; the 4x Linux and 6x macOS sizes cost more per minute than GitHub-hosted (free on public repos) and are only used as a fallback when GitHub-hosted runners are unavailable or failing. Moving a job gives WarpBuild (a third party) its VM, so it sees every secret and token in the job.
 
 1. **Never move** a job that has `secrets.*`, an `environment:` or any write permission, whatever its duration (here: `adversary-marker.yml`
    `marker`, the merge gate, and `roster.yml` `publish`). Only read-only, secret-free jobs qualify.
