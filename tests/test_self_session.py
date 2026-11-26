@@ -4122,3 +4122,53 @@ def test_q122_malformed_paseo_agent_id_keeps_strict_ident_error(setup):
         service.handoff(checkpoint, quiesced=True)
     assert str(exc.value) == 'a full UUID is required'
     assert native.calls == []
+
+
+@pytest.mark.parametrize('workspace_override', [None, ''])
+def test_recovered_codex_identity_uses_ancestor_workspace(setup, workspace_override):
+    service, native, checkpoint = setup
+    del service.env['PASEO_AGENT_ID']
+    del service.env['PASEO_WORKSPACE_ID']
+    if workspace_override is not None:
+        service.env['PASEO_WORKSPACE_ID'] = workspace_override
+    calls = []
+
+    def recover(env, *, own_env):
+        calls.append(own_env)
+        return {'PASEO_AGENT_ID': PRED, 'PASEO_WORKSPACE_ID': WS}
+
+    service.identity_resolver = recover
+    service.planner = service.verifier = None
+    native.rows[PRED].update(Provider='codex', Mode='default',
+                            AvailableModes=[{'id': 'full-access', 'label': 'Unattended'}])
+    assert service.actor() == PRED
+    if workspace_override is None:
+        record = service.handoff(checkpoint, quiesced=True)
+        assert record['workspace_placement'] == 'existing'
+        call = next(a for a, _ in native.calls if a[4:6] == ['agent', 'run'])
+        assert call[call.index('--workspace') + 1] == WS
+    else:
+        with pytest.raises(ss.SessionError, match='workspace id'):
+            service.handoff(checkpoint, quiesced=True)
+        assert native.created == 0
+    assert calls == [False]
+
+
+def test_ambiguous_ancestor_identity_refuses_actor(setup):
+    service, _, _ = setup
+    del service.env['PASEO_AGENT_ID']
+
+    def recover(env, *, own_env):
+        raise ss._load_sibling('paseo_identity').PaseoIdentityAmbiguousError('conflicting agent ids')
+
+    service.identity_resolver = recover
+    with pytest.raises(ss.SessionError, match='ambiguous Paseo identity'):
+        service.actor()
+
+
+def test_recovered_actor_must_be_codex(setup):
+    service, _, _ = setup
+    del service.env['PASEO_AGENT_ID']
+    service.identity_resolver = lambda env, *, own_env: {'PASEO_AGENT_ID': PRED}
+    with pytest.raises(ss.SessionError, match='not a Codex provider'):
+        service.actor()

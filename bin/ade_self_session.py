@@ -108,15 +108,18 @@ _BARE_TOKEN = re.compile(r'(?<![A-Za-z0-9_-])(?:gh[pousr]_|github_pat_|sk-|xox[b
 
 
 def _coord():
+    return _load_sibling("ade_coord")
+
+
+def _load_sibling(name):
     """Load only our trusted absolute sibling; valid after temporary -I paths restore."""
     import importlib.util
     import sys
-    path = Path(__file__).resolve().with_name("ade_coord.py")
-    name = "ade_coord"
+    path = Path(__file__).resolve().with_name(name + ".py")
     found = sys.modules.get(name)
     if found is not None and Path(found.__file__).resolve() == path:
         return found
-    key = name if found is None else "_ade_coord_" + str(path)
+    key = name if found is None else "_ade_sibling_" + str(path)
     if key in sys.modules:
         return sys.modules[key]
     spec = importlib.util.spec_from_file_location(key, path)
@@ -509,9 +512,13 @@ def write_atomic(path: Path, data: bytes, mode=None) -> None:
 class Service:
     def __init__(self, state: Path, home: Path, *, env=None, runner=None,
                  planner=None, verifier=None, clock=None, sleep=None, progress=None, evidence_reader=None,
-                 quota_checker=None, net_resume_plist=None, net_resume_reloader=None):
+                 quota_checker=None, net_resume_plist=None, net_resume_reloader=None, identity_resolver=None):
         self.state = state.resolve()
         self.home = home.resolve()
+        self._own_env = env is None
+        self.identity_resolver = identity_resolver
+        self._paseo_env = None
+        self._recovered_actor = None
         self.env = dict(os.environ if env is None else env)
         self.runner = runner or subprocess.run
         self.planner = planner
@@ -565,8 +572,27 @@ class Service:
             raise failure('unknown', f'native {op} output unparseable; outcome unknown; inspect before retry',
                           None, None, rc, bounded(stderr, TAIL_LIMIT)) from None
 
+    def _recovered_paseo_env(self):
+        if 'PASEO_AGENT_ID' in self.env or not (self._own_env or self.identity_resolver is not None):
+            return {}
+        if self._paseo_env is None:
+            identity = _load_sibling("paseo_identity")
+            resolver = self.identity_resolver or identity.recover_paseo_env
+            try:
+                self._paseo_env = resolver(self.env, own_env=self._own_env)
+            except identity.PaseoIdentityAmbiguousError as err:
+                raise SessionError(f'ambiguous Paseo identity: {err}') from None
+        return self._paseo_env
+
     def actor(self):
         raw = self.env.get('PASEO_AGENT_ID', '')
+        if 'PASEO_AGENT_ID' not in self.env:
+            recovered = self._recovered_paseo_env().get('PASEO_AGENT_ID')
+            if recovered:
+                agent = ident(recovered)
+                self._recovered_actor = agent
+                self.inspect(agent)  # every actor-only path also verifies the recovered provider
+                return agent
         if not isinstance(raw, str) or not raw.strip():
             raise SessionError(
                 'PASEO_AGENT_ID is unset (a full UUID is required; ade-self-session is Paseo-only). '
@@ -595,6 +621,8 @@ class Service:
         row = self.native('agent', 'inspect', ident(agent))
         if not isinstance(row, dict) or row.get('Id') != agent:
             raise SessionError('native identity readback unavailable')
+        if agent == self._recovered_actor and row.get('Provider') != 'codex':
+            raise SessionError('recovered Paseo actor is not a Codex provider')
         return row
 
     @contextlib.contextmanager
@@ -930,7 +958,10 @@ class Service:
             if (not isinstance(source.get('Provider'), str) or not source['Provider']
                     or not isinstance(source.get('Model'), str) or source['Model'] in ('', '-', 'default')):
                 raise SessionError('concrete predecessor provider/model unavailable')
-            workspace = workspace_ident(self.env.get('PASEO_WORKSPACE_ID', ''))
+            workspace = self.env.get('PASEO_WORKSPACE_ID')
+            if workspace is None:
+                workspace = self._recovered_paseo_env().get('PASEO_WORKSPACE_ID', '')
+            workspace = workspace_ident(workspace)
             # 2026-11-14: the predecessor's workspace had been removed, `agent run --workspace`
             # answered WORKSPACE_NOT_FOUND and the helper hid it. Decided: a successor is a new
             # lead in its own placement, so a vanished workspace is replaced, not a reason to refuse.

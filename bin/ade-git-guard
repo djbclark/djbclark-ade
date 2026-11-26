@@ -34,7 +34,8 @@
 #   ade-git-guard --help
 #
 # Order of work, cheapest first (one bash exec and no Python for the common call):
-#   1. Not an agent process (no ACP_RUN_AGENT=1, nonempty PASEO_AGENT_ID, nor ADE_CLAIM_ID): exec the real git untouched.
+#   1. Explicit blank PASEO_AGENT_ID with no other agent markers: exec the real git untouched.
+#      If the key is absent, Python can recover it for a Codex tool shell.
 #   2. Inside a git hook (GIT_INDEX_FILE set) or pre-commit (PRE_COMMIT set): exec the real git untouched.
 #   3. A plain read (status log show diff rev-parse ls-files ls-tree cat-file blame describe rev-list for-each-ref grep
 #      shortlog name-rev merge-base version help), after -C/-c/--git-dir=...: exec. No argument is scanned.
@@ -141,8 +142,9 @@ if [ "${self##*/}" = "ade-git-guard" ]; then
   esac
 fi
 
-# 1-2: not an agent, or inside a git hook
+# 1-2: explicit Paseo opt-out without any other agent marker, or inside a git hook
 if { [ -z "${ADE_CLAIM_ID:-}" ] && { [ -z "${ACP_RUN_AGENT:-}" ] || [ "${ACP_RUN_AGENT}" = 0 ]; } \
+  && [ "${PASEO_AGENT_ID+x}" = x ] \
   && case "${PASEO_AGENT_ID:-}" in *[![:space:]]*) false ;; *) true ;; esac; } \
   || [ -n "${GIT_INDEX_FILE:-}" ] || [ -n "${PRE_COMMIT:-}" ]; then
   exec "$real" "$@"
