@@ -161,35 +161,35 @@ repo = "getpaseo/paseo"
 pr = 9875
 expected_head = "084d2be0cc12e38bb961684bf45fac7de34e50c6"
 intent = "search bar in Settings to filter sections and groups (open upstream, by andheiberg)"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/9875"
 trial_required = true
 order = 50
-notes = "24 files (+1235/-109), app-only, related Discussion https://github.com/getpaseo/paseo/discussions/8552; pinned to head seen 2026-11-23; trial_required: merge-tree against v0.17.3 (dd7c0499a) conflicts in packages/app/src/screens/settings-screen.tsx (due to provider detail page commits d5d385afa and 3914893aa); also check mobile detail pageTitle while search is active and Windows oxfmt.cmd invocation in generate-settings-search-source.mjs before landing | android-build-3 landed 2026-11-26T13:50:47Z (release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132, tag fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b on frdminc/paseo:main; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk 153,286,527 B, sh.paseo.fork 0.17.4 versionCode 17004012, sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; signer SHA-256 44:82:0A:CB:5E:A2:6E:5D:63:6F:C8:C2:B7:82:AA:49:F6:10:1D:C0:B2:80:06:61:09:AE:C2:29:1A:D9:70:ED; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "24 files (+1235/-109), app-only, related Discussion https://github.com/getpaseo/paseo/discussions/8552; pinned to head seen 2026-11-23; trial_required: merge-tree against v0.17.3 (dd7c0499a) conflicts in packages/app/src/screens/settings-screen.tsx (due to provider detail page commits d5d385afa and 3914893aa); also check mobile detail pageTitle while search is active and Windows oxfmt.cmd invocation in generate-settings-search-source.mjs before landing | android-build-3 landed 2026-11-26T13:50:47Z (release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132, tag fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b on frdminc/paseo:main; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk 153,286,527 B, sh.paseo.fork 0.17.4 versionCode 17004012, sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; signer SHA-256 44:82:0A:CB:5E:A2:6E:5D:63:6F:C8:C2:B7:82:AA:49:F6:10:1D:C0:B2:80:06:61:09:AE:C2:29:1A:D9:70:ED; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-daemon-status-capabilities"
 component = "paseo"
 repo = "frdminc/paseo"
 intent = "expose daemon capabilities (features, acpElicitationForms) and forkBuild marker in `paseo daemon status --json`"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 hold = "placeholder: not built yet (queued for build 3, 2026-11-24)"
 order = 55
-notes = "operator-approved 2026-11-24 via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-daemon-status-caps-445d802d, complementing PR #969 after stayturgid lead 8f296f0e-9056-4bb7-a53a-a3900a246afa report): (1) surface `features: info?.features` from `client.getLastServerInfoMessage()` in `packages/cli/src/commands/daemon/status.ts:84-85` (upstreamable on its own); (2) add optional `acpElicitationForms?: boolean` to `ServerInfoStatusPayloadSchema.features` in `packages/protocol/src/messages.ts:3995+` (COMPAT-tagged per `docs/protocol-compatibility.md`); (3) expose a `forkBuild` marker (e.g. `djbclark fork 3`, matching desktop About) in daemon status so agents, hooks, and cutover checks can verify capabilities at runtime on any host instead of assuming hostname=bigmac | android-build-3 landed 2026-11-26T13:50:47Z (commit a3ff35149 in fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-daemon-status-caps-445d802d, complementing PR #969 after stayturgid lead 8f296f0e-9056-4bb7-a53a-a3900a246afa report): (1) surface `features: info?.features` from `client.getLastServerInfoMessage()` in `packages/cli/src/commands/daemon/status.ts:84-85` (upstreamable on its own); (2) add optional `acpElicitationForms?: boolean` to `ServerInfoStatusPayloadSchema.features` in `packages/protocol/src/messages.ts:3995+` (COMPAT-tagged per `docs/protocol-compatibility.md`); (3) expose a `forkBuild` marker (e.g. `djbclark fork 3`, matching desktop About) in daemon status so agents, hooks, and cutover checks can verify capabilities at runtime on any host instead of assuming hostname=bigmac | android-build-3 landed 2026-11-26T13:50:47Z (commit a3ff35149 in fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-agent-id-search-p2-fixes"
 component = "paseo"
 repo = "frdminc/paseo"
 intent = "fix two chatgpt-codex-connector P2 findings on Cmd+K agent-ID search (archived-agent history query and numeric PR-number precedence)"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 hold = "placeholder: not built yet (queued for build 3, 2026-11-24)"
 upstream = "https://github.com/getpaseo/paseo/discussions/10120"
 order = 56
-notes = "operator-approved 2026-11-24 in /steps via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-agent-id-p2-445d802d; follow-up to feat/command-center-agent-id-search @ 7c670ad4c, upstream discussion comment https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425): (a) include agent.id in matchesAgentHistoryQuery (packages/server/src/server/agent-history-search.ts:17-22) so archived-agent ID lookups return candidates from the host; (b) skip agent-ID target selection when changeRequestHit is true (packages/app/src/command-center/workspace-search.ts:218) so numeric PR-number searches keep normal workspace-level behavior | android-build-3 landed 2026-11-26T13:50:47Z (commits 7f5d533f3 + a5a834ac4 in fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps via Paseo fork build 2 lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8 (queue-build3-agent-id-p2-445d802d; follow-up to feat/command-center-agent-id-search @ 7c670ad4c, upstream discussion comment https://github.com/getpaseo/paseo/discussions/10120#discussioncomment-19863425): (a) include agent.id in matchesAgentHistoryQuery (packages/server/src/server/agent-history-search.ts:17-22) so archived-agent ID lookups return candidates from the host; (b) skip agent-ID target selection when changeRequestHit is true (packages/app/src/command-center/workspace-search.ts:218) so numeric PR-number searches keep normal workspace-level behavior | android-build-3 landed 2026-11-26T13:50:47Z (commits 7f5d533f3 + a5a834ac4 in fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-defer-mermaid-runtime"
@@ -198,11 +198,11 @@ repo = "getpaseo/paseo"
 pr = 10494
 expected_head = "dffd7c027e9682f202a60431abb3059f61c6c1ba"
 intent = "defer loading the web Mermaid runtime until a diagram mounts (-3.58 MB startup JS)"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10494"
 order = 60
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-defer-web-terminal"
@@ -211,11 +211,11 @@ repo = "getpaseo/paseo"
 pr = 10497
 expected_head = "11b18c933384cd9de877d2b50ea115cb85bbc845"
 intent = "defer the web terminal renderer until it is needed (-1.0 MB startup JS)"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10497"
 order = 61
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-batch-unistyles-web"
@@ -238,10 +238,10 @@ pr = 10778
 expected_head = "efd819959ef0113a1dc23af7bfe2db889725e703"
 intent = "Unistyles CSSOM incremental rules + @gorhom/portal host store isolation + React 19.2 dev measure cleanup; supersedes closed #10605"
 targets = ["desktop-build-3", "android-build-3"]
-status = "queued"
+status = "upstreamed"
 upstream = "https://github.com/getpaseo/paseo/pull/10778"
 order = 62
-notes = "operator-approved 2026-11-25 in /steps for Paseo Fork Build 3 on v0.17.4 (update-fork-picks-build3-afd98ddc via Paseo fork build 3 lead afd98ddc-8604-4b0e-ac1b-13f7b58e6c62); merge commit b4af7599d5b770a41e8af899272c307f7fc7f9ad merged 2026-11-25T10:39Z after v0.17.4; supersedes closed #10605 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-25 in /steps for Paseo Fork Build 3 on v0.17.4 (update-fork-picks-build3-afd98ddc via Paseo fork build 3 lead afd98ddc-8604-4b0e-ac1b-13f7b58e6c62); merge commit b4af7599d5b770a41e8af899272c307f7fc7f9ad merged 2026-11-25T10:39Z after v0.17.4; supersedes closed #10605 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)) | upstreamed natively in v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8, build4-v0175-kickoff-afd98ddc 2026-11-26)"
 
 [[pick]]
 id = "paseo-release-inactive-decks"
@@ -250,11 +250,11 @@ repo = "getpaseo/paseo"
 pr = 10234
 expected_head = "41e508201c950e80c58151e674a622b9776cd8db"
 intent = "release inactive workspace decks and bound renderer memory"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10234"
 order = 63
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-cached-chat-timeline-sync"
@@ -263,11 +263,11 @@ repo = "getpaseo/paseo"
 pr = 10653
 expected_head = "7292790d1aed659feb9361db697fa0133ad2ddbe"
 intent = "fix timeline sync when reopening a cached chat"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10653"
 order = 64
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); clean UI/web pick, zero overlap with Build 2; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-ws-permessage-deflate"
@@ -276,12 +276,12 @@ repo = "getpaseo/paseo"
 pr = 10622
 expected_head = "35217464544d2cb439d3ffc9ed3ef4f977f35b91"
 intent = "enable permessage-deflate on direct /ws server"
-target = "desktop-build-3"
+target = "desktop-build-4"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10622"
 trial_required = true
 order = 66
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): closed upstream in favor of #10651, retained queued for Build 3 per djbclark on top of #10651 for orthogonal 58.9s->3.7s slow-link compression"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10651; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): closed upstream in favor of #10651, retained queued for Build 3 per djbclark on top of #10651 for orthogonal 58.9s->3.7s slow-link compression | desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to desktop-build-4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-ws-chunked-transfers"
@@ -291,11 +291,11 @@ pr = 10651
 expected_head = "27ad48212974a32bbc7b97740204b24b7ac8fe61"
 intent = "keep slow direct connections alive during large transfers (512 KiB WS chunking)"
 target = "desktop-build-3"
-status = "queued"
+status = "upstreamed"
 upstream = "https://github.com/getpaseo/paseo/pull/10651"
 trial_required = true
 order = 65
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): merged to upstream/main 2026-11-25T04:02Z (cfcf0dc7d11957199730d6722653e729cfa571b2), post-v0.17.4 so still needed for v0.17.4 Build 3"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps websocket-server.ts with Build 2 and #10622; pinned to head seen 2026-11-24 | 2026-11-25 (update-fork-picks-build3-afd98ddc): merged to upstream/main 2026-11-25T04:02Z (cfcf0dc7d11957199730d6722653e729cfa571b2), post-v0.17.4 so still needed for v0.17.4 Build 3 | upstreamed natively in v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8, build4-v0175-kickoff-afd98ddc 2026-11-26)"
 
 [[pick]]
 id = "paseo-defer-archived-snapshots"
@@ -304,12 +304,12 @@ repo = "getpaseo/paseo"
 pr = 10664
 expected_head = "d9f2b4b115376b3dea9069b513783f995291ee04"
 intent = "defer stored agent snapshots until an archive page needs them"
-target = "desktop-build-3"
+target = "desktop-build-4"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10664"
 trial_required = true
 order = 67
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps session.ts, paseo-tools.ts, and queued agent-history-search.ts P2 fix; pinned to head seen 2026-11-24"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; overlaps session.ts, paseo-tools.ts, and queued agent-history-search.ts P2 fix; pinned to head seen 2026-11-24 | desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to desktop-build-4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-slow-plugin-rpc-names"
@@ -318,12 +318,12 @@ repo = "getpaseo/paseo"
 pr = 10074
 expected_head = "9a7da2c166587a705b66a87bc5f2cdb9b33bafb2"
 intent = "name the plugin and method on slow and timed-out plugin RPCs"
-target = "desktop-build-3"
+target = "desktop-build-4"
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/10074"
 trial_required = true
 order = 68
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; pinned to head seen 2026-11-24"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); server pick; pinned to head seen 2026-11-24 | desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to desktop-build-4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
 
 [[pick]]
 id = "paseo-android-idle-repaints"
@@ -332,12 +332,40 @@ repo = "getpaseo/paseo"
 pr = 7556
 expected_head = "cdf9ae43305d40063e18f5d0e6a64b484671c99b"
 intent = "cut idle repaints and streaming parse cost on Android"
-targets = ["desktop-build-3", "android-build-3"]
+targets = ["desktop-build-4", "android-build-4"]
 status = "queued"
 upstream = "https://github.com/getpaseo/paseo/pull/7556"
 trial_required = true
 order = 69
-notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); Android/app secondary pick; skipped #7629 relay compression and #7624 cached plugin catalog per djbclark; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); status kept queued pending desktop-build-3 cutover (v0.17.4 @ 9967baaa4)"
+notes = "operator-approved 2026-11-24 in /steps (queue-build3-perf-picks-20261124, coordinated with Paseo lead 445d802d-20cc-4cf1-b750-ee2e3d640cf8); Android/app secondary pick; skipped #7629 relay compression and #7624 cached plugin catalog per djbclark; pinned to head seen 2026-11-24 | android-build-3 landed 2026-11-26T13:50:47Z (fork-android-v0.17.4-r1 @ 0eb257bdf1544e6fa3f8c6433de6713c309f105b, release https://github.com/frdminc/paseo/releases/tag/fork-android-v0.17.4-r1, run https://github.com/frdminc/paseo/actions/runs/45760744132; asset paseo-fork-v0.17.4-r1-arm64-v8a.apk sha256 1ab1aef84829bfc6b4fcb1645baa063dcbac7378eb004de8532e5cbc76d6e1e8; reported by afd98dd (afd98ddc-8604-4b0e-ac1b-13f7b58e6c62)); desktop-build-3 skipped per djbclark /steps Option 2 ruling 2026-11-26; rolled to Build 4 on v0.17.5 (713b6dbbfe3ea5d395da569dca08fd31b2f8a0f8)"
+
+[[pick]]
+id = "paseo-tab-deep-links"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "feat/tab-deep-links"
+expected_head = "bc244df242f7c55672bdc2b227ea873c66c1ccf9"
+intent = "canonical paseo:// deep links for all addressable workspace tabs, fail-closed Markdown links, Copy link tab menu, desktop/mobile OS routing, and #9378 terminal focus-refetch fix"
+targets = ["desktop-build-4", "android-build-4"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/discussions/10947"
+trial_required = false
+order = 70
+notes = "5 commits on upstream/main 4201a4de3 (v0.17.5); local worktree /Users/djbclark/src/paseo-tab-deep-links-wt; independent adversary security review clean (10 findings fixed, delta verdict: No blocking findings); CI green 21/21 executed jobs https://github.com/frdminc/paseo/actions/runs/45840097149 (macOS file-observation runner cancelled in queue); upstream Discussion #10947 + cross-links on #6597 and Issue #9378; operator-approved in /steps 2026-11-26 and coordinated with afd98ddc-8604-4b0e-ac1b-13f7b58e6c62"
+
+[[pick]]
+id = "paseo-reveal-pin-active-workspace"
+component = "paseo"
+repo = "frdminc/paseo"
+branch = "feat/reveal-pin-active-workspace"
+expected_head = "f374f0c592def22aa2b7b8f5b1f46ae42103f4f5"
+intent = "one-click workspace header quick-pin and Reveal in sidebar (opens sidebar, widens blocking filters, expands collapsed section/Show more, center-scrolls and highlights row)"
+targets = ["desktop-build-4", "android-build-4"]
+status = "queued"
+upstream = "https://github.com/getpaseo/paseo/discussions/10948"
+trial_required = false
+order = 71
+notes = "4 commits on upstream/main 4201a4de3 (v0.17.5); local worktree /Users/djbclark/src/paseo-reveal-pin-workspace-wt; independent adversary security review clean (6 findings fixed, delta verdict: No blocking findings); CI green 22/22 https://github.com/frdminc/paseo/actions/runs/45843805400; upstream Discussion #10948 + cross-link on #10743; operator-approved in /steps 2026-11-26 and coordinated with afd98ddc-8604-4b0e-ac1b-13f7b58e6c62"
 
 [[pick]]
 id = "paseo-bump-wrangler-sharp-0-35"

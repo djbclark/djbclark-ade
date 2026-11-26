@@ -108,42 +108,52 @@ GOOD_SHA = "a" * 40
 def test_shipped_registry_is_valid():
     entries = fp.load_registry()
     by_id = {e["id"]: e for e in entries}
-    assert len(by_id) == 26
+    assert len(by_id) == 28
     assert by_id["paseo-batch-unistyles-web"]["pr"] == 10605
     assert by_id["paseo-batch-unistyles-web"]["status"] == "dropped"
     for pid, pr_num in (
         ("paseo-defer-mermaid-runtime", 10494),
         ("paseo-defer-web-terminal", 10497),
-        ("paseo-unistyles-cssom-portal-perf", 10778),
         ("paseo-release-inactive-decks", 10234),
         ("paseo-cached-chat-timeline-sync", 10653),
     ):
-        assert by_id[pid]["pr"] == pr_num and by_id[pid]["targets"] == ["desktop-build-3", "android-build-3"]
+        assert by_id[pid]["pr"] == pr_num and by_id[pid]["targets"] == ["desktop-build-4", "android-build-4"]
         assert by_id[pid]["status"] == "queued" and len(by_id[pid]["expected_head"]) == 40
+    assert by_id["paseo-unistyles-cssom-portal-perf"]["pr"] == 10778
+    assert by_id["paseo-unistyles-cssom-portal-perf"]["status"] == "upstreamed"
+    assert by_id["paseo-ws-chunked-transfers"]["pr"] == 10651
+    assert by_id["paseo-ws-chunked-transfers"]["status"] == "upstreamed"
     for pid, pr_num in (
         ("paseo-ws-permessage-deflate", 10622),
-        ("paseo-ws-chunked-transfers", 10651),
         ("paseo-defer-archived-snapshots", 10664),
         ("paseo-slow-plugin-rpc-names", 10074),
     ):
-        assert by_id[pid]["pr"] == pr_num and by_id[pid]["targets"] == ["desktop-build-3"]
+        assert by_id[pid]["pr"] == pr_num and by_id[pid]["targets"] == ["desktop-build-4"]
         assert by_id[pid]["status"] == "queued" and by_id[pid]["trial_required"] is True
     assert by_id["paseo-unistyles-cssom-portal-perf"]["expected_head"] == "efd819959ef0113a1dc23af7bfe2db889725e703"
     assert "58.9s->3.7s" in by_id["paseo-ws-permessage-deflate"]["notes"]
     assert "cfcf0dc7d11957199730d6722653e729cfa571b2" in by_id["paseo-ws-chunked-transfers"]["notes"]
     assert by_id["paseo-ws-chunked-transfers"]["order"] < by_id["paseo-ws-permessage-deflate"]["order"]
     assert by_id["paseo-android-idle-repaints"]["pr"] == 7556
-    assert by_id["paseo-android-idle-repaints"]["targets"] == ["desktop-build-3", "android-build-3"]
+    assert by_id["paseo-android-idle-repaints"]["targets"] == ["desktop-build-4", "android-build-4"]
     assert by_id["paseo-android-idle-repaints"]["trial_required"] is True
-    for b3_id in ("paseo-daemon-status-capabilities", "paseo-agent-id-search-p2-fixes"):
-        assert by_id[b3_id]["targets"] == ["desktop-build-3", "android-build-3"]
-        assert by_id[b3_id]["status"] == "queued"
-        assert by_id[b3_id].get("hold")
-        assert all(k not in by_id[b3_id] for k in ("commit", "branch", "pr"))
+    for b4_id in ("paseo-daemon-status-capabilities", "paseo-agent-id-search-p2-fixes"):
+        assert by_id[b4_id]["targets"] == ["desktop-build-4", "android-build-4"]
+        assert by_id[b4_id]["status"] == "queued"
+        assert by_id[b4_id].get("hold")
+        assert all(k not in by_id[b4_id] for k in ("commit", "branch", "pr"))
     assert by_id["paseo-settings-search"]["pr"] == 9875
     assert by_id["paseo-settings-search"]["expected_head"] == "084d2be0cc12e38bb961684bf45fac7de34e50c6"
-    assert by_id["paseo-settings-search"]["targets"] == ["desktop-build-3", "android-build-3"]
+    assert by_id["paseo-settings-search"]["targets"] == ["desktop-build-4", "android-build-4"]
     assert by_id["paseo-settings-search"]["trial_required"] is True
+    for pid, branch, head, order in (
+        ("paseo-tab-deep-links", "feat/tab-deep-links", "bc244df242f7c55672bdc2b227ea873c66c1ccf9", 70),
+        ("paseo-reveal-pin-active-workspace", "feat/reveal-pin-active-workspace", "f374f0c592def22aa2b7b8f5b1f46ae42103f4f5", 71),
+    ):
+        assert by_id[pid]["branch"] == branch and by_id[pid]["expected_head"] == head
+        assert by_id[pid]["targets"] == ["desktop-build-4", "android-build-4"]
+        assert by_id[pid]["status"] == "queued" and by_id[pid]["trial_required"] is False
+        assert by_id[pid]["order"] == order
     assert by_id["paseo-pi-permission-selected-action"]["order"] < by_id["paseo-pi-ask-user-question-scope"]["order"]
     assert by_id["paseo-sync-sidebar-order"]["pr"] == 9830 and by_id["paseo-sync-sidebar-order"]["trial_required"]
     assert by_id["paseo-sync-sidebar-order"]["targets"] == ["desktop-build-2", "android-build-2"]
