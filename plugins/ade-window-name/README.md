@@ -17,11 +17,10 @@ are notifications (`waits: false`): a failure here can never block or delay an a
 
 ## Rules (decided in `bin/ade_ws_autoname.py`, on `bin/ade_ws_names.py`, the builder `ade-worker-run` and `ade-tidy` share)
 
-1. **Default name = no title, or Paseo's own prompt title.** Paseo's workspace `title` is the user-set override; null (or blank) means the
+1. **Default name = no title, or Paseo's own prompt title (heuristic for mirrored titles).** Paseo's workspace `title` is the user-set override; null (or blank) means the
    name is derived from the branch or directory (`master`, `my-repo`). A window created with a first prompt (the app's new-workspace
    screen, a plain create) is pre-titled with the prompt's first line, which Paseo itself still treats as default (it replaces a title equal
-   to that line with a generated one, `workspace-auto-name.ts`); so a title equal to the first agent's own title counts as default too, but only within five minutes of that agent's creation (a window and a
-   tab given the same text on purpose, `paseo workspace rename X` plus `paseo agent update --name X`, stays as it is; no `createdAt`, or one more than a minute in the future, counts as old; the age is the agent's, so a window named on purpose long ago whose agents were all archived can be renamed when a new first agent carries the same title).
+   to that line with a generated one, `workspace-auto-name.ts`); so as a heuristic, a title equal to the first agent's own title counts as default within five minutes of that agent's creation (this means a human who deliberately gives a newly created window and its first agent the exact same custom title within five minutes can still be auto-named; after five minutes, or with no `createdAt`, or one more than a minute in the future, it counts as old and stays untouched; the age is the agent's, so a window named on purpose long ago whose agents were all archived can be renamed when a new first agent carries the same title).
    A title already in the scheme (`<KIND> <repo> (<work>)`) is never re-wrapped, whatever the tab is called. Any other title (a human's, `ade-worker-run`'s, ours) is never touched. A launch with an explicit agent `--title` and a prompt keeps Paseo's prompt/generated window title (the two differ, so the window reads as named); name that one with `ade-tidy`. The title is read again right before the write, but Paseo has
    no compare-and-set: a name given in the few milliseconds after that read can still be overwritten.
 2. **First agent only.** The agent must be the earliest-created (ties by id) non-archived, non-background agent in the window; an agent

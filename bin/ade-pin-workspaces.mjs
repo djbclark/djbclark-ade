@@ -19,7 +19,7 @@
 // Exit codes: 0 pinned (or nothing to do), 1 error, 2 usage, 69 macOS only (the launcher reports
 // helper-missing before we run).
 import { pathToFileURL } from "node:url";
-import { readdirSync, readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -34,26 +34,100 @@ if (cmd !== "pin" || rest.some((x) => x !== "--check")) {
 }
 const check = rest.includes("--check");
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const WKS_RE = /^wks_[A-Za-z0-9]+$/;
+const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const BOX_OF = Object.freeze({ LEAD: "LEAD", WORKER: "WORKER", OTHER: "OTHER", MAIN: "LEAD", WORKERS: "WORKER", USER: "OTHER" });
+const MAX_REGISTRY_BYTES = 1_048_576;
+
+function readRegularUtf8(filePath, anchorReal) {
+  if (realpathSync(path.dirname(filePath)) !== anchorReal) {
+    throw new Error("registry path escapes state dir");
+  }
+  const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0) | (fsConstants.O_NONBLOCK || 0);
+  const fd = openSync(filePath, flags);
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error("not a regular file");
+    if (st.size > MAX_REGISTRY_BYTES) throw new Error("registry file too large");
+    const chunks = [];
+    let total = 0;
+    const buf = Buffer.allocUnsafe(65536);
+    for (;;) {
+      const n = readSync(fd, buf, 0, Math.min(buf.length, MAX_REGISTRY_BYTES - total + 1), null);
+      if (n === 0) break;
+      total += n;
+      if (total > MAX_REGISTRY_BYTES) throw new Error("registry file too large");
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function parseRegistryBoxes(text) {
+  const data = JSON.parse(text);
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("root not object");
+  if (!Array.isArray(data.windows) || !data.windows.every((w) => typeof w === "string" && WKS_RE.test(w))) {
+    throw new Error("bad windows list");
+  }
+  const idSet = new Set(data.windows);
+  const parsed = new Map();
+  if (!Object.prototype.hasOwnProperty.call(data, "entries")) {
+    return parsed;
+  }
+  if (!data.entries || typeof data.entries !== "object" || Array.isArray(data.entries)) {
+    throw new Error("bad entries map");
+  }
+  for (const [wid, raw] of Object.entries(data.entries)) {
+    if (!WKS_RE.test(wid) || !idSet.has(wid)) throw new Error(`orphan entry ${wid}`);
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`bad entry ${wid}`);
+    if (Object.prototype.hasOwnProperty.call(raw, "windowId") && raw.windowId !== wid) {
+      throw new Error(`mismatched windowId ${wid}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "repo")) {
+      if (typeof raw.repo !== "string" || !REPO_RE.test(raw.repo.trim())) throw new Error(`bad repo ${wid}`);
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "lead")) {
+      if (typeof raw.lead !== "string" || !UUID_RE.test(raw.lead.trim())) throw new Error(`bad lead ${wid}`);
+    }
+    for (const k of ["cwd", "work"]) {
+      if (Object.prototype.hasOwnProperty.call(raw, k)) {
+        if (typeof raw[k] !== "string" || !raw[k].trim()) throw new Error(`bad ${k} ${wid}`);
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(raw, "box")) {
+      if (typeof raw.box !== "string") throw new Error(`bad box ${wid}`);
+      const norm = BOX_OF[raw.box.trim().toUpperCase()];
+      if (!norm) throw new Error(`unknown box ${wid}`);
+      parsed.set(wid, norm);
+    }
+  }
+  return parsed;
+}
+
 function loadRegisteredBoxes() {
   const dir = process.env.ADE_WORKER_RUN_STATE || path.join(homedir(), ".local", "state", "ade", "worker-run");
   const out = new Map();
+  let anchorReal;
   let files = [];
   try {
-    files = readdirSync(dir).filter((f) => f.endsWith(".windows.json")).sort();
+    anchorReal = realpathSync(dir);
+    files = readdirSync(anchorReal)
+      .filter((f) => f.endsWith(".windows.json") && UUID_RE.test(f.slice(0, -".windows.json".length)))
+      .sort();
   } catch {
     return out;
   }
   for (const f of files) {
     try {
-      const data = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
-      const entries = data && typeof data.entries === "object" ? data.entries : {};
-      for (const [wid, entry] of Object.entries(entries || {})) {
-        if (entry && typeof entry.box === "string" && !out.has(wid)) {
-          out.set(wid, entry.box.toUpperCase());
-        }
+      const parsed = parseRegistryBoxes(readRegularUtf8(path.join(anchorReal, f), anchorReal));
+      for (const [wid, box] of parsed.entries()) {
+        if (!out.has(wid)) out.set(wid, box);
       }
     } catch {
-      // skip unreadable registry files
+      // skip unreadable or malformed registry files (aligned with Python all_registered_windows)
     }
   }
   return out;

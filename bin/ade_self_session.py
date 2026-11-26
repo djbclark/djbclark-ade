@@ -1133,19 +1133,41 @@ class Service:
             pass
         return {}
 
+    def _merged_labels(self, agent_id, row=None):
+        """Merge agent state labels with inspect/list row labels (row wins over state file)."""
+        merged = dict(self._agent_state_labels(agent_id))
+        if isinstance(row, dict):
+            for key in ('labels', 'Labels'):
+                cand = row.get(key)
+                if isinstance(cand, dict):
+                    merged.update(cand)
+        return merged
+
     def has_retired_label(self, agent_id, row=None):
-        """True when structured `ade.retired=1` / `ade.retired_to` is present on `row` or the agent's state file."""
-        for candidate in (
-            (row.get('Labels') if isinstance(row, dict) else None),
-            (row.get('labels') if isinstance(row, dict) else None),
-            self._agent_state_labels(agent_id),
-        ):
-            if isinstance(candidate, dict):
-                if str(candidate.get(RETIRED_LABEL) or '').strip().lower() in ('1', 'true', 'yes'):
-                    return True
-                if isinstance(candidate.get(RETIRED_TO_LABEL), str) and candidate[RETIRED_TO_LABEL].strip():
-                    return True
-        return False
+        """True when explicit positive `ade.retired` (`1`/`true`/`yes`) is present (and `ade.retired_to`, if set,
+        is a valid distinct UUID). Never treats bare `ade.retired_to` alone as retired."""
+        labels = self._merged_labels(agent_id, row)
+        if str(labels.get(RETIRED_LABEL) or '').strip().lower() not in ('1', 'true', 'yes'):
+            return False
+        if RETIRED_TO_LABEL in labels and labels[RETIRED_TO_LABEL] is not None:
+            rt = labels[RETIRED_TO_LABEL]
+            if not isinstance(rt, str):
+                return False
+            try:
+                rt_norm = ident(rt.strip().lower())
+            except SessionError:
+                return False
+            if rt_norm == str(agent_id).lower():
+                return False
+        return True
+
+    def has_complete_retired_labels(self, agent_id, successor, row=None):
+        """True only when BOTH positive `ade.retired` AND exact `ade.retired_to == successor` are present."""
+        if not self.has_retired_label(agent_id, row):
+            return False
+        labels = self._merged_labels(agent_id, row)
+        rt = labels.get(RETIRED_TO_LABEL)
+        return isinstance(rt, str) and rt.strip().lower() == str(successor).strip().lower()
 
     def is_agent_retired(self, agent_id, row=None):
         """True when structured state (`handoff-<id>.json` archived/retired) or structured `ade.retired` label
@@ -1785,15 +1807,29 @@ class Service:
                 if row.get('Archived') is not True:
                     state, detail = 'skipped', {'reason': 'predecessor-not-archived'}
                 elif name is not None and name.startswith(RETIRED_PREFIX):
-                    if not self.has_retired_label(predecessor, row):
+                    if not self.has_complete_retired_labels(predecessor, successor, row):
                         op = 'agent update'
                         self.native('agent', 'update', predecessor, *label_args)
-                    state, detail = 'ok', {'reason': 'already-retired', 'name': name}
+                        op = 'agent inspect'
+                        after = self.inspect(predecessor)
+                        if after.get('Archived') is not True:
+                            detail = {'reason': 'rename-unarchived-predecessor', 'name': name}
+                        else:
+                            state, detail = 'ok', {'reason': 'already-retired', 'name': name}
+                    else:
+                        state, detail = 'ok', {'reason': 'already-retired', 'name': name}
                 elif name != title:
-                    if not self.has_retired_label(predecessor, row):
+                    if not self.has_complete_retired_labels(predecessor, successor, row):
                         op = 'agent update'
                         self.native('agent', 'update', predecessor, *label_args)
-                    state, detail = 'skipped', {'reason': 'names-differ'}  # already told apart: human name kept; structured label applied
+                        op = 'agent inspect'
+                        after = self.inspect(predecessor)
+                        if after.get('Archived') is not True:
+                            detail = {'reason': 'rename-unarchived-predecessor', 'name': name}
+                        else:
+                            state, detail = 'skipped', {'reason': 'names-differ'}
+                    else:
+                        state, detail = 'skipped', {'reason': 'names-differ'}  # already told apart: human name kept; structured labels present
                 else:
                     new = retired_title(name, successor)
                     op = 'agent update'

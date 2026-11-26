@@ -190,3 +190,52 @@ def test_human_renamed_tabs_classified_by_structured_labels(tmp_path: Path):
     assert r.returncode == 0, r.stderr
     tagged = [c[2] for c in env.calls() if c[:2] == ["agent", "update"]]
     assert tagged == [renamed_lead]
+
+
+def test_interactive_worker_in_lead_window_not_confused_with_lead(tmp_path: Path):
+    """P2 Round 2 / Codex discussion_r4702323418: worker ownership markers (`ade.lead`, `slice`,
+    `parentAgentId`) MUST be checked before `ade.box=LEAD` / `ade.placement=main`."""
+    env = FakeEnv(tmp_path)
+    lead_id = uid(30)
+    interactive_worker = uid(31)
+    slice_worker = uid(32)
+    parented_worker = uid(33)
+    bare_retired_to_lead = uid(34)
+    env.data["rows"] = [
+        {"id": lead_id, "name": "Daniel debugging Venice", "status": "idle", "labels": {"ade.role": "djbclark-ade", "ade.box": "LEAD"}},
+        {
+            "id": interactive_worker,
+            "name": "Custom interactive tab",
+            "status": "idle",
+            "labels": {
+                "ade.lead": lead_id,
+                "slice": "op1",
+                "ade.box": "LEAD",
+                "ade.placement": "main",
+                "ade.repo": "djbclark-ade",
+            },
+        },
+        {
+            "id": slice_worker,
+            "name": "Custom slice tab",
+            "status": "idle",
+            "labels": {"slice": "probe", "ade.box": "LEAD"},
+        },
+        {
+            "id": parented_worker,
+            "name": "Custom child tab",
+            "status": "idle",
+            "parentAgentId": lead_id,
+            "labels": {"ade.placement": "main"},
+        },
+        {
+            "id": bare_retired_to_lead,
+            "name": "Lead with stray retired_to only",
+            "status": "idle",
+            "labels": {"ade.retired_to": uid(99)},
+        },
+    ]
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    tagged = [c[2] for c in env.calls() if c[:2] == ["agent", "update"]]
+    assert tagged == [lead_id, bare_retired_to_lead]

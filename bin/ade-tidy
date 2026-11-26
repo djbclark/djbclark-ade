@@ -824,8 +824,9 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
                 if s and isinstance(s.get("labels"), dict) and s["labels"].get("ade.lead")}
     self_wks = (states.get(lead) or {}).get("workspaceId")
     chain = chain_of(lead)
-    # Windows structurally known to hold another lead (by ade.lead target or ade.role/ade.chain/ade.box=LEAD),
-    # regardless of whether a human renamed the window.
+    # Windows structurally known to hold another lead (by ade.lead target or non-worker ade.role/ade.chain/ade.box=LEAD),
+    # regardless of whether a human renamed the window. Worker tabs placed into a LEAD window carry ade.lead/slice/parent
+    # ownership and MUST NOT be confused with lead identity.
     foreign_lead_wks = set()
     for a in allrows:
         st = states[a["id"]]
@@ -833,8 +834,16 @@ def inventory(opts, lead: str, repo: str, roots: list[str]) -> tuple[list[dict],
         if not wks_a or wks_a == self_wks or a["id"] in chain:
             continue
         lbls = (st or {}).get("labels") if isinstance((st or {}).get("labels"), dict) else {}
-        if (a["id"] in lead_ids or lbls.get("ade.role") or lbls.get("ade.chain")
-                or _box_from_labels(lbls) == "LEAD"):
+        is_worker_tab = bool(
+            str(lbls.get("ade.lead") or "").strip()
+            or str(lbls.get("slice") or "").strip()
+            or str(lbls.get("paseo.parent-agent-id") or "").strip()
+            or a.get("parentAgentId")
+            or (st or {}).get("parentAgentId")
+        )
+        if a["id"] in lead_ids or (
+            not is_worker_tab and (lbls.get("ade.role") or lbls.get("ade.chain") or _box_from_labels(lbls) == "LEAD")
+        ):
             foreign_lead_wks.add(wks_a)
     permits = opts.permits or {}
     handled = set(filter(None, (opts.handled or "").split(",")))
@@ -953,7 +962,7 @@ def read_registry_entries(lead: str) -> tuple[set[str], dict[str, dict]]:
     names = names_mod()
     try:
         if names is not None and hasattr(names, "read_window_registry"):
-            return names.read_window_registry(path)
+            return names.read_window_registry(path, anchor_dir=worker_run_dir())
         data = json.loads(path.read_text())
         ids = data["windows"]
         if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
@@ -1138,14 +1147,19 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
             continue
         w_entry = own_entries.get(wks) or {}
         kind = window_kind(agents)
-        # Prefer structured registry box or explicit worker labels when present (2026-11-25 ruling).
-        if kind != "LEAD":
-            if w_entry.get("box") in KINDS:
-                kind = w_entry["box"]
-            elif kind == "WORKER":
-                explicit_boxes = {_box_from_labels(r.get("labels")) for r in agents if _box_from_labels(r.get("labels"))}
-                if explicit_boxes == {"OTHER"}:
-                    kind = "OTHER"
+        struct_box = structured_window_box(wks, opts.lead_id, own_entries) if getattr(opts, "lead_id", None) else None
+        explicit_boxes = {_box_from_labels(r.get("labels")) for r in agents if _box_from_labels(r.get("labels"))}
+        # Prefer unconditional LEAD veto, then structured registry/agent box (2026-11-25 ruling).
+        has_structured_box = False
+        if struct_box == "LEAD" or kind == "LEAD":
+            kind = "LEAD"
+            has_structured_box = True
+        elif struct_box in KINDS:
+            kind = struct_box
+            has_structured_box = True
+        elif len(explicit_boxes) == 1:
+            kind = next(iter(explicit_boxes))
+            has_structured_box = True
         occupants = occupancy.get(wks, [])
         foreign = [a for a in occupants if a not in {r["id"] for r in by_win.get(wks, [])}]
         entry = {"windowId": wks, "name": clean(w.get("name"), 120), "cwd": w.get("cwd"), "kind": kind, "isolation": w.get("isolation"), "agents": [r["id"] for r in agents],
@@ -1173,8 +1187,8 @@ def plan_windows(rows, wins, occupancy, repo, roots, opts, names) -> dict:
         if any(r["class"] in ("other-worker", "lead") for r in by_win.get(wks, [])) or (legacy and legacy.lead not in (None, *chain_of(opts.lead_id))):
             out["notes"].append(f"{wks} holds another lead's agent(s) or carries another lead's id: not renamed")
             continue
-        if not w_entry.get("box") and (parsed or legacy):
-            kind = parsed.box if parsed else names.BOX_OF[legacy.kind]  # display fallback when no structured box exists
+        if not has_structured_box and (parsed or legacy):
+            kind = parsed.box if parsed else names.BOX_OF[legacy.kind]  # display fallback only when no structured box exists
         work = work_over.get(kind) or (parsed.work if parsed else None) \
             or w_entry.get("work") \
             or (names.normalize_work(legacy.middle, repo) if legacy else None) or derive_work(kind, agents, repo)
@@ -1197,25 +1211,41 @@ def is_main_name(name: str) -> bool:
 
 
 def structured_window_box(wks: str, lead: str, entries: dict[str, dict] | None = None) -> str | None:
-    """Resolve a window's box (`LEAD`, `WORKER`, `OTHER`) from explicit structured records and agent labels, else None."""
-    lead_state = state_file(lead)
-    if lead_state and lead_state.get("workspaceId") == wks:
-        return "LEAD"
-    entry = (entries or {}).get(wks)
-    if isinstance(entry, dict) and entry.get("box") in KINDS:
-        return entry["box"]
+    """Resolve a window's box (`LEAD`, `WORKER`, `OTHER`) from explicit structured records and agent labels, else None.
+
+    Precedence:
+    1. Unconditional own-workspace + chain-wide LEAD veto (lead or any predecessor in its chain, or any agent
+       record with LEAD-box/lead-identity labels in `wks` — beats even a stale non-LEAD registry entry).
+    2. Explicit structured registry entry `box` (`LEAD`/`WORKER`/`OTHER`).
+    3. Explicit non-conflicting agent label boxes (`ade.box`/`ade.placement`); conflicting boxes return None.
+    """
     mine = chain_of(lead)
+    for x in mine:
+        st_x = state_file(x)
+        if st_x and st_x.get("workspaceId") == wks:
+            return "LEAD"
     recs = [d for d in agent_state_files() if not d.get("_bad") and d.get("workspaceId") == wks]
     if any(d.get("id") in mine for d in recs):
         return "LEAD"
     boxes: set[str] = set()
     for d in recs:
         labels = d.get("labels") if isinstance(d.get("labels"), dict) else {}
+        is_worker_rec = bool(
+            str(labels.get("ade.lead") or "").strip()
+            or str(labels.get("slice") or "").strip()
+            or str(labels.get("paseo.parent-agent-id") or "").strip()
+            or d.get("parentAgentId")
+        )
+        if not is_worker_rec and (labels.get("ade.role") or labels.get("ade.chain")):
+            return "LEAD"
         b = _box_from_labels(labels)
+        if b == "LEAD":
+            return "LEAD"
         if b:
             boxes.add(b)
-    if "LEAD" in boxes:
-        return "LEAD"
+    entry = (entries or {}).get(wks)
+    if isinstance(entry, dict) and entry.get("box") in KINDS:
+        return entry["box"]
     if len(boxes) == 1:
         return next(iter(boxes))
     return None
@@ -1254,9 +1284,8 @@ def extra_windows(wins: list[dict], occupancy: dict, opts, lead: str, names, arc
             continue
         parsed, legacy = names.parse(nm), names.parse_legacy(nm)
         w_entry = own_entries.get(wks) or {}
-        # Structured box first (registry -> agent records -> live agent kind), display name only as legacy fallback.
-        box = (w_entry.get("box") if w_entry.get("box") in KINDS else None) \
-            or structured_window_box(wks, lead, own_entries) \
+        # Structured box first (chain-wide LEAD veto -> registry -> agent labels -> live agent kind), display name only as fallback.
+        box = structured_window_box(wks, lead, own_entries) \
             or (w.get("kind") if w.get("kind") in KINDS else None) \
             or (parsed.box if parsed else (names.BOX_OF[legacy.kind] if legacy else None))
         if box is None:

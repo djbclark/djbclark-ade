@@ -232,6 +232,37 @@ def load_watcher(path: Path, active_paseo_home: Path | None = None) -> tuple[str
     return norm_target, None
 
 
+def _read_regular_json(path: Path, anchor_dir: Path, max_bytes: int = 262144) -> dict | None:
+    """Bounded regular-file JSON read (no symlinks/FIFOs, anchored under `anchor_dir`)."""
+    try:
+        anchor_real = Path(os.path.realpath(anchor_dir))
+        parent_real = Path(os.path.realpath(path.parent))
+        if parent_real != anchor_real and anchor_real not in parent_real.parents:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(os.fspath(path), flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > max_bytes:
+                return None
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                buf = os.read(fd, min(65536, max_bytes - total + 1))
+                if not buf:
+                    break
+                total += len(buf)
+                if total > max_bytes:
+                    return None
+                chunks.append(buf)
+        finally:
+            os.close(fd)
+        data = json.loads(b"".join(chunks).decode("utf-8"))
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
 def _state_labels(aid: str) -> dict:
     """Read structured labels from `$PASEO_HOME/agents/*/<aid>.json`, else {} (never raises)."""
     if not isinstance(aid, str) or not UUID_RE.fullmatch(aid):
@@ -239,62 +270,112 @@ def _state_labels(aid: str) -> dict:
     agents_dir = default_paseo_home() / "agents"
     try:
         for path in sorted(agents_dir.glob(f"*/{aid}.json")):
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _read_regular_json(path, agents_dir)
             labels = data.get("labels") if isinstance(data, dict) else None
             if isinstance(labels, dict):
                 return labels
-    except (OSError, ValueError):
+    except OSError:
         pass
     return {}
 
 
-def is_retired_by_label(aid: str, payload: object = None) -> bool:
-    """True when structured `ade.retired=1` or `ade.retired_to` is present on payload or agent state file."""
-    candidates = []
+def _merged_labels(aid: str, payload: object = None) -> dict:
+    """Merge state-file labels with payload labels (live payload overrides state file)."""
+    merged = dict(_state_labels(aid))
     if isinstance(payload, dict):
-        candidates.extend((payload.get("labels"), payload.get("Labels")))
-    candidates.append(_state_labels(aid))
-    for labels in candidates:
-        if not isinstance(labels, dict):
-            continue
-        if str(labels.get(RETIRED_LABEL) or "").strip().lower() in ("1", "true", "yes"):
-            return True
-        if isinstance(labels.get(RETIRED_TO_LABEL), str) and labels[RETIRED_TO_LABEL].strip():
-            return True
-    return False
+        for key in ("labels", "Labels"):
+            cand = payload.get(key)
+            if isinstance(cand, dict):
+                merged.update(cand)
+    return merged
 
 
-def parents_with_live_children(rows: list) -> set[str]:
-    """Return lowercase parent UUIDs referenced by any live non-retired, non-helper child."""
+def is_retired_by_label(aid: str, payload: object = None) -> bool:
+    """True ONLY when explicit positive `ade.retired` (`1`/`true`/`yes`) is present (and `ade.retired_to`,
+    if set, is a valid full UUID distinct from `aid`). Never treats bare `ade.retired_to` alone as retired."""
+    if not isinstance(aid, str) or not UUID_RE.fullmatch(aid):
+        return False
+    labels = _merged_labels(aid, payload)
+    if str(labels.get(RETIRED_LABEL) or "").strip().lower() not in ("1", "true", "yes"):
+        return False
+    if RETIRED_TO_LABEL in labels and labels[RETIRED_TO_LABEL] is not None:
+        rt = labels[RETIRED_TO_LABEL]
+        if not isinstance(rt, str) or not UUID_RE.fullmatch(rt.strip().lower()):
+            return False
+        if rt.strip().lower() == aid.lower():
+            return False
+    return True
+
+
+def _parent_id_of(row: dict) -> str | None:
+    """Return lowercase parent UUID for `row`, or None if none / self-referential."""
+    row_id = str(row.get("id") or "").strip().lower()
+    labels = _merged_labels(row_id, row) if UUID_RE.fullmatch(row_id) else (
+        row.get("labels") if isinstance(row.get("labels"), dict) else {}
+    )
+    parent = labels.get("paseo.parent-agent-id")
+    if not isinstance(parent, str) or not parent.strip():
+        parent = row.get("parentAgentId")
+    if not isinstance(parent, str):
+        return None
+    norm_parent = parent.strip().lower()
+    return norm_parent if norm_parent and norm_parent != row_id else None
+
+
+def parents_with_live_children(rows: list, *, archived_ids: set[str] | None = None) -> set[str]:
+    """Return lowercase parent UUIDs referenced by ANY unarchived non-helper child not yet confirmed archived.
+
+    A revived, still-working child that carries retirement labels or a handoff record STILL blocks archiving
+    its parent until that child's own archive has been confirmed (or selected in dry-run).
+    """
     parents: set[str] = set()
+    done_ids = {i.lower() for i in (archived_ids or ())}
     for row in rows:
         if not isinstance(row, dict):
             continue
         if row.get("archived") is True or bool(row.get("archivedAt")):
             continue
-        row_id_raw = str(row.get("id") or "").strip()
-        row_id = row_id_raw.lower()
-        labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
-        if not labels and UUID_RE.fullmatch(row_id):
-            labels = _state_labels(row_id)
+        row_id = str(row.get("id") or "").strip().lower()
+        if row_id and row_id in done_ids:
+            continue
+        labels = _merged_labels(row_id, row) if UUID_RE.fullmatch(row_id) else (
+            row.get("labels") if isinstance(row.get("labels"), dict) else {}
+        )
         if str(labels.get("baton-writer") or "") == "1":
             continue
         if str(labels.get("ade.internal") or "").strip().lower() in ("1", "true", "yes"):
             continue
-        if is_retired_by_label(row_id, row) or (UUID_RE.fullmatch(row_id) and handoff_successor(row_id) is not None):
-            continue
-        name = row.get("name")
-        if isinstance(name, str) and name.startswith(RETIRED_PREFIX):  # legacy fallback for pre-2026-11-25 tabs
-            continue
-        parent = labels.get("paseo.parent-agent-id")
-        if not isinstance(parent, str) or not parent.strip():
-            parent = row.get("parentAgentId")
-        if not isinstance(parent, str):
-            continue
-        norm_parent = parent.strip().lower()
-        if norm_parent and norm_parent != row_id:
+        norm_parent = _parent_id_of(row)
+        if norm_parent:
             parents.add(norm_parent)
     return parents
+
+
+def _order_children_first(rows: list) -> list:
+    """Order rows so children are evaluated before their parents (breaking ties by original list order)."""
+    by_id: dict[str, str | None] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            rid = str(row.get("id") or "").strip().lower()
+            if rid:
+                by_id[rid] = _parent_id_of(row)
+
+    def depth(rid: str) -> int:
+        seen: set[str] = set()
+        d = 0
+        cur = by_id.get(rid)
+        while cur and cur in by_id and cur not in seen:
+            seen.add(cur)
+            d += 1
+            cur = by_id.get(cur)
+        return d
+
+    indexed = list(enumerate(rows))
+    indexed.sort(key=lambda pair: (
+        -depth(str(pair[1].get("id") or "").strip().lower()) if isinstance(pair[1], dict) else 0,
+        pair[0],
+    ))
+    return [row for _, row in indexed]
 
 
 def parse_aware_iso(value) -> float | None:
@@ -418,7 +499,12 @@ def evaluate_inspect(
     now: float,
     by_label_list: bool = False,
 ) -> tuple[dict | None, str | None]:
-    """Validate fresh `paseo agent inspect` payload. Returns `(plan_item, skip_reason)`."""
+    """Validate fresh `paseo agent inspect` payload. Returns `(plan_item, skip_reason)`.
+
+    Destructive archiving requires positive structured retirement provenance (`ade.retired=1` label or
+    a completed `handoff-<aid>.json` record): a bare `RETIRED ` display title alone never qualifies.
+    """
+    _ = (by_name_list, by_handoff_list, by_label_list)
     if not isinstance(info, dict):
         return None, "inspect-invalid"
     if info.get("Id") != aid:
@@ -439,22 +525,16 @@ def evaluate_inspect(
         return None, "future-updated-at"
     if age < min_idle:
         return None, "recently-active"
-    inspect_name = info.get("Name")
-    inspect_by_name = isinstance(inspect_name, str) and inspect_name.startswith(RETIRED_PREFIX)  # legacy display fallback
     inspect_by_label = is_retired_by_label(aid, info)
     inspect_by_handoff = handoff_successor(aid)
-    if by_name_list and not by_handoff_list and not by_label_list and not inspect_by_name and not inspect_by_label and inspect_by_handoff is None:
-        return None, "name-changed"
-    if not inspect_by_name and not inspect_by_label and inspect_by_handoff is None:
+    if not inspect_by_label and inspect_by_handoff is None:
         return None, "retirement-unproven"
-    if inspect_by_name and inspect_by_handoff is not None:
+    if inspect_by_label and inspect_by_handoff is not None:
         proof = "both"
     elif inspect_by_handoff is not None:
         proof = "handoff-successor"
-    elif inspect_by_label:
-        proof = "retired-label"
     else:
-        proof = "retired-name"
+        proof = "retired-label"
     return {
         "id": aid,
         "status": status,
@@ -515,21 +595,25 @@ def run_sweep(
             return summary, 1
 
         self_id = (os.environ.get("PASEO_AGENT_ID") or "").strip().lower()
-        live_parents = parents_with_live_children(rows)
         log_path = state_dir / "archive-retired.log"
         log_checked = False
+        confirmed_archived: set[str] = set()
+        dry_selected: set[str] = set()
+        ordered_rows = _order_children_first(rows)
 
-        for row in rows:
+        for row in ordered_rows:
             if not isinstance(row, dict):
                 continue
             summary["agents_seen"] += 1
             aid = row.get("id")
-            raw_name = row.get("name")
-            by_name = isinstance(raw_name, str) and raw_name.startswith(RETIRED_PREFIX)
             valid_uuid = isinstance(aid, str) and bool(UUID_RE.fullmatch(aid))
             by_handoff = handoff_successor(aid) if valid_uuid else None
             by_label = is_retired_by_label(aid, row) if valid_uuid else False
-            if not by_name and not by_label and by_handoff is None:
+            raw_labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+            malformed_retired = (not valid_uuid) and (
+                str(raw_labels.get(RETIRED_LABEL) or "").strip().lower() in ("1", "true", "yes")
+            )
+            if not by_label and by_handoff is None and not malformed_retired:
                 continue
             summary["candidates"] += 1
             if not valid_uuid:
@@ -547,7 +631,8 @@ def run_sweep(
             if aid.lower() in excludes:
                 summary["skipped"].append({"id": aid, "reason": "excluded"})
                 continue
-            if aid.lower() in live_parents:
+            settled_children = confirmed_archived if apply_ else dry_selected
+            if aid.lower() in parents_with_live_children(rows, archived_ids=settled_children):
                 summary["skipped"].append({"id": aid, "reason": "has-children"})
                 continue
 
@@ -558,13 +643,14 @@ def run_sweep(
                 summary["skipped"].append({"id": aid, "reason": "inspect-failed", "detail": ins_err})
                 continue
 
-            item, skip_reason = evaluate_inspect(aid, ins_data, by_name, by_handoff, min_idle, now_fn(), by_label_list=by_label)
+            item, skip_reason = evaluate_inspect(aid, ins_data, False, by_handoff, min_idle, now_fn(), by_label_list=by_label)
             if skip_reason is not None or item is None:
                 summary["skipped"].append({"id": aid, "reason": skip_reason or "inspect-failed"})
                 continue
 
             if not apply_:
                 summary["selected"].append(item)
+                dry_selected.add(aid.lower())
                 continue
 
             if not log_checked:
@@ -574,7 +660,7 @@ def run_sweep(
                     break
                 log_checked = True
 
-            # Re-read exclude list and watcher right before each archive (fail closed).
+            # Re-read exclude list, watcher, and live children right before each archive (fail closed).
             try:
                 fresh_excludes = load_excludes(exclude_cli, exclude_file)
             except ExcludeRefused as exc:
@@ -591,6 +677,16 @@ def run_sweep(
                 continue
             if fresh_watcher_id is not None and aid.lower() == fresh_watcher_id:
                 summary["skipped"].append({"id": aid, "reason": "load-watcher"})
+                continue
+
+            ls2_rc, fresh_rows, ls2_err = run_paseo_json(paseo_bin, ["ls", "-g", "--json"], timeout=LS_TIMEOUT)
+            if ls2_rc != 0 or not isinstance(fresh_rows, list):
+                detail = ls2_err or "paseo ls -g did not return a JSON list"
+                summary["errors"].append({"id": aid, "what": f"child recheck failed (rc {ls2_rc}): {detail}"})
+                summary["skipped"].append({"id": aid, "reason": "child-recheck-failed"})
+                continue
+            if aid.lower() in parents_with_live_children(fresh_rows, archived_ids=confirmed_archived):
+                summary["skipped"].append({"id": aid, "reason": "has-children"})
                 continue
 
             summary["selected"].append(item)
@@ -613,6 +709,7 @@ def run_sweep(
                     and rb_data.get("Archived") is True
                 ):
                     verified = True
+                    confirmed_archived.add(aid.lower())
                 else:
                     err_msg = (
                         f"readback inspect failed (rc {rb_rc}): {rb_err}"

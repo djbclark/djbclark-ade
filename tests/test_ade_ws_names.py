@@ -166,3 +166,52 @@ def test_window_registry_roundtrip_and_backward_compatibility(tmp_path):
     assert entries["wks_o1"]["box"] == "OTHER" and "wks_dropped" not in entries
     all_reg = wsn.all_registered_windows(tmp_path)
     assert all_reg["wks_w1"]["box"] == "WORKER" and all_reg["wks_w1"]["lead"] == LEAD
+
+
+def test_window_registry_rejects_malformed_authority_symlinks_and_fifos(tmp_path):
+    """P2 Round 2: strict validation fails closed on corrupt authority, symlinks (including dangling),
+    FIFOs, and anchor escapes."""
+    import os
+
+    p = tmp_path / f"{LEAD}.windows.json"
+    bad_payloads = [
+        '{"windows": ["wks_w1"], "entries": null}',  # explicit null entries != legacy omitted entries
+        '{"windows": ["wks_w1"], "entries": []}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": "GARBAGE"}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": ""}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_w1", "box": null}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_w1": {"windowId": "wks_other", "box": "WORKER"}}}',
+        '{"windows": ["wks_w1"], "entries": {"wks_orphan": {"windowId": "wks_orphan", "box": "WORKER"}}}',
+    ]
+    for raw in bad_payloads:
+        p.write_text(raw, encoding="utf-8")
+        with pytest.raises(ValueError):
+            wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Valid-target symlink must be rejected (ELOOP)
+    real_file = tmp_path / "real.json"
+    real_file.write_text('{"windows": ["wks_w1"]}', encoding="utf-8")
+    p.unlink()
+    p.symlink_to(real_file)
+    with pytest.raises(OSError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Dangling symlink must ALSO raise OSError (never silently treated as missing)
+    p.unlink()
+    p.symlink_to(tmp_path / "does-not-exist.json")
+    with pytest.raises(OSError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # FIFO must fail immediately without hanging
+    p.unlink()
+    os.mkfifo(p)
+    with pytest.raises(ValueError):
+        wsn.read_window_registry(p, anchor_dir=tmp_path)
+
+    # Anchor escape rejected
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    outside = other_dir / f"{LEAD}.windows.json"
+    outside.write_text('{"windows": ["wks_w1"]}', encoding="utf-8")
+    with pytest.raises(ValueError):
+        wsn.read_window_registry(outside, anchor_dir=tmp_path)

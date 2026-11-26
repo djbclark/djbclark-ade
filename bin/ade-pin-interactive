@@ -142,16 +142,18 @@ def is_worker(row: dict) -> bool:
     labels = _labels_of(row)
     if _is_truthy(labels.get("ade.internal")) or str(labels.get("baton-writer") or "") == "1":
         return True
-    raw_box = str(labels.get("ade.box") or "").strip().upper()
-    raw_place = str(labels.get("ade.placement") or "").strip().lower()
-    if raw_box in ("LEAD", "MAIN") or raw_place in ("lead", "main"):
-        return False
-    if raw_box in ("WORKER", "WORKERS") or raw_place in ("worker", "workers"):
-        return True
+    # Check worker ownership markers BEFORE placement/box hints: an interactive worker launched via
+    # `ade-worker-run --placement lead` carries `ade.box=LEAD` / `ade.placement=main` alongside `ade.lead` and `slice`.
     if str(labels.get("ade.lead") or "").strip() or str(labels.get("slice") or "").strip():
         return True
-    if row.get("parentAgentId") or str(labels.get("paseo.parent-agent-id") or "").strip():
+    if row.get("parentAgentId") or st.get("parentAgentId") or str(labels.get("paseo.parent-agent-id") or "").strip():
         return True
+    raw_box = str(labels.get("ade.box") or "").strip().upper()
+    raw_place = str(labels.get("ade.placement") or "").strip().lower()
+    if raw_box in ("WORKER", "WORKERS") or raw_place in ("worker", "workers"):
+        return True
+    if raw_box in ("LEAD", "MAIN") or raw_place in ("lead", "main"):
+        return False
     if str(labels.get("ade.role") or "").strip() or str(labels.get("ade.chain") or "").strip():
         return False
     # Legacy display-name fallback for pre-2026-11-25 unlabelled tabs.
@@ -167,7 +169,7 @@ def is_archived(row: dict) -> bool:
 
 def is_retired(row: dict) -> bool:
     labels = _labels_of(row)
-    if _is_truthy(labels.get(RETIRED_LABEL)) or str(labels.get(RETIRED_TO_LABEL) or "").strip():
+    if _is_truthy(labels.get(RETIRED_LABEL)):
         return True
     aid = row.get("id")
     if isinstance(aid, str) and aid and has_completed_handoff(aid):

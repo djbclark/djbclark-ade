@@ -195,3 +195,101 @@ def test_human_renamed_windows_use_structured_registry_metadata(pin, monkeypatch
     assert pin.main(["pin"]) == 0
     # wks_w1 is structurally WORKER so skipped despite custom human title; wks_o1 is structurally OTHER so pinned despite `WORKER ` title.
     assert inst.calls == ["wks_o1", "wks_l1"]
+
+
+def test_node_and_python_registry_validation_aligned(pin, tmp_path):
+    """P2 Round 2: bin/ade-pin-workspaces.mjs matches bin/ade_ws_names.py on UUID filenames,
+    windows-membership checks, invalid box/null entries rejection, symlinks, and FIFOs."""
+    import json
+    import os
+    import shutil
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    state_dir = tmp_path / "wr-state"
+    state_dir.mkdir()
+    lead_ok = "8cd86203-d33b-49db-abde-9baba52bcf61"
+    lead_bad_box = "11111111-2222-3333-4444-555555555555"
+    lead_orphan = "22222222-2222-3333-4444-555555555555"
+    lead_null = "33333333-2222-3333-4444-555555555555"
+    lead_sym = "44444444-2222-3333-4444-555555555555"
+    lead_fifo = "55555555-2222-3333-4444-555555555555"
+
+    # Valid UUID registry
+    pin.wsn.write_window_registry(
+        state_dir / f"{lead_ok}.windows.json",
+        {"wks_w1", "wks_o1"},
+        {
+            "wks_w1": {"windowId": "wks_w1", "box": "WORKER"},
+            "wks_o1": {"windowId": "wks_o1", "box": "OTHER"},
+        },
+    )
+    # Non-UUID filename must be skipped by both Python and Node
+    (state_dir / "not-a-uuid.windows.json").write_text(
+        json.dumps({"windows": ["wks_nonuuid"], "entries": {"wks_nonuuid": {"windowId": "wks_nonuuid", "box": "WORKER"}}}),
+        encoding="utf-8",
+    )
+    # Invalid explicit box must reject the file
+    (state_dir / f"{lead_bad_box}.windows.json").write_text(
+        json.dumps({"windows": ["wks_badbox"], "entries": {"wks_badbox": {"windowId": "wks_badbox", "box": "GARBAGE"}}}),
+        encoding="utf-8",
+    )
+    # Orphan entry absent from windows list must reject the file
+    (state_dir / f"{lead_orphan}.windows.json").write_text(
+        json.dumps({"windows": ["wks_present"], "entries": {"wks_orphan": {"windowId": "wks_orphan", "box": "WORKER"}}}),
+        encoding="utf-8",
+    )
+    # Explicit null entries must reject the file
+    (state_dir / f"{lead_null}.windows.json").write_text(
+        json.dumps({"windows": ["wks_null"], "entries": None}),
+        encoding="utf-8",
+    )
+    # Symlink registry must be rejected (not followed)
+    target = tmp_path / "outside.json"
+    target.write_text(
+        json.dumps({"windows": ["wks_sym"], "entries": {"wks_sym": {"windowId": "wks_sym", "box": "WORKER"}}}),
+        encoding="utf-8",
+    )
+    (state_dir / f"{lead_sym}.windows.json").symlink_to(target)
+    # FIFO must not hang and must be skipped
+    os.mkfifo(state_dir / f"{lead_fifo}.windows.json")
+
+    # Python side
+    py_reg = pin.wsn.all_registered_windows(state_dir)
+    assert set(py_reg) == {"wks_w1", "wks_o1"}
+
+    # Node side via mock CLI dist (no daemon, no PATH mutation)
+    dist = tmp_path / "dist"
+    (dist / "utils").mkdir(parents=True)
+    pinned_log = tmp_path / "pinned.json"
+    (dist / "utils" / "daemon-target.js").write_text("export function selectDaemonTarget() { return {}; }\n", encoding="utf-8")
+    (dist / "utils" / "client.js").write_text(
+        "import { writeFileSync } from 'node:fs';\n"
+        f"const pinned = [];\n"
+        "export async function connectToDaemon() {\n"
+        "  return {\n"
+        "    async fetchWorkspaces() {\n"
+        "      return { entries: [\n"
+        "        { id: 'wks_w1', title: 'Daniel debugging Venice' },\n"
+        "        { id: 'wks_o1', title: 'WORKER notes' },\n"
+        "        { id: 'wks_nonuuid', title: 'Custom non-uuid' },\n"
+        "        { id: 'wks_orphan', title: 'Custom orphan' },\n"
+        "        { id: 'wks_sym', title: 'Custom sym' },\n"
+        "      ] };\n"
+        "    },\n"
+        "    async setWorkspacePinned(id) { pinned.push(id); },\n"
+        f"    async close() {{ writeFileSync({str(pinned_log)!r}, JSON.stringify(pinned)); }},\n"
+        "  };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(tmp_path),
+        "PASEO_SET_MODEL_CLI_DIST": str(dist),
+        "ADE_WORKER_RUN_STATE": str(state_dir),
+    }
+    res = subprocess.run([node, str(BIN / "ade-pin-workspaces.mjs"), "pin"], capture_output=True, text=True, env=env, timeout=15)
+    assert res.returncode == 0, res.stderr
+    assert json.loads(pinned_log.read_text(encoding="utf-8")) == ["wks_o1", "wks_nonuuid", "wks_orphan", "wks_sym"]

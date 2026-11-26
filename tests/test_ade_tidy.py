@@ -1723,3 +1723,79 @@ def test_q126_human_renamed_windows_and_tabs_keep_structured_classification_and_
     renames = {r["windowId"]: r["to"] for r in p["renames"]}
     assert renames[W_MAIN] == "LEAD myrepo (My custom tab)"
     assert renames[W_WORK] == "WORKER myrepo (Wave 9)"
+
+
+def test_q126_round2_foreign_interactive_worker_chain_lead_veto_and_label_beats_title(tmp_path: Path, monkeypatch) -> None:
+    """Round 2 P1/P2 (NoPathIdleEnv, no PATH mutation):
+    1. A foreign interactive worker (`ade.lead=OTHER_LEAD, slice=op1, ade.box=LEAD, ade.placement=main`)
+       does NOT mark its workspace as a foreign lead window (an unlabelled operator tab beside it stays `operator`).
+    2. A stale non-LEAD registry entry (`box=WORKER`) on a predecessor lead's window NEVER overrides the
+       unconditional chain-wide LEAD veto during archive protection or extra_windows.
+    3. A window with an explicit `ade.box=WORKER` agent label whose human title is `OTHER myrepo (notes)`
+       keeps `WORKER` (structured label beats display title in plan_windows).
+    """
+    e = NoPathIdleEnv(tmp_path, monkeypatch)
+    pred_lead = "00000000-0000-0000-0000-000000000099"
+    other_lead = "88888888-8888-8888-8888-888888888888"
+    w_pred_lead = "wks_predlead"
+    w_foreign_box = "wks_foreignbox"
+    w_title_clash = "wks_titleclash"
+
+    # Record self-handoff chain: pred_lead -> LEAD
+    ss_dir = Path(os.environ["ADE_SELF_SESSION_STATE"])
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / f"handoff-{pred_lead}.json").write_text(json.dumps({
+        "kind": "handoff",
+        "predecessor": pred_lead,
+        "successor": LEAD,
+        "home": str(e.home.resolve()),
+        "status": "archived",
+        "ack": {"agent_id": LEAD},
+    }), encoding="utf-8")
+
+    # Predecessor lead's archived state file lives in w_pred_lead (human-renamed, empty of live agents).
+    pred_state = e.home / "agents/proj" / f"{pred_lead}.json"
+    pred_state.parent.mkdir(parents=True, exist_ok=True)
+    pred_state.write_text(json.dumps({
+        "id": pred_lead, "workspaceId": w_pred_lead, "archivedAt": "2026-11-24T00:00:00Z", "labels": {"ade.role": "myrepo"},
+    }), encoding="utf-8")
+
+    # Corrupted/stale registry marks w_pred_lead as WORKER, but chain-wide LEAD veto MUST win.
+    wr_dir = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    wr_dir.mkdir(parents=True, exist_ok=True)
+    (wr_dir / f"{LEAD}.windows.json").write_text(json.dumps({
+        "windows": [w_pred_lead],
+        "entries": {w_pred_lead: {"windowId": w_pred_lead, "box": "WORKER", "repo": "myrepo", "lead": LEAD}},
+    }), encoding="utf-8")
+
+    e.data["workspaces"] = [
+        {"workspaceId": W_MAIN, "project": "myrepo", "name": "LEAD myrepo (Wave 9)", "isolation": "local", "cwd": str(e.repo)},
+        {"workspaceId": w_pred_lead, "project": "myrepo", "name": "Daniel old lead notes", "isolation": "local", "cwd": str(e.repo)},
+        {"workspaceId": w_foreign_box, "project": "myrepo", "name": "Custom foreign box", "isolation": "local", "cwd": str(e.repo)},
+        {"workspaceId": w_title_clash, "project": "myrepo", "name": "OTHER myrepo (notes)", "isolation": "local", "cwd": str(e.repo)},
+    ]
+    e.agent(LEAD, W_MAIN, "LEAD myrepo", status="running", labels={"ade.role": "myrepo", "ade.box": "LEAD"})
+    # Foreign interactive worker placed with ade.box=LEAD + ade.placement=main alongside an unlabelled operator tab.
+    foreign_iw = e.agent(
+        "90000010-0000-0000-0000-000000000000", w_foreign_box, "worker op1", status="running",
+        labels={"ade.lead": other_lead, "slice": "op1", "ade.box": "LEAD", "ade.placement": "main"},
+    )
+    op_tab = e.agent("90000011-0000-0000-0000-000000000000", w_foreign_box, "Daniel ad-hoc chat", status="running")
+    # Own worker carrying explicit ade.box=WORKER inside a window titled `OTHER myrepo (notes)` (no registry entry).
+    e.agent(
+        "90000012-0000-0000-0000-000000000000", w_title_clash, "worker slice1", status="running",
+        labels={"ade.lead": LEAD, "slice": "slice1", "ade.box": "WORKER"},
+    )
+
+    p = json.loads(e.run(as_json=True).stdout)
+    classes = {a["id"]: a["class"] for a in p["agents"]}
+    assert classes[foreign_iw] == "other-worker"
+    assert classes[op_tab] == "operator"  # NOT misclassified as foreign lead!
+
+    # Predecessor lead window is protected by chain-wide LEAD veto despite stale WORKER registry entry.
+    assert w_pred_lead not in {w["windowId"] for w in p["archive_windows"]}
+    assert w_pred_lead not in {w["windowId"] for w in p["extra_windows"]}
+
+    # Structured ade.box=WORKER beats display title `OTHER myrepo (notes)` during rename planning.
+    renames = {r["windowId"]: r["to"] for r in p["renames"]}
+    assert renames[w_title_clash] == "WORKER myrepo (notes)"

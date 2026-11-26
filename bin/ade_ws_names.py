@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 from typing import NamedTuple
@@ -29,8 +30,10 @@ KINDS = ("LEAD", "WORKER", "OTHER")
 LEGACY_KINDS = ("MAIN", "WORKERS", "USER")  # the 2026-11-13 names of the same three boxes
 BOX_OF = {"LEAD": "LEAD", "WORKER": "WORKER", "OTHER": "OTHER", "MAIN": "LEAD", "WORKERS": "WORKER", "USER": "OTHER"}
 NAME_LIMIT = 100  # docs/workspace-layout.md: keep a window or tab name under ~100 characters
+MAX_REGISTRY_BYTES = 1_048_576  # bounded regular-file read for window registries
 REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+UUID_PAT = re.compile(UUID_RE)
 WKS_RE = re.compile(r"wks_[A-Za-z0-9]+")
 _NEW_RE = re.compile(rf"^({'|'.join(KINDS + LEGACY_KINDS)}) ({REPO_RE.pattern}) \((.+)\)$")
 _LEGACY_WORKERS_RE = re.compile(rf"^(workers|WORKERS) (.+) ({UUID_RE})$")
@@ -140,54 +143,120 @@ def tab_name(box: str, slice_name: str, lead: str | None = None, worktree: str |
     return f"{base} [wt: {d if len(d) <= room else d[:room - 1] + '~'}]"
 
 
+def _read_regular_file(path: Path, *, max_bytes: int = MAX_REGISTRY_BYTES, anchor_dir: Path | None = None) -> str:
+    """Bounded regular-file read (no symlinks, no FIFOs/devices/dirs, optional anchor dir)."""
+    if anchor_dir is not None:
+        try:
+            ast = os.lstat(anchor_dir)
+        except FileNotFoundError:
+            raise FileNotFoundError(str(path)) from None
+        if not (stat.S_ISDIR(ast.st_mode) or (stat.S_ISLNK(ast.st_mode) and anchor_dir.is_dir())):
+            raise OSError(f"state dir is not a directory: {anchor_dir}")
+        anchor_real = Path(os.path.realpath(anchor_dir))
+        parent_real = Path(os.path.realpath(path.parent))
+        if parent_real != anchor_real:
+            raise ValueError(f"registry path {path} escapes anchor directory {anchor_dir}")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(os.fspath(path), flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"registry path is not a regular file: {path}")
+        if st.st_size > max_bytes:
+            raise ValueError(f"registry file exceeds {max_bytes} bytes: {path}")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            buf = os.read(fd, min(65536, max_bytes - total + 1))
+            if not buf:
+                break
+            total += len(buf)
+            if total > max_bytes:
+                raise ValueError(f"registry file exceeds {max_bytes} bytes: {path}")
+            chunks.append(buf)
+    finally:
+        os.close(fd)
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"registry file is not valid UTF-8: {path}") from exc
+
+
 def normalize_window_entry(wks: str, raw: object) -> dict:
-    """Sanitize one structured window metadata record (backward-compatible; all fields optional via `.get`)."""
-    out: dict[str, str] = {"windowId": wks}
+    """Validate and normalize one structured window metadata record.
+
+    Raises ValueError on malformed authority (non-dict, mismatched windowId, invalid explicit box,
+    or invalid typed metadata fields) so mutators fail closed rather than degrading to display titles.
+    """
+    if not isinstance(wks, str) or not WKS_RE.fullmatch(wks):
+        raise ValueError(f"bad window id: {wks!r}")
     if not isinstance(raw, dict):
-        return out
-    raw_box = raw.get("box")
-    if isinstance(raw_box, str) and raw_box.strip().upper() in BOX_OF:
+        raise ValueError(f"bad entry for {wks}")
+    out: dict[str, str] = {"windowId": wks}
+    if "windowId" in raw:
+        if raw["windowId"] != wks:
+            raise ValueError(f"mismatched windowId for {wks}: {raw['windowId']!r}")
+    if "box" in raw:
+        raw_box = raw["box"]
+        if not isinstance(raw_box, str) or raw_box.strip().upper() not in BOX_OF:
+            raise ValueError(f"invalid box for {wks}: {raw_box!r}")
         out["box"] = BOX_OF[raw_box.strip().upper()]
-    for key in ("repo", "lead", "cwd", "work"):
-        val = raw.get(key)
-        if isinstance(val, str) and val.strip():
+    if "repo" in raw:
+        raw_repo = raw["repo"]
+        if not isinstance(raw_repo, str) or not REPO_RE.fullmatch(raw_repo.strip()):
+            raise ValueError(f"invalid repo for {wks}: {raw_repo!r}")
+        out["repo"] = raw_repo.strip()
+    if "lead" in raw:
+        raw_lead = raw["lead"]
+        if not isinstance(raw_lead, str) or not UUID_PAT.fullmatch(raw_lead.strip()):
+            raise ValueError(f"invalid lead for {wks}: {raw_lead!r}")
+        out["lead"] = raw_lead.strip()
+    for key in ("cwd", "work"):
+        if key in raw:
+            val = raw[key]
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"invalid {key} for {wks}: {val!r}")
             out[key] = val
     return out
 
 
-def read_window_registry(path: Path) -> tuple[set[str], dict[str, dict]]:
+def read_window_registry(path: Path, *, anchor_dir: Path | None = None) -> tuple[set[str], dict[str, dict]]:
     """Read `<lead>.windows.json` -> `(window_ids, entries)`.
 
-    Older records with only `{"windows": [...]}` load cleanly with empty `entries`. Corrupt JSON,
-    a missing/invalid `"windows"` list, or a non-dict `"entries"` raises ValueError (callers fail closed).
+    Older records with only `{"windows": [...]}` (no `"entries"` key) load cleanly with empty `entries`.
+    Corrupt JSON, symlinks/FIFOs, an explicit `"entries": null`, orphan entries absent from `"windows"`,
+    or invalid explicit field values raise ValueError/OSError (callers fail closed).
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        text = _read_regular_file(path, anchor_dir=anchor_dir)
     except FileNotFoundError:
         return set(), {}
     data = json.loads(text)
     if not isinstance(data, dict):
         raise ValueError("registry root must be an object")
+    if "windows" not in data:
+        raise ValueError("missing windows list")
     ids = data["windows"]
     if not isinstance(ids, list) or not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
         raise ValueError("bad window id")
     id_set = set(ids)
-    raw_entries = data.get("entries")
-    if raw_entries is None:
+    if "entries" not in data:
         return id_set, {}
+    raw_entries = data["entries"]
     if not isinstance(raw_entries, dict):
         raise ValueError("bad entries map")
     entries: dict[str, dict] = {}
-    for wks in id_set:
-        if wks in raw_entries:
-            if not isinstance(raw_entries[wks], dict):
-                raise ValueError(f"bad entry for {wks}")
-            entries[wks] = normalize_window_entry(wks, raw_entries[wks])
+    for wks, raw in raw_entries.items():
+        if not isinstance(wks, str) or not WKS_RE.fullmatch(wks) or wks not in id_set:
+            raise ValueError(f"entry {wks!r} is not in windows list")
+        entries[wks] = normalize_window_entry(wks, raw)
     return id_set, entries
 
 
 def write_window_registry(path: Path, ids: set[str], entries: dict[str, dict] | None = None) -> None:
     """Atomically write `<lead>.windows.json` with both `"windows"` (backward compatible) and structured `"entries"`."""
+    if not all(isinstance(i, str) and WKS_RE.fullmatch(i) for i in ids):
+        raise ValueError("bad window id")
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {"windows": sorted(ids)}
     if entries:
@@ -212,19 +281,19 @@ def all_registered_windows(state_dir: Path | None = None) -> dict[str, dict]:
     """Best-effort map of `workspaceId -> structured metadata` across all `<lead>.windows.json` files.
 
     Used by read-only classifiers (such as `ade-pin-workspaces`) so a human-renamed WORKER or OTHER box keeps
-    its structured classification. Unreadable files are skipped (callers that mutate use `read_window_registry` directly).
+    its structured classification. Unreadable or malformed files are skipped (callers that mutate use
+    `read_window_registry` directly and fail closed).
     """
     base = state_dir or default_worker_run_state_dir()
     if not base.is_dir():
         return {}
-    uuid_pat = re.compile(UUID_RE)
     out: dict[str, dict] = {}
     for path in sorted(base.glob("*.windows.json")):
         owner = path.name[:-len(".windows.json")]
-        if not uuid_pat.fullmatch(owner):
+        if not UUID_PAT.fullmatch(owner):
             continue
         try:
-            ids, entries = read_window_registry(path)
+            ids, entries = read_window_registry(path, anchor_dir=base)
         except (OSError, ValueError, KeyError, TypeError):
             continue
         for wks in ids:

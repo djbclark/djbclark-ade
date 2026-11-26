@@ -900,28 +900,28 @@ def test_main_placement_migrates_a_2026_11_13_main_name_to_lead_first(main_env, 
 
 
 @pytest.mark.parametrize("name", ["Daniel debugging Venice", "djbclark-ade Wave 7", "master", "MAINTAIN x", "Main x"])
-def test_main_placement_accepts_human_renamed_lead_window(main_env, name):
-    """Carried #126 (2026-11-25): --placement lead resolves the lead's window from its agent record and
+def test_main_placement_accepts_human_renamed_lead_window(no_path_main_env, name):
+    """Carried #126 (2026-11-25, no PATH mutation): --placement lead resolves the lead's window from its agent record and
     never refuses just because a human renamed the window away from `LEAD ...`."""
-    main_env.data["workspaces"][0]["name"] = name
-    r = interactive(main_env, "--interactive")
+    no_path_main_env.data["workspaces"][0]["name"] = name
+    r = interactive(no_path_main_env, "--interactive")
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["workspaceId"] == LEAD_WKS and out["windowName"] == name
-    assert rename_calls(main_env) == []
+    assert rename_calls(no_path_main_env) == []
 
 
-def test_main_placement_refuses_structurally_registered_worker_or_other_box(main_env):
-    """Structured metadata (not display name) prevents launching --placement lead into a registered WORKER/OTHER box."""
+def test_main_placement_refuses_structurally_registered_worker_or_other_box(no_path_main_env):
+    """Structured metadata (not display name, no PATH mutation) prevents launching --placement lead into a registered WORKER/OTHER box."""
     state = Path(os.environ["ADE_WORKER_RUN_STATE"])
     state.mkdir(parents=True, exist_ok=True)
     (state / f"{LEAD}.windows.json").write_text(json.dumps({
         "windows": [LEAD_WKS],
         "entries": {LEAD_WKS: {"windowId": LEAD_WKS, "box": "WORKER", "repo": "repo", "lead": LEAD}},
     }))
-    r = interactive(main_env, "--interactive")
+    r = interactive(no_path_main_env, "--interactive")
     assert r.returncode == 1 and "registered as a WORKER box" in r.stderr
-    assert ["run"] not in main_env.verbs() and rename_calls(main_env) == []
+    assert ["run"] not in no_path_main_env.verbs() and rename_calls(no_path_main_env) == []
 
 
 def test_main_placement_needs_the_lead_to_be_the_caller(main_env, monkeypatch):
@@ -3284,50 +3284,209 @@ def test_a_window_the_old_bug_renamed_is_fixed_with_repo_and_work(main_env):
     assert r.returncode == 0 and rename_calls(main_env) == [["workspace", "rename", LEAD_WKS, "LEAD tendcf (Wave 7)"]]
 
 
-def test_q126_human_renamed_lead_window_never_breaks_lead_placement(main_env):
-    """Carried #126 (2026-11-25): `--placement lead` succeeds on a human-renamed LEAD window without refusing or clobbering the title."""
-    main_env.data["workspaces"][0]["name"] = "Daniel debugging Venice"
-    r_lead = interactive(main_env, "--placement", "lead")
+class NoPathEnv:
+    """Rule-2-clean test harness: injects the fake `paseo` binary explicitly via `ADE_PASEO_BIN`
+    without ever reordering or mutating `PATH`."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self.tmp = tmp_path
+        self.data_path = tmp_path / "data.json"
+        self.calls_path = tmp_path / "calls.jsonl"
+        self.home = tmp_path / "paseo-home"
+        self.data = {"workspaces": [], "created_id": "wks_abc123", "agents": [],
+                     "run_out": {"agentId": AGENT, "status": "running"},
+                     "run_err": "Created workspace wks_abc123 - master (master)\nTip: pass --workspace <id>\n"}
+        stub = tmp_path / "fake-paseo"
+        stub.write_text(STUB)
+        stub.chmod(0o755)
+        monkeypatch.setenv("ADE_PASEO_BIN", str(stub))
+        monkeypatch.setenv("FAKE_DATA", str(self.data_path))
+        monkeypatch.setenv("FAKE_CALLS", str(self.calls_path))
+        monkeypatch.setenv("PASEO_HOME", str(self.home))
+        monkeypatch.setenv("ADE_WORKER_RUN_STATE", str(tmp_path / "state"))
+        monkeypatch.setenv("AGENT_FOOTER_REPORT_DIR", str(tmp_path / "reports"))
+        monkeypatch.setenv("ADE_SELF_SESSION_STATE", str(tmp_path / "self-session"))
+        monkeypatch.setenv("PASEO_AGENT_ID", LEAD)
+        monkeypatch.setenv("PASEO_AGENT_CWD", "/ambient/cwd")
+        monkeypatch.setenv("PASEO_WORKSPACE_ID", "wks_ambient")
+        self.flush()
+
+    def flush(self):
+        self.data_path.write_text(json.dumps(self.data))
+
+    def state(self, agent_id, workspace_id, labels=None):
+        p = self.home / "agents/proj" / f"{agent_id}.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"id": agent_id, "workspaceId": workspace_id, "labels": labels or {}}))
+
+    def run(self, *args, cwd=None):
+        self.flush()
+        return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True, cwd=cwd or self.tmp)
+
+    def calls(self):
+        if not self.calls_path.exists():
+            return []
+        return [json.loads(x) for x in self.calls_path.read_text().splitlines()]
+
+    def verbs(self):
+        return [c["argv"][:2] if c["argv"][0] in ("workspace", "agent") else c["argv"][:1] for c in self.calls()]
+
+
+@pytest.fixture
+def no_path_env(tmp_path, monkeypatch):
+    return NoPathEnv(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def no_path_main_env(no_path_env):
+    no_path_env.state(LEAD, LEAD_WKS)
+    no_path_env.data["workspaces"] = [{"workspaceId": LEAD_WKS, "name": LEAD_NAME, "cwd": "/repo/lead"}]
+    no_path_env.data["run_err"] = ""
+    return no_path_env
+
+
+def test_q126_human_renamed_lead_window_never_breaks_lead_placement(no_path_main_env):
+    """Carried #126 (2026-11-25, no PATH mutation): `--placement lead` succeeds on a human-renamed LEAD window
+    without refusing or clobbering the title."""
+    no_path_main_env.data["workspaces"][0]["name"] = "Daniel debugging Venice"
+    r_lead = interactive(no_path_main_env, "--placement", "lead")
     assert r_lead.returncode == 0, r_lead.stderr
     out_lead = json.loads(r_lead.stdout)
     assert out_lead["workspaceId"] == LEAD_WKS and out_lead["windowName"] == "Daniel debugging Venice"
     assert out_lead["tabName"] == "worker op1"
-    assert rename_calls(main_env) == []
+    assert rename_calls(no_path_main_env) == []
 
 
-def test_q126_human_renamed_worker_and_other_windows_reuse_and_archive(env):
-    """Carried #126 (2026-11-25): renaming WORKER and OTHER windows to arbitrary human strings
+def test_q126_human_renamed_worker_and_other_windows_reuse_and_archive(no_path_env):
+    """Carried #126 (2026-11-25, no PATH mutation): renaming WORKER and OTHER windows to arbitrary human strings
     never breaks worker box reuse, OTHER box reuse, or `archive-window`."""
     # 1. Mint a WORKER box, then simulate a human renaming it to "Daniel debugging Venice".
-    r1 = env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Wave 9", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    r1 = no_path_env.run("--lead", LEAD, "--slice", "alpha", "--window-middle", "Wave 9", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r1.returncode == 0, r1.stderr
     wks_w = json.loads(r1.stdout)["workspaceId"]
-    reload(env)
-    next(w for w in env.data["workspaces"] if w["workspaceId"] == wks_w)["name"] = "Daniel debugging Venice"
+    reload(no_path_env)
+    next(w for w in no_path_env.data["workspaces"] if w["workspaceId"] == wks_w)["name"] = "Daniel debugging Venice"
     # Second launch reuses the human-renamed WORKER box (does NOT mint a second window or overwrite the title).
-    env.calls_path.unlink()
-    r2 = env.run("--lead", LEAD, "--slice", "beta", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    no_path_env.calls_path.unlink()
+    r2 = no_path_env.run("--lead", LEAD, "--slice", "beta", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r2.returncode == 0, r2.stderr
     out2 = json.loads(r2.stdout)
     assert out2["workspaceId"] == wks_w and out2["windowName"] == "Daniel debugging Venice" and out2["tabName"] == "worker beta"
-    assert "--new-workspace" not in run_argv(env) and rename_calls(env) == []
+    assert "--new-workspace" not in run_argv(no_path_env) and rename_calls(no_path_env) == []
     # `archive-window` finds and archives the human-renamed WORKER box cleanly.
-    r_arch = env.run("archive-window", "--lead", LEAD)
+    r_arch = no_path_env.run("archive-window", "--lead", LEAD)
     assert r_arch.returncode == 0, r_arch.stderr
     assert json.loads(r_arch.stdout) == {"archived": True, "workspaceId": wks_w, "windowName": "Daniel debugging Venice", "blockers": []}
 
     # 2. Same for OTHER box renamed to "My custom side tasks".
-    env.data["workspaces"] = []
-    env.data["created_id"] = "wks_other9"
-    env.data["run_err"] = "Created workspace wks_other9 - master (master)\n"
-    r3 = env.run("--lead", LEAD, "--slice", "probe", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    no_path_env.data["workspaces"] = []
+    no_path_env.data["created_id"] = "wks_other9"
+    no_path_env.data["run_err"] = "Created workspace wks_other9 - master (master)\n"
+    r3 = no_path_env.run("--lead", LEAD, "--slice", "probe", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r3.returncode == 0, r3.stderr
-    reload(env)
-    next(w for w in env.data["workspaces"] if w["workspaceId"] == "wks_other9")["name"] = "My custom side tasks"
-    env.calls_path.unlink()
-    r4 = env.run("--lead", LEAD, "--slice", "probe2", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
+    reload(no_path_env)
+    next(w for w in no_path_env.data["workspaces"] if w["workspaceId"] == "wks_other9")["name"] = "My custom side tasks"
+    no_path_env.calls_path.unlink()
+    r4 = no_path_env.run("--lead", LEAD, "--slice", "probe2", "--placement", "other", "--cwd", "/repo", "--", "--no-wait", "BRIEF")
     assert r4.returncode == 0, r4.stderr
     assert json.loads(r4.stdout)["workspaceId"] == "wks_other9" and json.loads(r4.stdout)["tabName"] == "other probe2"
-    r_arch_o = env.run("archive-window", "--lead", LEAD, "--placement", "other")
+    r_arch_o = no_path_env.run("archive-window", "--lead", LEAD, "--placement", "other")
     assert r_arch_o.returncode == 0, r_arch_o.stderr
     assert json.loads(r_arch_o.stdout)["workspaceId"] == "wks_other9"
+
+
+def test_q126_round2_lead_placement_and_rename_lead_foreign_and_legacy_refusals(no_path_main_env):
+    """Round 2 P1 (no PATH mutation): `--placement lead` and `rename-lead` refuse registered WORKER/OTHER,
+    ID-only legacy registry records, foreign-lead occupants, and WORKER/OTHER-labelled occupants."""
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    reg_file = state / f"{LEAD}.windows.json"
+
+    # 1. Registered OTHER box
+    reg_file.write_text(json.dumps({
+        "windows": [LEAD_WKS],
+        "entries": {LEAD_WKS: {"windowId": LEAD_WKS, "box": "OTHER", "repo": "repo", "lead": LEAD}},
+    }))
+    assert interactive(no_path_main_env, "--placement", "lead").returncode == 1
+    assert rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9").returncode == 1
+
+    # 2. Legacy ID-only registry record (no `entries` map)
+    reg_file.write_text(json.dumps({"windows": [LEAD_WKS]}))
+    r_leg = interactive(no_path_main_env, "--placement", "lead")
+    assert r_leg.returncode == 1 and "legacy window registry" in r_leg.stderr
+    r_leg_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_leg_ren.returncode == 1 and "legacy window registry" in r_leg_ren.stderr
+    reg_file.unlink()
+
+    # 3. Unregistered window holding foreign lead's agent (even with WORKER title)
+    no_path_main_env.data["workspaces"][0]["name"] = "WORKER repo (Other)"
+    no_path_main_env.data["agents"] = [{"id": "foreign1", "status": "idle", "labels": {"ade.lead": OTHER_LEAD}}]
+    no_path_main_env.state("foreign1", LEAD_WKS, {"ade.lead": OTHER_LEAD})
+    r_for = interactive(no_path_main_env, "--placement", "lead")
+    assert r_for.returncode == 1 and "another lead's agents" in r_for.stderr
+    r_for_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_for_ren.returncode == 1 and "another lead's agents" in r_for_ren.stderr
+
+    # 4. Unregistered window holding own live agent explicitly labelled ade.box=WORKER
+    no_path_main_env.data["agents"] = [{"id": "w_own", "status": "idle", "labels": {"ade.lead": LEAD, "ade.box": "WORKER"}}]
+    no_path_main_env.state("w_own", LEAD_WKS, {"ade.lead": LEAD, "ade.box": "WORKER"})
+    r_lbl = interactive(no_path_main_env, "--placement", "lead")
+    assert r_lbl.returncode == 1 and "labelled as a WORKER box" in r_lbl.stderr
+    r_lbl_ren = rename_lead(no_path_main_env, "--repo", "repo", "--window-middle", "Wave 9")
+    assert r_lbl_ren.returncode == 1 and "labelled as a WORKER box" in r_lbl_ren.stderr
+
+
+def test_q126_round2_unproven_legacy_archive_refused_chain_lead_veto_and_label_beats_title(no_path_env):
+    """Round 2 P1/P2 (no PATH mutation):
+    1. An unproven legacy ID-only window with a non-scheme human title resolves to `unknown` and is NEVER archived.
+    2. A closed predecessor's human-renamed LEAD window is vetoed chain-wide even if listed in legacy registry.
+    3. On a legacy registered window holding a live `ade.box=WORKER` agent, structured label BEATS display title `OTHER ...`.
+    4. Corrupted registry (`entries: null` or invalid `box`) fails closed.
+    """
+    state = Path(os.environ["ADE_WORKER_RUN_STATE"])
+    state.mkdir(parents=True, exist_ok=True)
+    reg_file = state / f"{LEAD}.windows.json"
+
+    # 1. Unproven legacy ID-only window with non-scheme human title -> refused (`unknown`, never defaulted to WORKER)
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_unproven", "name": "Daniel scratch window", "cwd": "/repo"}]
+    reg_file.write_text(json.dumps({"windows": ["wks_unproven"]}))
+    r_unp = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_unp.returncode == 1 and "no WORKER box" in r_unp.stderr
+
+    # 2. Closed predecessor's human-renamed LEAD window in legacy registry -> chain-wide LEAD veto refuses archive
+    pred_lead = "00000000-0000-0000-0000-000000000077"
+    ss_dir = Path(os.environ["ADE_SELF_SESSION_STATE"])
+    ss_dir.mkdir(parents=True, exist_ok=True)
+    (ss_dir / f"handoff-{pred_lead}.json").write_text(json.dumps({
+        "kind": "handoff",
+        "predecessor": pred_lead,
+        "successor": LEAD,
+        "home": str(no_path_env.home.resolve()),
+        "status": "archived",
+        "ack": {"agent_id": LEAD},
+    }))
+    no_path_env.state(pred_lead, "wks_predlead")
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_predlead", "name": "Old lead custom name", "cwd": "/repo"}]
+    reg_file.write_text(json.dumps({
+        "windows": ["wks_predlead"],
+        "entries": {"wks_predlead": {"windowId": "wks_predlead", "box": "WORKER", "repo": "repo", "lead": LEAD}},
+    }))
+    r_pred = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_pred.returncode == 1 and "no WORKER box" in r_pred.stderr
+
+    # 3. Legacy registered window with explicit `ade.box=WORKER` agent and user title formatted as `OTHER repo (oops)`:
+    #    structured agent label BEATS display title!
+    no_path_env.data["workspaces"] = [{"workspaceId": "wks_clash", "name": "OTHER repo (oops)", "cwd": "/repo"}]
+    no_path_env.data["agents"] = [{"id": "w_clash", "status": "idle", "labels": {"ade.lead": LEAD, "ade.box": "WORKER"}}]
+    no_path_env.state("w_clash", "wks_clash", {"ade.lead": LEAD, "ade.box": "WORKER"})
+    reg_file.write_text(json.dumps({"windows": ["wks_clash"]}))
+    r_other = no_path_env.run("archive-window", "--lead", LEAD, "--placement", "other", "--idle-handled")
+    assert r_other.returncode == 1 and "no OTHER box" in r_other.stderr
+    r_worker = no_path_env.run("archive-window", "--lead", LEAD, "--idle-handled")
+    assert r_worker.returncode == 0, r_worker.stderr
+    assert json.loads(r_worker.stdout)["workspaceId"] == "wks_clash"
+
+    # 4. Corrupted registry (`entries: null`) fails closed
+    reg_file.write_text(json.dumps({"windows": ["wks_clash"], "entries": None}))
+    r_bad = no_path_env.run("archive-window", "--lead", LEAD)
+    assert r_bad.returncode == 1 and "unreadable" in r_bad.stderr
