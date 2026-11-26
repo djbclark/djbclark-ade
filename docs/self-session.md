@@ -458,6 +458,36 @@ The successor inherits the predecessor's name (C-id), so a chain's agents all re
    observes: `rename-lead` resolves the window from the calling lead's own agent record and takes its own lock, so the successor runs
    it itself (SKILL `self-handoff`, `skills/self-handoff/SKILL.md`), and an automatic window rename was judged not worth the risk to the operator's sidebar.
 
+### C0c. Manual succession link (`ade-self-session link`) and repo-keyed lead lookup (`bin/ade-lead-of`, 2026-11-26)
+
+1. **Operator-attested manual link (Carried #105):** When a lead is replaced by hand (outside `ade-self-session handoff`/`finish`),
+   no `handoff-<predecessor>.json` record is written and callers pinning the old lead ID hit archived-send refusals. Record the
+   completed link after the predecessor is archived:
+   ```bash
+   ~/src/djbclark-ade/bin/ade-self-session link --predecessor OLD_UUID --successor NEW_UUID --operator-attested [--repo REPO] [--reason TEXT]
+   ```
+   `link` does not require `PASEO_AGENT_ID` (it can run from an operator shell or a lead). It requires `--operator-attested`,
+   validates both UUIDs (`predecessor != successor`), inspects Paseo to confirm `predecessor` is `Archived: true` and
+   `successor` is `Archived: false`, refuses cycles in `ade_lead_succession`, and writes a completed `handoff-<predecessor>.json`
+   record (`status: "archived"`, `ack.agent_id: NEW_UUID`, `mode: "operator-link"`, `operator_attested: true`) that
+   `ade_lead_succession`, `ade_send_guard`, and `ade_claims` accept. Re-running with the same predecessor and successor is
+   idempotent; an existing record with a different successor or status is refused. After writing the record, `link` repoints
+   `supervisor/lead`, any legacy `--lead <predecessor>` `com.djbclark.ade-net-resume.plist`, and the repo-keyed lead record.
+2. **Repo-keyed lead lookup (`bin/ade-lead-of`, Carried #106):** Both `finish` and `link` atomically update
+   `${ADE_REPO_LEADS_DIR:-<state-dir>/repo-leads}/<repo>.json` (mode `0600`, scoped to `PASEO_HOME`, outcome recorded in
+   `record['repo_lead']`, never failing `finish`). Look up, set, or list repo leads with:
+   ```bash
+   ~/src/djbclark-ade/bin/ade-lead-of REPO [--json] [--allow-unverified]
+   ~/src/djbclark-ade/bin/ade-lead-of set REPO AGENT_ID [--cwd DIR] [--offline] [--json]
+   ~/src/djbclark-ade/bin/ade-lead-of list [--json]
+   ```
+   Resolution checks the repo-keyed record first (following `ade_lead_succession` and confirming `Archived: false` via Paseo ->
+   `verified: true`, exit `0`). When no live verified record exists, it discovers live non-worker candidates via structured
+   metadata (`ade.repo` + lead labels, registered `LEAD` window in `ade_ws_names`), `ade.chain` + `cwd`, or `LEAD`/`MAIN`
+   window display names — always returning `verified: false` (exit `3` for a single unverified fallback unless `--allow-unverified`
+   is set, exit `1` for none or ambiguous multiple candidates, exit `2` for usage/validation error). Unverified guesses are
+   never used to auto-redirect sends.
+
 ### C0a. Lead ids pinned elsewhere follow the successor (2026-11-14)
 A successful `finish` leaves `handoff-<predecessor>.json` with `status: archived`, the `successor` and the successor's own
 `ack.agent_id`: that file is the succession ledger, and nothing else records one. `bin/ade_lead_succession.py` reads it

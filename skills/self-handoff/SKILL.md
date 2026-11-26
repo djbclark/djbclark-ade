@@ -371,12 +371,15 @@ descendants) carry `--label ade.lead=<lead agent id>`; without it `bin/ade-auto-
 permission prompts. A successor lead labels its own workers with its own id and runs the watcher with
 `--lead <its id>` (2026-11-13). After an acknowledged `ade-self-session` handoff nothing pinned to
 the predecessor's id needs a hand step (2026-11-14; automatic `ade-net-resume` tracking strengthened
-2026-11-23): `ade-worker-run` adopts its windows and labelled workers, `finish` repoints both
-`~/.local/state/djbclark-ade/supervisor/lead` and any legacy `--lead <predecessor>`
+2026-11-23; repo-keyed lead record + manual `link` added 2026-11-26): `ade-worker-run` adopts its windows and labelled workers, `finish` repoints
+`~/.local/state/djbclark-ade/supervisor/lead`, any legacy `--lead <predecessor>`
 `com.djbclark.ade-net-resume.plist` (and `--lead-file` installs read `supervisor/lead` each tick),
+and the repo-keyed lead record readable via `~/src/djbclark-ade/bin/ade-lead-of <REPO>`,
 and the installed `ade-net-resume` / `ade-auto-permit` jobs and `fable-wait` follow the completed
-chain (`docs/self-session.md` C0, C0a). A manual handoff that never runs `finish` records no chain:
-update `supervisor/lead` (for `--lead-file` installs) or re-point those jobs by hand.
+chain (`docs/self-session.md` C0, C0a, C0c). After a manual handoff that never ran `finish`, run
+`~/src/djbclark-ade/bin/ade-self-session link --predecessor <OLD_UUID> --successor <NEW_UUID> --operator-attested [--repo <REPO>]`
+once the predecessor is archived so the completed succession link, `supervisor/lead`, legacy
+`ade-net-resume` plist, and `ade-lead-of` record are all updated cleanly.
 
 **Placement & WORKER/OTHER box reuse:** Placement differs: workers go in the lead's one
 `WORKER <repo> (<work>)` box, and workers the operator asks for interactively in the lead's own

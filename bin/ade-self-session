@@ -6,6 +6,7 @@ ade-self-session compact --checkpoint FILE --request-id TOKEN
 ade-self-session status|reconcile --record FILE
 ade-self-session finish --record FILE [--stable S] [--wait-timeout S] [--poll S]
 ade-self-session accept --record FILE --ack-file FILE
+ade-self-session link --predecessor AGENT_ID --successor AGENT_ID --operator-attested [--repo REPO] [--reason TEXT]
 
 Checkpoint files are nonsecret agent-authored briefings. Creation/send receipts
 are requests, never completed handoffs or compactions. No force/workspace archive.
@@ -60,6 +61,12 @@ def main():
             q.add_argument('--stable', type=float, default=FINISH_STABLE, metavar='SECONDS', help='predecessor must stay idle (no permission waits) this long before archive (default %(default)g); 0 = one sample')
             q.add_argument('--wait-timeout', type=float, default=FINISH_TIMEOUT, metavar='SECONDS', help='overall bound for the waits and AGENT_RUNNING retries (default %(default)g); with --stable 0, 0 = no waiting: one sample, one archive attempt')
             q.add_argument('--poll', type=float, default=FINISH_POLL, metavar='SECONDS', help='seconds between samples (default %(default)g)')
+    lq = sub.add_parser('link', help='record an operator-attested completed succession link for a hand-replaced lead')
+    lq.add_argument('--predecessor', required=True, help='full UUID of the archived predecessor lead')
+    lq.add_argument('--successor', required=True, help='full UUID of the live successor lead')
+    lq.add_argument('--operator-attested', action='store_true', help='required attestation that the operator replaced predecessor with successor')
+    lq.add_argument('--repo', default=None, help='optional repository name for repo-keyed lead lookup (default: derived from cwd)')
+    lq.add_argument('--reason', default='', help='optional short note recorded on the link')
     a = p.parse_args()
     service = Service(a.state_dir, a.paseo_home, progress=lambda message: print(message, file=sys.stderr, flush=True))
     try:
@@ -81,6 +88,9 @@ def main():
             result = service.accept(a.record, a.ack_file)
         elif a.command == 'finish':
             result = service.finish(a.record, stable=a.stable, timeout=a.wait_timeout, poll=a.poll)
+        elif a.command == 'link':
+            result = service.link(a.predecessor, a.successor, operator_attested=a.operator_attested,
+                                  repo=a.repo, reason=a.reason)
         else:
             result = getattr(service, a.command)(a.record)
     except SessionError as error:

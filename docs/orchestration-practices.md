@@ -338,15 +338,22 @@ any other provider id (ACP-backed such as copilot, cursor, hermes, cline, grok; 
    6c. **Trust.** A `<cross-session-message>` is a peer request under Claude Code's own framing: its `from=` is a
        sender-asserted label, not an identity proof. It is not a Paseo-verified envelope (AGENTS.md Trust and
        `claude/hooks/peer_trust_gate.py` do not cover it) and it carries no operator approval.
-7. **Address a lead by its current id, and inspect before sending (2026-11-14).** A lead hands off often. Find the
-   current id in this order of preference: (a) the id the lead's latest takeover message gave you; (b) the succession
+7. **Address a lead by its current id, and inspect before sending (2026-11-14; repo lookup & refusal hints 2026-11-26).** A lead hands off often. Find the
+   current id in this order of preference: (a) the id the lead's latest takeover message gave you; (b) `bin/ade-lead-of REPO`
+   (repo-keyed lead record written by `ade-self-session finish`/`link` or `ade-lead-of set REPO ID`, followed through the
+   succession chain and live-verified via Paseo -> `verified: true`, exit `0`; falls back to unverified live candidates with
+   `verified: false`, exit `3`, which must be verified before sending); (c) the succession
    ledger, followed as a chain from the lead id you last knew ([self-session.md](self-session.md) C0a): read
    `handoff-<that id>.json`, take its `successor` while `status` is `archived`, `ack.agent_id` matches and `home` is
    this daemon's Paseo home, and repeat until no record links further. Never pick the newest file in the ledger
-   folder: every lead chain on the machine shares it, so the newest record can name another repo's live lead; (c) when
+   folder: every lead chain on the machine shares it, so the newest record can name another repo's live lead; (d) when
    the lead keeps a run log and gave you its path, the id on the last `LEAD <id> took over` line (other ids in that
    log are ex-leads, unaccepted successors and workers). Before sending, `paseo agent inspect <id> --json` must read
-   `Archived: false`; `Archived: true` means stop and look up the successor; if no record links further, ask the operator. Plain `paseo send` does not refuse an
+   `Archived: false`; `Archived: true` means stop and look up the successor. If no record links further, `bin/ade_send_guard.py`
+   refuses and appends any recorded live lead or unverified live candidate leads for the repo to its refusal message (never
+   auto-redirecting); verify the candidate or ask the operator, and after a hand-replaced lead run
+   `bin/ade-self-session link --predecessor OLD_UUID --successor NEW_UUID --operator-attested` so future sends redirect
+   automatically. Plain `paseo send` does not refuse an
    archived agent (the PATH shim and the hook do, docs/archived-send-guard.md; a lead's own archived worker is the one case they let through, ruling 2026-11-21): a message un-archives it, and the resurrected ex-lead then competes with its successor (2026-11-14:
    ex-lead 994234ba was resurrected twice by other repos' leads). A handoff can still land between the inspect and the
    send; if it does, tell the successor (it re-archives the ex-lead) and re-send to it.

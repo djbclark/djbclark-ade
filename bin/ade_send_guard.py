@@ -40,6 +40,7 @@ import sys
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ade_lead_of as lead_of  # noqa: E402
 import ade_lead_succession as succ  # noqa: E402
 import ade_paseo_client as paseo_client  # noqa: E402
 
@@ -204,11 +205,25 @@ def owner_proof(ident: str, sender, inspect, ls_label, state_dir: Path | None = 
     return ""
 
 
+def _candidate_suffix(find_candidates, record: dict | None) -> str:
+    """Best-effort informational suffix naming recorded or live candidate leads for a refused archived target.
+    Never raises and never turns a refusal into a redirect (Carried #107)."""
+    if find_candidates is None or not isinstance(record, dict):
+        return ""
+    try:
+        hint = find_candidates(record)
+    except Exception:  # noqa: BLE001
+        return ""
+    return hint if isinstance(hint, str) else ""
+
+
 def decide(target: str, inspect, allow_archived: bool | str | None = False, state_dir: Path | None = None,
-           home: Path | None = None, allow_replaced: str | None = None, sender: str | None = None, ls_label=None) -> Decision:
+           home: Path | None = None, allow_replaced: str | None = None, sender: str | None = None, ls_label=None,
+           find_candidates=None) -> Decision:
     """What to do about a send to `target` (an id, an id prefix or a name Paseo resolves). `sender` is the calling agent's full
     id (PASEO_AGENT_ID) and `ls_label(K=V)` lists the agents carrying a label: together they prove ownership of an archived
-    worker (`owner_proof`)."""
+    worker (`owner_proof`). `find_candidates(record)` optionally returns an informational refusal suffix naming a recorded or
+    live candidate lead for the target's repo (never used to redirect)."""
     inspect = _cached(inspect)
     if target.startswith("-"):  # an option, not an agent: never hand it to the inspect CLI
         return Decision(PASS, target, "not an agent id: not guarded")
@@ -229,7 +244,8 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
         except Exception:  # noqa: BLE001
             successor = None
         if successor is not None and successor.get("Archived") is True:
-            return Decision(REFUSE, target, f"{ident} was replaced by {current}, which is archived too: nothing to send to")
+            suffix = _candidate_suffix(find_candidates, successor or record)
+            return Decision(REFUSE, target, f"{ident} was replaced by {current}, which is archived too: nothing to send to{suffix}")
         if allow_replaced == ident and record.get("Archived") is False:  # live: the send cannot un-archive it
             return Decision(PASS, target, f"{ident} was replaced by {current}, but {ALLOW_REPLACED_ENV} names it and it is live: "
                             "sent as asked", replaced_by=current)
@@ -240,11 +256,12 @@ def decide(target: str, inspect, allow_archived: bool | str | None = False, stat
         if proof:  # operator ruling 2026-11-21: a lead may un-archive its own archived worker without asking
             return Decision(PASS, target, f"{ident} is archived and is the sender's own worker ({proof}): resumed (logged)",
                             resumed="owner", proof=proof)
+        suffix = _candidate_suffix(find_candidates, record)
         return Decision(REFUSE, target, f"{ident} is archived and no completed handoff replaced it: a send would un-archive "
                         f"and run it. Your own archived worker (launched by you or a lead you replaced: its `ade.lead=<you>` label, or "
                         f"your session as its Paseo parent) is let through without asking anyone, and this one is not provably yours. "
                         f"Send to its live owner; resuming another agent's archived one needs the operator's explicit "
-                        f"instruction ({ALLOW_ENV}=<its full id>, for that one send)")
+                        f"instruction ({ALLOW_ENV}=<its full id>, for that one send){suffix}")
     return Decision(PASS, target)
 
 
@@ -403,7 +420,18 @@ def guard(target: str, paseo: str = "paseo", env=None, log_path: Path | None = N
         # A configured enrollment or role read error must never become legacy pass.
         return Decision(REFUSE, target, "enrolled authority unavailable; no local fallback")
     sender = (env.get(SENDER_ENV) or "").strip()
-    d = decide(target, paseo_inspect(paseo, env=env), allow_archived=env.get(ALLOW_ENV) or False,
+    inspect_fn = paseo_inspect(paseo, env=env)
+    if "find_candidates" not in kw:
+        kw["find_candidates"] = lambda rec: lead_of.candidates_hint_for_refusal(
+            rec,
+            inspect=inspect_fn,
+            list_agents=lead_of.paseo_list_agents_fn(paseo, env=env),
+            list_workspaces=lead_of.paseo_list_workspaces_fn(paseo, env=env),
+            state_dir=kw.get("state_dir"),
+            home=kw.get("home"),
+            env=env,
+        )
+    d = decide(target, inspect_fn, allow_archived=env.get(ALLOW_ENV) or False,
                allow_replaced=env.get(ALLOW_REPLACED_ENV) or None, sender=sender or None, ls_label=paseo_ls_label(paseo, env=env), **kw)
     if d.replaced_by:
         log_override(d, log_path, source)
