@@ -349,3 +349,62 @@ def test_an_unlisted_pool_stays_unmapped(tmp_path: Path) -> None:
     report = _run(tmp_path, _pools(**{"openai:openai_api": (50.0, True, False)}), agents=agents)
     assert report["unmapped"] == ["xai-oauth"]
     assert report["all_pi"][0]["headroom_percent"] is None
+
+
+def _load_pi_stuck_module():
+    """Import bin/ade-pi-stuck directly without mutating PATH (Code Review Rule 2)."""
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("ade_pi_stuck_mod", str(CLI))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_venice_and_rfab_pools_map_without_becoming_auto_alternatives() -> None:
+    """Operator-gated venice and rfab pools map for quota judgement and never become auto alt() targets."""
+    mod = _load_pi_stuck_module()
+    assert mod.account_of("venice/openai-gpt-62-sol") == "venice"
+    assert mod.account_of("rfab/openai:gpt-6.2-sol") == "rfab"
+
+    avail = _pools(**{
+        "venice:default": (100.0, True, False),
+        "rfab:default": (100.0, True, False),
+        "openai:openai_api": (0.0, True, False),
+    })
+    accounts = mod.quota_by_account(avail)
+    assert accounts["venice"] == {"headroom": 100.0, "usable": True, "stale": False, "pool": "venice:default"}
+    assert accounts["rfab"] == {"headroom": 100.0, "usable": True, "stale": False, "pool": "rfab:default"}
+
+    # Even with venice and rfab at 100% headroom, alt() must never recommend them.
+    alt_choice = mod.alt("openai/gpt-6.1-sol", "openai", {"openai"}, accounts)
+    assert alt_choice is None or (not alt_choice.startswith("pi/venice/") and not alt_choice.startswith("pi/rfab/"))
+
+
+def test_venice_and_rfab_unusable_pool_marks_account_exhausted_without_path_mutation(monkeypatch) -> None:
+    """In-process main() check with explicit monkeypatched seams (no PATH reordering)."""
+    mod = _load_pi_stuck_module()
+    agents = [
+        {"id": "v1", "name": "venice tab", "provider": "pi/venice/openai-gpt-62-sol", "status": "idle"},
+        {"id": "r1", "name": "rfab tab", "provider": "pi/rfab/openai:gpt-6.2-sol", "status": "idle"},
+    ]
+    avail = _pools(**{
+        "venice:default": (100.0, True, False),
+        "rfab:default": (0.0, False, False),
+    })
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: agents)
+    monkeypatch.setattr(mod, "j", lambda cmd, timeout=30, ok=(0,): avail)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+
+    import io
+    buf = io.StringIO()
+    monkeypatch.setattr(mod.sys, "stdout", buf)
+    assert mod.main() == 0
+    report = json.loads(buf.getvalue())
+    assert report["unmapped"] == []
+    assert "venice" in report["accounts"] and "venice" not in report["exhausted"]
+    assert "rfab" in report["accounts"] and "rfab" in report["exhausted"]
+    assert [s["id"] for s in report["stuck"]] == ["r1"]
