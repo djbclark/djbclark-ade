@@ -21,13 +21,95 @@ Initial version: the only account known-exhausted is OpenAI prepaid ("openai");
 others are cross-checked against aiuse pools when a clean mapping exists. The
 supervisor refines this as it learns account->quota mappings.
 """
-import json, os, re, subprocess, sys
+import json, math, os, re, stat, subprocess, sys
 from pathlib import Path
 
 _BIN_DIR = str(Path(__file__).resolve().parent)
 if _BIN_DIR not in sys.path:
     sys.path.insert(0, _BIN_DIR)
 import ade_paseo_client as paseo_client  # noqa: E402
+
+DEFAULT_AIUSE_TIMEOUT = 30.0
+MAX_AIUSE_TIMEOUT = 300.0
+MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+
+
+def aiuse_timeout():
+    """Timeout in seconds for `aiuse --available --json` (default 30, overridable via ADE_PI_STUCK_AIUSE_TIMEOUT)."""
+    raw = os.environ.get("ADE_PI_STUCK_AIUSE_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_AIUSE_TIMEOUT
+    try:
+        val = float(raw)
+    except ValueError:
+        return DEFAULT_AIUSE_TIMEOUT
+    if math.isfinite(val) and 0 < val <= MAX_AIUSE_TIMEOUT:
+        return val
+    return DEFAULT_AIUSE_TIMEOUT
+
+
+def default_snapshot_path():
+    """Return the aiuse snapshot fallback path (AIUSE_SNAPSHOT env override or ~/.cache/aiuse/snapshots/latest.json)."""
+    override = os.environ.get("AIUSE_SNAPSHOT", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "aiuse" / "snapshots" / "latest.json"
+
+
+def load_snapshot_fallback(path=None):
+    """Read aiuse's cached snapshot directly after an `aiuse` CLI timeout (Carried 93).
+
+    Fails closed on symlinks, non-regular files, owner/permission mismatches, oversized files,
+    malformed JSON, or an empty accounts list. Converts snapshot `accounts` entries into the
+    `--available` shape with top-level `fresh=False` and per-entry `stale=True` so KNOWN_EMPTY
+    accounts are never cleared by a fallback reading.
+    """
+    snap_path = Path(path) if path is not None else default_snapshot_path()
+    flags = os.O_RDONLY
+    for flag_name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+        flags |= getattr(os, flag_name, 0)
+    fd = os.open(str(snap_path), flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise RuntimeError("aiuse snapshot is not a regular file")
+        if st.st_uid != os.geteuid():
+            raise RuntimeError("aiuse snapshot owner mismatch")
+        if st.st_mode & 0o002:
+            raise RuntimeError("aiuse snapshot is world-writable")
+        if st.st_size > MAX_SNAPSHOT_BYTES:
+            raise RuntimeError("aiuse snapshot exceeds size limit")
+        fh = os.fdopen(fd, "rb")
+        fd = -1
+        with fh:
+            raw = fh.read(MAX_SNAPSHOT_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(raw) > MAX_SNAPSHOT_BYTES:
+        raise RuntimeError("aiuse snapshot exceeds size limit")
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict) or not isinstance(data.get("accounts"), list):
+        raise RuntimeError("aiuse snapshot missing accounts list")
+    rows = [a for a in data["accounts"] if isinstance(a, dict)]
+    if not rows:
+        raise RuntimeError("aiuse snapshot has no accounts")
+    converted = []
+    for a in rows:
+        hr = a.get("headroom_percent")
+        if hr is None:
+            hr = a.get("binding_headroom_percent")
+        usable = False if a.get("error") else a.get("usable_now")
+        entry = {
+            "pool_id": a.get("pool_id"),
+            "headroom_percent": hr,
+            "usable_now": usable,
+            "stale": True,
+        }
+        if a.get("account"):
+            entry["account"] = a["account"]
+        converted.append(entry)
+    return {"fresh": False, "available": converted}
 
 
 def list_agents_rows(timeout=30):
@@ -58,7 +140,8 @@ def account_of(model):
     if not model:
         return "unknown"
     for pre in ("openrouter/","opencode-go-djbclark/","opencode-go-t-e/","opencode-go/",
-                "clinepass/","cursor/","anthropic/","google/","openai/","deepseek/","qwen/","venice/","rfab/"):
+                "clinepass-djbclark/","clinepass-t-e/","clinepass/",
+                "cursor/","anthropic/","google/","openai/","deepseek/","qwen/","venice/","rfab/"):
         if model.startswith(pre):
             return pre.rstrip("/")
     return model.split("/")[0] if "/" in model else model
@@ -82,7 +165,7 @@ POOL_TO_ACCOUNT = {
 # Pools where one pool_id bills several accounts. aiuse names the account in its
 # `account` field and Pi prefixes the provider with it (opencode-go-t-e,
 # clinepass-djbclark). Without this, every sub-account but the bare prefix reads
-# "no quota mapping" even though aiuse reported it (Carried 79, 2026-11-19).
+# "no quota mapping" even though aiuse reported it (Carried 80).
 SUBACCOUNT_POOLS = {
     "opencode:go": "opencode-go",
     "clinepass:default": "clinepass",
@@ -124,27 +207,32 @@ FINISHED = ("closed", "archived")
 def quota_by_account(avail):
     """Return {account: {"headroom": %, "usable": bool, "stale": bool, "pool": id}}.
 
-    Reads aiuse JSON schema >=1.6, whose pools live in the "available" array
-    (older drafts used a "pools" dict).  The *worst* pool for an account wins.
+    Reads aiuse JSON schema >=1.6 (`available`) and >=1.8 (`unavailable`, whose entries
+    omit `usable_now` and represent exhausted/near-empty pools; Carried 88). Older drafts
+    used a `pools` dict. The *worst* pool for an account wins.
     """
-    pools = avail.get("available")
-    if pools is None:
-        pools = list((avail.get("pools") or {}).values())
+    avail_pools = avail.get("available")
+    unavail_pools = avail.get("unavailable")
+    if avail_pools is None and unavail_pools is None:
+        avail_pools = list((avail.get("pools") or {}).values())
     out = {}
-    for p in pools or []:
-        if not isinstance(p, dict):
-            continue
-        acct = account_for_pool(p)
-        if not acct:
-            continue
-        hr = p.get("headroom_percent")
-        usable = p.get("usable_now")          # absent or null is not a "usable" reading: fail closed below
-        stale = bool(p.get("stale"))
-        rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
-        prev = out.get(acct)
-        # The worst pool wins: an unusable pool first, then the lowest headroom (an unread one counts as worst).
-        if prev is None or _badness(rec) < _badness(prev):
-            out[acct] = rec
+    for forced_unusable, pool_list in ((False, avail_pools), (True, unavail_pools)):
+        for p in pool_list or []:
+            if not isinstance(p, dict):
+                continue
+            acct = account_for_pool(p)
+            if not acct:
+                continue
+            hr = p.get("headroom_percent")
+            # Entries in `unavailable` are always unusable right now (schema 1.8 omits `usable_now`);
+            # in `available`, absent or null is not a "usable" reading and fails closed below.
+            usable = False if forced_unusable else p.get("usable_now")
+            stale = bool(p.get("stale"))
+            rec = {"headroom": hr, "usable": usable, "stale": stale, "pool": p.get("pool_id")}
+            prev = out.get(acct)
+            # The worst pool wins: an unusable pool first, then the lowest headroom (an unread one counts as worst).
+            if prev is None or _badness(rec) < _badness(prev):
+                out[acct] = rec
     return out
 
 
@@ -204,8 +292,25 @@ def main():
     exhausted = set()
     accounts = {}
     quota_error = None
+    quota_source = "aiuse"
     try:
-        avail = j(["aiuse","--available","--json"], ok=(0, 3))
+        try:
+            avail = j(["aiuse", "--available", "--json"], timeout=aiuse_timeout(), ok=(0, 3))
+        except subprocess.TimeoutExpired as timeout_exc:
+            # Under heavy CPU load `aiuse` Python startup can time out even when reading a cached
+            # snapshot (Carried 93). Fall back directly to the on-disk snapshot marked stale;
+            # only report quota_error if the fallback also fails.
+            try:
+                avail = load_snapshot_fallback()
+            except Exception as snap_exc:
+                raise RuntimeError(
+                    f"aiuse timed out after {timeout_exc.timeout}s; snapshot fallback failed: {snap_exc}"
+                ) from snap_exc
+            quota_source = "snapshot-stale"
+            print(
+                f"ade-pi-stuck: aiuse timed out after {timeout_exc.timeout}s; using stale snapshot fallback",
+                file=sys.stderr,
+            )
         accounts = quota_by_account(avail)
         # Default False: aiuse >= 1.6 always emits `fresh`, and an absent flag must not be read as "this
         # reading is fresh" — that would clear a known-empty account on a stale balance.
@@ -237,6 +342,7 @@ def main():
         exhausted = set(KNOWN_EMPTY)
         accounts = {}          # a partial reading is not used either: alt() and the per-agent headroom must not
         low = []               # come from a pass that failed half-way
+        quota_source = "error"
         quota_error = str(exc)[:200] or exc.__class__.__name__
     out = []
     for a in rows:
@@ -273,7 +379,7 @@ def main():
     if as_json:
         print(json.dumps({"stuck": stuck, "all_pi": out, "accounts": accounts,
                           "exhausted": sorted(exhausted), "low": low, "unmapped": unmapped,
-                          "quota_error": quota_error}, indent=1))
+                          "quota_error": quota_error, "quota_source": quota_source}, indent=1))
     else:
         for o in out:
             hr = "  ?  " if o["headroom_percent"] is None else f"{o['headroom_percent']:5.1f}"
@@ -285,6 +391,8 @@ def main():
                       else "        -> no healthy alternative found")
         for acct in unmapped:
             print(f"\nno quota mapping for account {acct}: its agents cannot be judged")
+        if quota_source == "snapshot-stale":
+            print("\nquota read from stale snapshot fallback (aiuse timed out)")
         if quota_error:
             print(f"\nquota read failed ({quota_error}): only the known-empty accounts are flagged")
         errored = sum(1 for o in stuck if o["status"] == "error")

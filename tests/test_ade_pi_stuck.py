@@ -408,3 +408,229 @@ def test_venice_and_rfab_unusable_pool_marks_account_exhausted_without_path_muta
     assert "venice" in report["accounts"] and "venice" not in report["exhausted"]
     assert "rfab" in report["accounts"] and "rfab" in report["exhausted"]
     assert [s["id"] for s in report["stuck"]] == ["r1"]
+
+
+def test_unavailable_array_marks_subaccount_exhausted_not_unmapped(monkeypatch) -> None:
+    """aiuse schema 1.8 puts exhausted/near-empty pools in `unavailable` without `usable_now` (Carried 88)."""
+    import io
+
+    mod = _load_pi_stuck_module()
+    agents = [
+        {"id": "g1", "name": "go te", "provider": "pi/opencode-go-t-e/deepseek-v4-pro", "status": "idle"},
+        {"id": "g2", "name": "go djb", "provider": "pi/opencode-go-djbclark/deepseek-v4-pro", "status": "idle"},
+    ]
+    avail = {
+        "fresh": True,
+        "available": [
+            {"pool_id": "opencode:go", "account": "djbclark", "headroom_percent": 50.0, "usable_now": True, "stale": False},
+        ],
+        "unavailable": [
+            {"pool_id": "opencode:go", "account": "t-e", "headroom_percent": 0.0, "reason": "exhausted"},
+        ],
+    }
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: agents)
+    monkeypatch.setattr(mod, "j", lambda cmd, timeout=30, ok=(0,): avail)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+    buf = io.StringIO()
+    monkeypatch.setattr(mod.sys, "stdout", buf)
+
+    assert mod.main() == 0
+    report = json.loads(buf.getvalue())
+    assert report["unmapped"] == []
+    assert "opencode-go-t-e" in report["exhausted"]
+    assert report["accounts"]["opencode-go-t-e"]["usable"] is False
+    assert report["accounts"]["opencode-go-t-e"]["headroom"] == 0.0
+    assert "opencode-go-djbclark" not in report["exhausted"]
+    assert [s["id"] for s in report["stuck"]] == ["g1"]
+    assert report["stuck"][0]["alternative"] == "pi/opencode-go-djbclark/deepseek-v4-pro"
+
+
+def test_unavailable_near_empty_and_worst_pool_precedence() -> None:
+    """A near_empty `unavailable` row forces usable=False and beats an `available` row for the same account."""
+    mod = _load_pi_stuck_module()
+    avail = {
+        "fresh": True,
+        "available": [
+            {"pool_id": "anthropic:subscription", "headroom_percent": 60.0, "usable_now": True, "stale": False},
+        ],
+        "unavailable": [
+            {"pool_id": "anthropic:fable", "headroom_percent": 3.0, "reason": "near_empty"},
+        ],
+    }
+    accounts = mod.quota_by_account(avail)
+    assert accounts["anthropic"]["usable"] is False
+    assert accounts["anthropic"]["headroom"] == 3.0
+    assert accounts["anthropic"]["pool"] == "anthropic:fable"
+
+
+def test_clinepass_subaccounts_map_individually_across_available_and_unavailable(monkeypatch) -> None:
+    """Each clinepass sub-account maps to `clinepass-<account>` across available/unavailable and bare fallback (Carried 80)."""
+    import io
+
+    mod = _load_pi_stuck_module()
+    assert mod.account_of("clinepass-djbclark/cline-pass/deepseek-v4-pro") == "clinepass-djbclark"
+    assert mod.account_of("clinepass-t-e/cline-pass/deepseek-v4-pro") == "clinepass-t-e"
+    assert mod.account_of("clinepass/cline-pass/deepseek-v4-pro") == "clinepass"
+
+    # Account-less clinepass:default still vouches for bare `clinepass`.
+    bare_accounts = mod.quota_by_account({
+        "fresh": True,
+        "available": [{"pool_id": "clinepass:default", "headroom_percent": 75.0, "usable_now": True, "stale": False}],
+    })
+    assert bare_accounts["clinepass"]["headroom"] == 75.0 and bare_accounts["clinepass"]["usable"] is True
+
+    agents = [
+        {"id": "cp1", "name": "cp djb", "provider": "pi/clinepass-djbclark/cline-pass/deepseek-v4-pro", "status": "running"},
+        {"id": "cp2", "name": "cp te", "provider": "pi/clinepass-t-e/cline-pass/deepseek-v4-pro", "status": "idle"},
+    ]
+    avail = {
+        "fresh": True,
+        "available": [
+            {"pool_id": "clinepass:default", "account": "djbclark", "headroom_percent": 50.0, "usable_now": True, "stale": False},
+        ],
+        "unavailable": [
+            {"pool_id": "clinepass:default", "account": "t-e", "headroom_percent": 0.0, "reason": "exhausted"},
+        ],
+    }
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: agents)
+    monkeypatch.setattr(mod, "j", lambda cmd, timeout=30, ok=(0,): avail)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+    buf = io.StringIO()
+    monkeypatch.setattr(mod.sys, "stdout", buf)
+
+    assert mod.main() == 0
+    report = json.loads(buf.getvalue())
+    assert report["unmapped"] == []
+    assert "clinepass-djbclark" in report["accounts"] and "clinepass-djbclark" not in report["exhausted"]
+    assert "clinepass-t-e" in report["exhausted"]
+    assert [s["id"] for s in report["stuck"]] == ["cp2"]
+
+
+def test_aiuse_timeout_falls_back_to_stale_snapshot_without_path_mutation(tmp_path: Path, monkeypatch) -> None:
+    """When `aiuse --available --json` times out, fall back to latest.json marked stale (Carried 93)."""
+    import io
+
+    mod = _load_pi_stuck_module()
+    snap = tmp_path / "latest.json"
+    snap.write_text(json.dumps({
+        "schema_version": "1.8",
+        "accounts": [
+            {"pool_id": "opencode:go", "account": "t-e", "usable_now": False, "binding_headroom_percent": 0.0},
+            {"pool_id": "opencode:go", "account": "djbclark", "usable_now": True, "binding_headroom_percent": 50.0},
+            {"pool_id": "clinepass:default", "account": "t-e", "usable_now": True, "binding_headroom_percent": 100.0},
+            {"pool_id": "openai:openai_api", "account": "djbclark@gmail.com", "usable_now": True, "binding_headroom_percent": 28.8},
+        ],
+    }), encoding="utf-8")
+    snap.chmod(0o600)
+
+    agents = [
+        {"id": "o1", "name": "openai", "provider": "pi/openai/gpt-6.1-sol", "status": "running"},
+        {"id": "g1", "name": "go te", "provider": "pi/opencode-go-t-e/deepseek-v4-pro", "status": "idle"},
+        {"id": "g2", "name": "go djb", "provider": "pi/opencode-go-djbclark/deepseek-v4-pro", "status": "idle"},
+        {"id": "c1", "name": "cp te", "provider": "pi/clinepass-t-e/cline-pass/deepseek-v4-pro", "status": "idle"},
+    ]
+
+    def _timeout(cmd, timeout=30, ok=(0,)):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setenv("AIUSE_SNAPSHOT", str(snap))
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: agents)
+    monkeypatch.setattr(mod, "j", _timeout)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    monkeypatch.setattr(mod.sys, "stdout", out_buf)
+    monkeypatch.setattr(mod.sys, "stderr", err_buf)
+
+    assert mod.main() == 0
+    report = json.loads(out_buf.getvalue())
+    assert report["quota_error"] is None
+    assert report["quota_source"] == "snapshot-stale"
+    assert report["unmapped"] == []
+    assert "stale snapshot fallback" in err_buf.getvalue()
+    assert all(rec["stale"] is True for rec in report["accounts"].values())
+    # KNOWN_EMPTY (`openai`) stays fail-closed on a stale fallback even with 28.8% in the snapshot.
+    assert "openai" in report["exhausted"]
+    assert "opencode-go-t-e" in report["exhausted"]
+    assert "opencode-go-djbclark" not in report["exhausted"]
+    assert "clinepass-t-e" not in report["exhausted"]
+    assert _stuck_ids(report) == ["g1", "o1"]
+
+
+def test_aiuse_timeout_refuses_missing_symlink_world_writable_or_empty_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """Snapshot fallback fails closed to quota_error when the snapshot is missing, a symlink, world-writable, or empty."""
+    import io
+
+    mod = _load_pi_stuck_module()
+    valid = tmp_path / "real.json"
+    valid.write_text(json.dumps({
+        "accounts": [{"pool_id": "opencode:go", "account": "djbclark", "usable_now": True, "binding_headroom_percent": 50.0}],
+    }), encoding="utf-8")
+    valid.chmod(0o600)
+
+    sym = tmp_path / "link.json"
+    sym.symlink_to(valid)
+
+    ww = tmp_path / "world-writable.json"
+    ww.write_text(valid.read_text(encoding="utf-8"), encoding="utf-8")
+    ww.chmod(0o666)
+
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"accounts": []}), encoding="utf-8")
+    empty.chmod(0o600)
+
+    def _timeout(cmd, timeout=30, ok=(0,)):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: AGENTS)
+    monkeypatch.setattr(mod, "j", _timeout)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+
+    for bad_path in (tmp_path / "missing.json", sym, ww, empty):
+        monkeypatch.setenv("AIUSE_SNAPSHOT", str(bad_path))
+        buf = io.StringIO()
+        monkeypatch.setattr(mod.sys, "stdout", buf)
+        assert mod.main() == 0
+        report = json.loads(buf.getvalue())
+        assert report["quota_source"] == "error"
+        assert report["quota_error"] and "timed out" in report["quota_error"]
+        assert report["accounts"] == {}
+        assert report["exhausted"] == ["openai"]
+
+
+def test_non_timeout_aiuse_error_does_not_read_snapshot(tmp_path: Path, monkeypatch) -> None:
+    """Only TimeoutExpired triggers snapshot fallback; a non-zero aiuse exit still reports quota_error."""
+    import io
+
+    mod = _load_pi_stuck_module()
+    snap = tmp_path / "latest.json"
+    snap.write_text(json.dumps({
+        "accounts": [{"pool_id": "opencode:go", "account": "djbclark", "usable_now": True, "binding_headroom_percent": 50.0}],
+    }), encoding="utf-8")
+    snap.chmod(0o600)
+
+    def _fail(cmd, timeout=30, ok=(0,)):
+        raise RuntimeError("aiuse exited 1: broken config")
+
+    monkeypatch.setenv("AIUSE_SNAPSHOT", str(snap))
+    monkeypatch.setattr(mod, "list_agents_rows", lambda timeout=30: AGENTS)
+    monkeypatch.setattr(mod, "j", _fail)
+    monkeypatch.setattr(mod.sys, "argv", ["ade-pi-stuck", "--json"])
+    buf = io.StringIO()
+    monkeypatch.setattr(mod.sys, "stdout", buf)
+
+    assert mod.main() == 0
+    report = json.loads(buf.getvalue())
+    assert report["quota_source"] == "error"
+    assert "aiuse exited 1" in (report["quota_error"] or "")
+    assert report["accounts"] == {}
+
+
+def test_aiuse_timeout_env_validation(monkeypatch) -> None:
+    mod = _load_pi_stuck_module()
+    monkeypatch.delenv("ADE_PI_STUCK_AIUSE_TIMEOUT", raising=False)
+    assert mod.aiuse_timeout() == 30.0
+    monkeypatch.setenv("ADE_PI_STUCK_AIUSE_TIMEOUT", "45.5")
+    assert mod.aiuse_timeout() == 45.5
+    for bad in ("0", "-5", "nan", "inf", "999", "not-a-number"):
+        monkeypatch.setenv("ADE_PI_STUCK_AIUSE_TIMEOUT", bad)
+        assert mod.aiuse_timeout() == 30.0
