@@ -4142,6 +4142,9 @@ def test_recovered_codex_identity_uses_ancestor_workspace(setup, workspace_overr
     native.rows[PRED].update(Provider='codex', Mode='default',
                             AvailableModes=[{'id': 'full-access', 'label': 'Unattended'}])
     assert service.actor() == PRED
+    inspected = len(native.calls)
+    assert service.actor() == PRED
+    assert len(native.calls) == inspected
     if workspace_override is None:
         record = service.handoff(checkpoint, quiesced=True)
         assert record['workspace_placement'] == 'existing'
@@ -4170,5 +4173,6 @@ def test_recovered_actor_must_be_codex(setup):
     service, _, _ = setup
     del service.env['PASEO_AGENT_ID']
     service.identity_resolver = lambda env, *, own_env: {'PASEO_AGENT_ID': PRED}
-    with pytest.raises(ss.SessionError, match='not a Codex provider'):
-        service.actor()
+    for _ in range(2):
+        with pytest.raises(ss.SessionError, match='not a Codex provider'):
+            service.actor()

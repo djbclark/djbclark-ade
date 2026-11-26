@@ -179,6 +179,7 @@ from __future__ import annotations
 # argparse, subprocess and tempfile are imported where used: the `guard` path of a plain `git add`/`commit`
 # runs once per git call of an agent and must start fast.
 import contextlib
+import contextvars
 import dataclasses
 import fcntl
 import json
@@ -768,11 +769,31 @@ class _AmbiguousPaseoIdentity(ValueError):
     """An ambiguous ancestor identity must never authorize a claim write."""
 
 
+# Scope this cache to a single shim guard call, including alias recursion and
+# refusal formatting. Direct calls and later guard evaluations get fresh reads.
+_guard_paseo_cache = contextvars.ContextVar("guard_paseo_cache", default=None)
+
+
 def _own_paseo_agent_id(env) -> Optional[str]:
     if "PASEO_AGENT_ID" in env:
         return (env.get("PASEO_AGENT_ID") or "").strip() or None
     if env is not os.environ:
         return None
+    cache = _guard_paseo_cache.get()
+    if cache is None:
+        return _recover_paseo_agent_id(env)
+    if not cache:
+        try:
+            cache.append(_recover_paseo_agent_id(env))
+        except _AmbiguousPaseoIdentity as err:
+            cache.append(_AmbiguousPaseoIdentity(str(err)))
+    cached = cache[0]
+    if isinstance(cached, _AmbiguousPaseoIdentity):
+        raise _AmbiguousPaseoIdentity(str(cached))
+    return cached
+
+
+def _recover_paseo_agent_id(env) -> Optional[str]:
     identity = _load_sibling("paseo_identity")
     try:
         return identity.recover_paseo_env(env, own_env=True).get("PASEO_AGENT_ID")
@@ -2760,15 +2781,15 @@ def _refusal_lines(d: Decision, me: str, env: Optional[dict[str, str]] = None) -
     return who, nxt
 
 
-def refusal_text(decision: Decision, call: GitCall) -> str:
-    who, nxt = _refusal_lines(decision, _esc(decision.detail.get("ident") or "no claim id"))
+def refusal_text(decision: Decision, call: GitCall, env=None) -> str:
+    who, nxt = _refusal_lines(decision, _esc(decision.detail.get("ident") or "no claim id"), env)
     return (f"ade-git-guard: REFUSED `{_esc(call.display())}` [{_esc(decision.rule)}] in "
             f"{_esc(decision.detail.get('cwd', call.cwd))}\n"
             + who +
             f"  Safe alternative: {_esc(decision.message)}.\n" + nxt)
 
 
-def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) -> int:
+def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None, *, env=None) -> int:
     """Log and print a non-plain decision; returns 0 (override) or EXIT_REFUSED."""
     log_event(d, call, extra)
     if d.override:
@@ -2776,14 +2797,21 @@ def _report(d: Decision, call: GitCall, extra: Optional[dict[str, Any]] = None) 
         sys.stderr.write(f"ade-git-guard: {_esc(via)}: allowed `{_esc(call.display())}` "
                          f"[{_esc(d.rule)}] (logged)\n")
         return 0
-    sys.stderr.write(refusal_text(d, call))
+    sys.stderr.write(refusal_text(d, call, env))
     return EXIT_REFUSED
 
 
 def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: Optional[str] = None) -> int:
     """What ade-git-guard runs for a git call that was not plainly read-only. 0 = run real git, 77 = refused. An allowed
     call also installs the ref hooks into its repository when they are missing (lazy install; never fails the call)."""
-    env = os.environ if env is None else env
+    token = _guard_paseo_cache.set([])
+    try:
+        return _guard_argv(argv, os.environ if env is None else env, cwd)
+    finally:
+        _guard_paseo_cache.reset(token)
+
+
+def _guard_argv(argv, env, cwd):
     if env.get("GIT_INDEX_FILE") or env.get("PRE_COMMIT"):
         authorize_claim = _coord().authorize_claim
         CoordinationError = _coord().CoordinationError
@@ -2800,7 +2828,7 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
         except CoordinationError:
             return EXIT_REFUSED
         return 0
-    if "PASEO_AGENT_ID" not in env and not is_agent_env(env):
+    if not is_agent_env(env):
         return 0  # Standalone calls reaching Python must not install hooks.
     try:
         base = cwd or os.getcwd()
@@ -2811,7 +2839,7 @@ def guard_argv(argv: Sequence[str], env: Optional[dict[str, str]] = None, cwd: O
     if d.allowed and not d.override:
         _lazy_install(call, env)
         return 0
-    rc = _report(d, call)
+    rc = _report(d, call, env=env)
     if rc == 0:
         _lazy_install(call, env)
     return rc

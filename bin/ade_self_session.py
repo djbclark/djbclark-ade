@@ -589,10 +589,12 @@ class Service:
         if 'PASEO_AGENT_ID' not in self.env:
             recovered = self._recovered_paseo_env().get('PASEO_AGENT_ID')
             if recovered:
-                agent = ident(recovered)
-                self._recovered_actor = agent
-                self.inspect(agent)  # every actor-only path also verifies the recovered provider
-                return agent
+                if self._recovered_actor is None:
+                    agent = ident(recovered)
+                    if self.inspect(agent).get('Provider') != 'codex':
+                        raise SessionError('recovered Paseo actor is not a Codex provider')
+                    self._recovered_actor = agent
+                return self._recovered_actor
         if not isinstance(raw, str) or not raw.strip():
             raise SessionError(
                 'PASEO_AGENT_ID is unset (a full UUID is required; ade-self-session is Paseo-only). '

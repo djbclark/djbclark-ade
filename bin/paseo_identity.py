@@ -25,12 +25,16 @@ class PaseoIdentityAmbiguousError(RuntimeError):
 
 
 def _process_table():
-    try:
-        result = subprocess.run(
-            ["/bin/ps", "-axo", "pid=,ppid=,uid=,comm="], capture_output=True,
-            check=True, text=True, timeout=2,
-        )
-    except (OSError, subprocess.SubprocessError):
+    for executable in ("/bin/ps", "ps"):
+        try:
+            result = subprocess.run(
+                [executable, "-A", "-o", "pid=,ppid=,uid=,comm="],
+                capture_output=True, check=True, text=True, timeout=2,
+            )
+            break
+        except (OSError, subprocess.SubprocessError):
+            continue
+    else:
         return {}
     table = {}
     for line in result.stdout.splitlines():
@@ -39,7 +43,7 @@ def _process_table():
             pid, parent, uid = map(int, (pid_text, parent_text, uid_text))
         except ValueError:
             continue
-        table[pid] = (parent, uid) if os.path.basename(executable) == "codex" else (parent, -1)
+        table[pid] = (parent, uid) if os.path.basename(executable.strip()) == "codex" else (parent, -1)
     return table
 
 
@@ -51,8 +55,8 @@ def _is_app_server(argv):
 def _selected_env(entries):
     result = {}
     for entry in entries:
-        key, _, value = entry.partition(b"=")
-        if key in _ENV_KEYS:
+        key, separator, value = entry.partition(b"=")
+        if separator and key in _ENV_KEYS:
             name = _ENV_KEYS[key]
             decoded = os.fsdecode(value)
             if name in result and result[name] != decoded:
@@ -65,15 +69,21 @@ def _darwin_procargs(pid):
     # ps eww flattens argv and env with spaces. A cwd can contain spaces or
     # even assignment-shaped text, so use the same kernel data before ps
     # renders it. KERN_PROCARGS2 stores argc, executable, padding, argv, env.
-    sysctl = ctypes.CDLL(None).sysctl
-    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
-    size = ctypes.c_size_t()
-    if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
-        return {}
-    if not 4 <= size.value <= _MAX_PROCARGS:
-        return {}
-    buf = ctypes.create_string_buffer(size.value)
-    if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+    try:
+        sysctl = ctypes.CDLL(None).sysctl
+        sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                           ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+        sysctl.restype = ctypes.c_int
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+        size = ctypes.c_size_t()
+        if sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+            return {}
+        if not 4 <= size.value <= _MAX_PROCARGS:
+            return {}
+        buf = ctypes.create_string_buffer(size.value)
+        if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            return {}
+    except (OSError, AttributeError):
         return {}
     return _parse_darwin_procargs(buf.raw[:size.value])
 
@@ -85,7 +95,10 @@ def _parse_darwin_procargs(raw):
     executable, separator, rest = raw[4:].partition(b"\0")
     if (argc < 2 or not separator or os.path.basename(executable) != b"codex"):
         return {}
-    fields = rest.lstrip(b"\0").split(b"\0", argc)
+    padding = -(len(executable) + 1) % 8
+    if rest[:padding] != b"\0" * padding:
+        return {}
+    fields = rest[padding:].split(b"\0", argc)
     if len(fields) != argc + 1 or not _is_app_server(fields[:argc]):
         return {}
     return _selected_env(fields[argc].split(b"\0"))
@@ -97,7 +110,7 @@ def _read_pid_env(pid):
     if sys.platform.startswith("linux"):
         proc = Path("/proc") / str(pid)
         try:
-            if os.readlink(proc / "exe").rsplit("/", 1)[-1] != "codex":
+            if os.path.basename(os.readlink(proc / "exe").removesuffix(" (deleted)")) != "codex":
                 return {}
             if _is_app_server((proc / "cmdline").read_bytes().split(b"\0")):
                 return _selected_env((proc / "environ").read_bytes().split(b"\0"))

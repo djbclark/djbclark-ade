@@ -86,7 +86,7 @@ def state(tmp_path, monkeypatch):
 def base_env(state_dir, who=None, **extra):
     """A clean environment: no inherited GIT_*/ADE_*/ACP_* variable (this suite runs inside agents too)."""
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("GIT_", "ADE_", "ACP_", "CLAUDE_CODE", "PASEO", "PRE_COMMIT"))}
+           if not k.startswith(("GIT_", "ADE_", "ACP_", "CLAUDE_CODE", "CLAUDECODE", "OMPCODE", "CODEX_", "PASEO", "PRE_COMMIT"))}
     env.update({"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
                 "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
@@ -2095,3 +2095,20 @@ def test_install_is_a_front_door_command_not_a_git_subcommand(tmp_path, state):
     """`git install` is not a git subcommand: only `ade-git-guard install` is."""
     repo = mk_repo(tmp_path, state)
     assert refused77(run(state, ["install"], repo, who="B"))
+
+
+@pytest.mark.parametrize(("hook", "args", "refs"), [
+    ("reference-transaction", ["prepared"], "a b refs/heads/topic\n"),
+    ("pre-push", ["origin", "https://example.invalid/repo"], "refs/heads/topic a refs/heads/topic b\n"),
+])
+@pytest.mark.parametrize("filtered_codex", [False, True])
+def test_ref_hooks_use_same_filtered_codex_marker(state, tmp_path, hook, args, refs, filtered_codex):
+    probe = tmp_path / "guard-probe"
+    probe.write_text("#!/bin/sh\nexit 77\n")
+    probe.chmod(0o700)
+    env = base_env(state, ADE_PYTHON=str(probe))
+    if filtered_codex:
+        env["CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS"] = "1"
+    path = Path(__file__).resolve().parents[1] / "libexec" / "git-hooks" / hook
+    result = subprocess.run([str(path), *args], input=refs, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == (77 if filtered_codex else 0), result.stderr

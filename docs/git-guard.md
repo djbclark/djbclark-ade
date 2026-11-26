@@ -170,10 +170,13 @@ tests); `release` returned 2026-11-09 for the ade-claim archive hook. A claim is
 
 ## Who is guarded
 
-When Codex shell environment filtering leaves `PASEO_AGENT_ID` absent, the shim checks non-read Git calls through
-the Python guard (2026-11-25). A bounded walk recovers identity only from same-user Codex app-server ancestors.
-Conflicting ancestors leave the caller unidentified and guarded. An explicitly blank ID opts out of recovery.
-A standalone call reaching Python returns without installing hooks.
+When Codex shell environment filtering leaves `PASEO_AGENT_ID` absent, an exported `CODEX_*` marker routes
+non-read Git calls through the Python guard. The ref hooks already recognize the same prefix. Codex CLI 0.172.0
+app-server `command/exec` retained `CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS` under both `inherit = "core"` and
+`inherit = "none"` (verified 2026-11-25). Marker-free shells keep the shim's zero-Python path. The marker triggers
+a lookup, and a bounded walk recovers identity only from same-user Codex app-server ancestors. Conflicting
+ancestors leave the caller unidentified and guarded. An explicitly blank ID opts out of recovery. A standalone
+call reaching Python returns without installing hooks.
 
 The shim and the ref hooks (`reference-transaction`, `pre-push`): agents only (`ACP_RUN_AGENT=1`, a nonempty
 `PASEO_AGENT_ID` from native `paseo run` (Wave 6, 2026-11-10), or `ADE_CLAIM_ID` set). A human shell, git's own hooks
